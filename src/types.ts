@@ -11,6 +11,57 @@ export type AgentEvent =
   | { type: "error"; kind: string; message: string }
   | { type: "raw"; line: string };
 
+/** deck-agent sidecar 的 pi 事件（结构化，Rust 原样入库） */
+export type PiEvent = {
+  type: string;
+  taskId?: string;
+  // message_update / message_end 等按需展开的松散字段
+  [key: string]: unknown;
+};
+
+/** 把 pi 事件归一化为可渲染事件（与 CLI 事件同一套 UI） */
+export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
+  const t = ev.type;
+  if (t === "deck_error") {
+    return { type: "error", kind: "other", message: String(ev.message ?? "未知错误") };
+  }
+  if (t === "deck_run_start") return { type: "status", text: "pi 运行时启动" };
+  if (t === "deck_run_end") return { type: "complete", ok: true };
+  if (t === "deck_approval_request") {
+    return { type: "status", text: "等待工具审批…" };
+  }
+  if (t === "tool_execution_start") {
+    return {
+      type: "tool_use",
+      tool: String(ev.toolName ?? "tool"),
+      detail: JSON.stringify(ev.args ?? {}).slice(0, 160),
+    };
+  }
+  if (t === "tool_execution_end") {
+    const out = ev.result as { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
+    const text =
+      out?.content
+        ?.map((c) => c.text ?? "")
+        .join("\n")
+        .slice(0, 400) ?? "";
+    return { type: "tool_result", tool: String(ev.toolName ?? "tool"), ok: !out?.isError, detail: text };
+  }
+  if (t === "message_end" || t === "message_update") {
+    const message = ev.message as
+      | { role?: string; content?: Array<{ type?: string; text?: string }> }
+      | undefined;
+    if (!message || message.role !== "assistant") return null;
+    const text = (message.content ?? [])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("");
+    if (t === "message_update") return null; // 流式增量暂不渲染，end 时整段出
+    if (text.trim()) return { type: "assistant_message", text };
+    return null;
+  }
+  return null;
+}
+
 /** 与 Rust 侧 store::TaskRow 对应（snake_case 透传） */
 export type TaskRow = {
   id: string;

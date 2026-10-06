@@ -9,6 +9,7 @@ export async function startTask(params: {
   prompt: string;
   mode: string | null;
   resumeSessionId: string | null;
+  apiKey?: string;
 }): Promise<string> {
   const { task_id } = await invoke<{ task_id: string }>("start_task", params);
   return task_id;

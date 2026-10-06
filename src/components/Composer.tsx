@@ -82,11 +82,25 @@ export function Composer({
           onChange={onHarnessChange}
           dotColor={accent}
           options={[
+            { value: "deck", label: "AgentDeck Agent" },
             { value: "zcode", label: "ZCode · GLM" },
             { value: "codex", label: "Codex · GPT" },
           ]}
           title="选择 harness"
         />
+
+        {/* deck 执行器：选底层模型（GLM/GPT 经 pi 运行时） */}
+        {harness === "deck" && (
+          <Dropdown
+            value={mode === "gpt" ? "gpt" : "glm"}
+            onChange={onModeChange}
+            options={[
+              { value: "glm", label: "GLM" },
+              { value: "gpt", label: "GPT" },
+            ]}
+            title="底层模型"
+          />
+        )}
 
         {harness === "zcode" && (
           <Dropdown

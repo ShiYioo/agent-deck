@@ -1,7 +1,5 @@
-// bridge 声明为 pub 以便集成测试直接驱动（真机注入验证用）
-#[cfg_attr(not(test), allow(unused))]
-pub mod bridge;
 mod executors;
+mod pi_session;
 mod runner;
 mod store;
 
@@ -15,18 +13,16 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::executors::Harness;
 use crate::store::{Store, TaskRow};
 
-/// bridge.mjs 的落盘位置（setup 时确定后托管）
-pub struct BridgeState {
-    pub file: std::path::PathBuf,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct BridgeStatus {
-    installed: bool,
-    zcode: Option<String>,
-    codex: Option<String>,
-    file: String,
+/// deck-agent.mjs 的位置：优先资源目录（打包后），回退仓库源码（开发模式）。
+fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let p = res_dir.join("agent").join("deck-agent.mjs");
+        if p.exists() {
+            return p;
+        }
+    }
+    // 开发模式：cargo 工作目录是 src-tauri，仓库根在上一级
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent/deck-agent.mjs")
 }
 
 /// 运行中/刚结束的任务：保留子进程句柄用于取消。
@@ -61,12 +57,45 @@ async fn start_task(
     app: AppHandle,
     registry: State<'_, TaskRegistry>,
     store: State<'_, Store>,
+    pi_registry: State<'_, pi_session::PiRegistry>,
     harness: String,
     cwd: String,
     prompt: String,
     mode: Option<String>,
     resume_session_id: Option<String>,
+    api_key: Option<String>,
 ) -> Result<TaskStartInfo, String> {
+    // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
+    if harness.eq_ignore_ascii_case("deck") {
+        let task_id = pi_session_task_id();
+        store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref())?;
+        let params = pi_session::PiRunParams {
+            prompt,
+            model: if mode.as_deref() == Some("gpt") {
+                "gpt"
+            } else {
+                "glm"
+            }
+            .into(),
+            cwd,
+            api_key,
+            mode: "auto".into(),
+        };
+        let sidecar = sidecar_path(&app);
+        let reg = pi_registry.inner().clone();
+        let store2 = store.clone_handle();
+        let task_id2 = task_id.clone();
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result =
+                pi_session::run_pi_task(app2, task_id2, params, store2, reg, sidecar).await;
+            if let Err(e) = result {
+                eprintln!("pi task failed: {e}");
+            }
+        });
+        return Ok(TaskStartInfo { task_id });
+    }
+
     let harness = Harness::parse(&harness)?;
     let task_id = runner::new_task_id(harness);
 
@@ -192,48 +221,23 @@ fn run_login(harness: String) -> Result<(), String> {
         .map_err(|e| format!("唤起登录失败：{e}"))
 }
 
-/// 前端 → Rust：桥接状态（是否已注入两家配置）。
-#[tauri::command]
-fn bridge_status(state: State<'_, BridgeState>) -> Result<BridgeStatus, String> {
-    Ok(BridgeStatus {
-        installed: bridge::zcode_status()?.is_some() || bridge::codex_status()?.is_some(),
-        zcode: bridge::zcode_status()?,
-        codex: bridge::codex_status()?,
-        file: state.file.to_string_lossy().to_string(),
-    })
+fn pi_session_task_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!("deck-{nanos}")
 }
 
-/// 前端 → Rust：安装桥（写入 bridge.mjs + 注入两家配置）。
+/// 前端 → Rust：向 pi 会话发审批/中止指令。
 #[tauri::command]
-fn bridge_install(data_dir: State<'_, BridgeState>) -> Result<BridgeStatus, String> {
-    bridge::zcode_inject(&data_dir.file)?;
-    bridge::codex_inject(&data_dir.file)?;
-    bridge_status_inner(&data_dir.file)
-}
-
-/// 前端 → Rust：卸载桥（从两家配置移除，文件保留）。
-#[tauri::command]
-fn bridge_remove() -> Result<BridgeStatus, String> {
-    bridge::zcode_remove()?;
-    bridge::codex_remove()?;
-    bridge::zcode_status().and(bridge::codex_status())?;
-    Ok(BridgeStatus {
-        installed: false,
-        zcode: None,
-        codex: None,
-        file: String::new(),
-    })
-}
-
-fn bridge_status_inner(file: &std::path::Path) -> Result<BridgeStatus, String> {
-    let zcode = bridge::zcode_status()?;
-    let codex = bridge::codex_status()?;
-    Ok(BridgeStatus {
-        installed: zcode.is_some() || codex.is_some(),
-        zcode,
-        codex,
-        file: file.to_string_lossy().to_string(),
-    })
+fn pi_command(
+    pi_registry: State<'_, pi_session::PiRegistry>,
+    task_id: String,
+    cmd: String,
+    id: Option<String>,
+) -> Result<(), String> {
+    pi_session::send_command(&pi_registry, &task_id, &cmd, id)
 }
 
 pub fn run() {
@@ -243,28 +247,11 @@ pub fn run() {
             let dir = app.path().app_data_dir().expect("no app data dir");
             std::fs::create_dir_all(&dir).expect("failed to create data dir");
             let store = Store::open(&dir.join("agent-deck.db")).expect("failed to open store");
-
-            // bridge.mjs 落盘 + 自动注入两家 MCP 配置（幂等；失败不阻断启动）
-            let bridge_file = bridge::ensure_bridge_file(&dir).expect("failed to write bridge");
-            match (
-                bridge::zcode_inject(&bridge_file),
-                bridge::codex_inject(&bridge_file),
-            ) {
-                (Ok(a), Ok(b)) => println!("bridge injected: zcode={a}, codex={b}"),
-                (a, b) => {
-                    if let Err(e) = a {
-                        eprintln!("bridge zcode inject failed: {e}");
-                    }
-                    if let Err(e) = b {
-                        eprintln!("bridge codex inject failed: {e}");
-                    }
-                }
-            }
-            app.manage(BridgeState { file: bridge_file });
             app.manage(store);
             Ok(())
         })
         .manage(TaskRegistry::default())
+        .manage(pi_session::PiRegistry::default())
         .invoke_handler(tauri::generate_handler![
             start_task,
             cancel_task,
@@ -272,9 +259,7 @@ pub fn run() {
             get_task_events,
             get_task_diff,
             run_login,
-            bridge_status,
-            bridge_install,
-            bridge_remove
+            pi_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

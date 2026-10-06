@@ -1,6 +1,5 @@
 import type { TaskRow } from "../types";
 import { IconBell, IconSearch, IconFolder, IconXCircle } from "./icons";
-import { BridgeToggle } from "./BridgeToggle";
 
 /** 取路径末段作为项目名（与 Codex 的项目分组一致） */
 export function projectName(cwd: string): string {
@@ -13,6 +12,7 @@ export function projectName(cwd: string): string {
 export const HARNESS_ACCENT: Record<string, string> = {
   zcode: "var(--harness-zcode)",
   codex: "var(--harness-codex)",
+  deck: "#8b5cf6", // AgentDeck 自有运行时：紫
 };
 
 /** 左侧边栏：按项目（工作目录）分组的任务列表，带选中信号条与运行脉冲点 */
@@ -92,8 +92,6 @@ export function Sidebar({
           );
         })}
       </div>
-
-      <BridgeToggle />
     </aside>
   );
 }

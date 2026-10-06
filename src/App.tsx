@@ -9,6 +9,7 @@ import {
   startTask,
 } from "./api";
 import type { AgentEvent, LiveTask, TaskRow } from "./types";
+import { piEventToAgentEvent } from "./types";
 import { Sidebar, projectName, HARNESS_ACCENT } from "./components/Sidebar";
 import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
@@ -69,6 +70,27 @@ export default function App() {
         });
         setTimeout(refreshHistory, 300);
       }),
+      // deck（pi 运行时）事件：归一化到统一渲染管道；退出由 task-exit 之外的
+      // deck_run_end 体现，这里同时以 task-exit 兜底
+      listen<Record<string, unknown>>("pi-event", (e) => {
+        const payload = e.payload as { taskId?: string } & Record<string, unknown>;
+        const taskId = payload.taskId;
+        if (!taskId) return;
+        const mapped = piEventToAgentEvent(payload as never);
+        setLive((prev) => {
+          const task = prev[taskId];
+          if (!task) return prev;
+          const events = mapped ? [...task.events, { event: mapped, key: nextKey() }] : task.events;
+          const running =
+            payload.type === "deck_run_end"
+              ? false
+              : payload.type === "deck_run_start"
+                ? true
+                : task.running;
+          return { ...prev, [taskId]: { ...task, events, running } };
+        });
+        if (payload.type === "deck_run_end") setTimeout(refreshHistory, 300);
+      }),
     ];
     return () => {
       unlisteners.forEach((p) => p.then((un) => un()));
@@ -79,6 +101,17 @@ export default function App() {
   const handleSend = async (text: string) => {
     setActionError(null);
     const row = selected ? history.find((t) => t.id === selected) : undefined;
+    const isDeck = !row && harness === "deck";
+    // deck 执行器的 API key：localStorage 简易存储（设置面板在 M4）
+    const apiKey = isDeck
+      ? localStorage.getItem("deck_api_key") || undefined
+      : undefined;
+    if (isDeck && !apiKey) {
+      setActionError(
+        "AgentDeck Agent 需要 API key：在控制台执行 localStorage.setItem('deck_api_key','你的key') 后重试（设置面板开发中）",
+      );
+      return;
+    }
     const canResume = !!row && !!row.session_id && row.status !== "running";
     try {
       const taskId = await startTask({
@@ -87,6 +120,7 @@ export default function App() {
         prompt: text,
         mode: canResume ? row.mode : harness === "zcode" ? mode : null,
         resumeSessionId: canResume ? row.session_id : null,
+        apiKey,
       });
       setLive((prev) => ({
         ...prev,
