@@ -50,3 +50,7 @@ export async function getSetting(key: string): Promise<string | null> {
 export async function setSetting(key: string, value: string): Promise<void> {
   await invoke("set_setting", { key, value });
 }
+
+export async function getDefaultCwd(): Promise<string> {
+  return await invoke<string>("get_default_cwd");
+}

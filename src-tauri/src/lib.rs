@@ -257,8 +257,21 @@ fn set_setting(store: State<'_, Store>, key: String, value: String) -> Result<()
     store.set_setting(&key, &value)
 }
 
+/// 前端 → Rust：默认工作目录。优先设置里的 default_cwd，否则用户家目录。
+#[tauri::command]
+fn get_default_cwd(store: State<'_, Store>) -> String {
+    store
+        .get_setting("default_cwd")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().to_string()))
+        .unwrap_or_else(|| ".".into())
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 数据库放在系统应用数据目录（%APPDATA%/com.shiyoo.agentdeck/）
             let dir = app.path().app_data_dir().expect("no app data dir");
@@ -278,7 +291,8 @@ pub fn run() {
             run_login,
             pi_command,
             get_setting,
-            set_setting
+            set_setting,
+            get_default_cwd
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

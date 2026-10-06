@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelTask,
+  getDefaultCwd,
   getTaskDiff,
   getTaskEvents,
   invokePiCommand,
   listTasks,
   runLogin,
+  setSetting,
   startTask,
 } from "./api";
 import type { AgentEvent, ApprovalRequest, LiveTask, TaskRow } from "./types";
@@ -47,6 +49,13 @@ export default function App() {
 
   const refreshHistory = useCallback(() => {
     listTasks().then(setHistory).catch(() => {});
+  }, []);
+
+  // 工作目录：启动时取默认（设置里的 default_cwd，否则家目录）
+  useEffect(() => {
+    getDefaultCwd()
+      .then((d) => setCwd((cur) => cur || d))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -124,10 +133,15 @@ export default function App() {
     const row = selected ? history.find((t) => t.id === selected) : undefined;
     // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
     const canResume = !!row && !!row.session_id && row.status !== "running";
+    // 记住这次的工作目录，下次启动作为默认
+    const useCwd = canResume ? row.cwd : cwd || ".";
+    if (!canResume && cwd.trim()) {
+      setSetting("default_cwd", cwd.trim()).catch(() => {});
+    }
     try {
       const taskId = await startTask({
         harness: canResume ? row.harness : harness,
-        cwd: canResume ? row.cwd : cwd || ".",
+        cwd: useCwd,
         prompt: text,
         mode: canResume ? row.mode : harness === "zcode" ? mode : mode,
         resumeSessionId: canResume ? row.session_id : null,
@@ -136,7 +150,7 @@ export default function App() {
         ...prev,
         [taskId]: {
           harness: canResume ? row.harness : harness,
-          cwd: canResume ? row.cwd : cwd || ".",
+          cwd: useCwd,
           prompt: text,
           mode: canResume ? row.mode : harness === "zcode" ? mode : null,
           events: [],

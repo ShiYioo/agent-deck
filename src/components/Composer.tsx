@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import { HARNESS_ACCENT } from "./Sidebar";
 import { IconFolder, IconSend, IconPlus } from "./icons";
@@ -40,13 +41,22 @@ export function Composer({
 
   return (
     <div className="composer-card mx-auto w-full max-w-3xl rounded-2xl border border-stone-200 bg-white shadow-[var(--shadow-1)] focus-within:border-stone-300">
-      {/* 目录 chip */}
+      {/* 目录 chip：点击文件夹图标弹出系统选择器，也可直接手输 */}
       <div className="flex items-center gap-2 px-4 pt-3">
-        <IconFolder size={15} className="shrink-0 text-stone-400" />
+        <button
+          onClick={async () => {
+            const picked = await open({ directory: true, multiple: false });
+            if (typeof picked === "string") onCwdChange(picked);
+          }}
+          title="选择文件夹"
+          className="hover-lift shrink-0 rounded p-0.5 text-stone-400 hover:text-stone-700"
+        >
+          <IconFolder size={15} />
+        </button>
         <input
           value={cwd}
           onChange={(e) => onCwdChange(e.target.value)}
-          placeholder="工作目录"
+          placeholder="工作目录（点击左侧文件夹选择，或留空使用默认目录）"
           className="min-w-0 flex-1 rounded-md bg-stone-100 px-2 py-1 text-xs text-stone-600 outline-none placeholder:text-stone-400 focus:ring-1 focus:ring-stone-300"
         />
       </div>
