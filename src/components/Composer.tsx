@@ -187,8 +187,14 @@ export function Composer({
               { value: "", label: "默认模型" },
               ...(discovered.length
                 ? discovered.map((m) => ({ value: m, label: m }))
-                : MODEL_CATALOG[harness]),
+                : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
             ]}
+            searchable
+            groupBy={
+              harness === "opencode"
+                ? (value) => (value.includes("/") ? value.split("/")[0] : "默认")
+                : undefined
+            }
             title="模型"
           />
         )}

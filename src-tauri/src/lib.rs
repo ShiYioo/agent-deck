@@ -344,7 +344,7 @@ fn discover_opencode_models() -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|l| l.contains('/'))
-        .take(60)
+        .take(300)
         .map(str::to_string)
         .collect();
     out.sort();
