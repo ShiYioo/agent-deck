@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { HARNESS_ACCENT } from "./Sidebar";
-import { inTauri } from "../api";
+import { discoverModels, inTauri } from "../api";
 import { IconFolder, IconSend, IconPlus } from "./icons";
 import { Dropdown } from "./Dropdown";
 
@@ -47,6 +47,23 @@ export function Composer({
   };
 
   const accent = HARNESS_ACCENT[harness] ?? "var(--text-3)";
+
+  // 动态发现真实模型列表（codex 读 desktop 状态文件、opencode 调 CLI）；
+  // 失败或为空则回退静态目录
+  const [discovered, setDiscovered] = useState<string[]>([]);
+  useEffect(() => {
+    if (!MODEL_CATALOG[harness]) {
+      setDiscovered([]);
+      return;
+    }
+    let alive = true;
+    discoverModels(harness)
+      .then((models) => alive && setDiscovered(models))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [harness]);
 
   /** 各 harness 的权限模式目录（mode 字段按 harness 有不同取值） */
   const MODE_CATALOG: Record<string, { value: string; label: string }[]> = {
@@ -166,7 +183,12 @@ export function Composer({
           <Dropdown
             value={model}
             onChange={onModelChange}
-            options={MODEL_CATALOG[harness]}
+            options={[
+              { value: "", label: "默认模型" },
+              ...(discovered.length
+                ? discovered.map((m) => ({ value: m, label: m }))
+                : MODEL_CATALOG[harness]),
+            ]}
             title="模型"
           />
         )}

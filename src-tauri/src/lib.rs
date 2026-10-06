@@ -279,6 +279,79 @@ fn set_setting(store: State<'_, Store>, key: String, value: String) -> Result<()
     store.set_setting(&key, &value)
 }
 
+/// 前端 → Rust：动态发现 harness 的真实模型列表。
+/// codex 读 desktop 状态文件（账号实际下发过的模型）；
+/// opencode 调 `opencode models`；其余返回空（前端用内置目录）。
+#[tauri::command]
+fn discover_models(harness: String) -> Vec<String> {
+    match harness.as_str() {
+        "codex" => discover_codex_models(),
+        "opencode" => discover_opencode_models(),
+        _ => Vec::new(),
+    }
+}
+
+const CODEX_MODEL_FALLBACK: &[&str] = &["gpt-5.1-codex", "gpt-5.1", "o4-mini"];
+
+fn discover_codex_models() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".codex").join(".codex-global-state.json");
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            // desktop 的最近使用 + 升级提示列表 = 账号实际可用的模型
+            if let Some(arr) = v
+                .pointer("/electron-persisted-atom-state/composer-recent-model-configurations-v1")
+                .and_then(|x| x.as_array())
+            {
+                for item in arr {
+                    if let Some(m) = item.get("model").and_then(|x| x.as_str()) {
+                        out.push(m.to_string());
+                    }
+                }
+            }
+            if let Some(arr) = v
+                .pointer("/electron-persisted-atom-state/seen-model-upgrade-list")
+                .and_then(|x| x.as_array())
+            {
+                for item in arr {
+                    if let Some(m) = item.as_str() {
+                        out.push(m.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        out = CODEX_MODEL_FALLBACK.iter().map(|s| s.to_string()).collect();
+    }
+    out
+}
+
+fn discover_opencode_models() -> Vec<String> {
+    // opencode 是 .cmd 垫片，Windows 下须经 cmd /C
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "opencode", "models"])
+        .stdin(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains('/'))
+        .take(60)
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// 前端 → Rust：默认工作目录。优先设置里的 default_cwd，否则用户家目录。
 #[tauri::command]
 fn get_default_cwd(store: State<'_, Store>) -> String {
@@ -314,7 +387,8 @@ pub fn run() {
             pi_command,
             get_setting,
             set_setting,
-            get_default_cwd
+            get_default_cwd,
+            discover_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

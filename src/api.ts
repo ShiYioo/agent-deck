@@ -74,3 +74,9 @@ export async function getDefaultCwd(): Promise<string> {
   if (!inTauri) return "";
   return await invoke<string>("get_default_cwd");
 }
+
+/** 动态发现 harness 的真实模型列表（codex 读 desktop 状态、opencode 调 CLI） */
+export async function discoverModels(harness: string): Promise<string[]> {
+  if (!inTauri) return [];
+  return await invoke<string[]>("discover_models", { harness });
+}
