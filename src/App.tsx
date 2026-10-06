@@ -323,7 +323,8 @@ export default function App() {
   const hasQuotaError = selectedEvents.some(
     ({ event: e }) => e.type === "error" && e.kind === "quota",
   );
-  const canShowDiff = !!selectedRow && selectedRow.status === "done";
+  // 运行中也可查看（实时轮询）；完成后为静态快照
+  const canShowDiff = !!selectedRow;
 
   // 会话接力：会话记录压缩为交接简报 → 派给目标 harness（同一工作目录）
   const handoff = async (target: string) => {
@@ -362,7 +363,7 @@ export default function App() {
     }
   };
 
-  const showDiff = async () => {
+  const showDiff = useCallback(async () => {
     if (!selected) return;
     setActionError(null);
     try {
@@ -371,7 +372,15 @@ export default function App() {
     } catch (e) {
       setActionError(String(e));
     }
-  };
+  }, [selected]);
+
+  // DiffModal 实时轮询回调（运行中每 2s 由弹层触发）
+  const refreshDiff = useCallback(() => {
+    if (!selected) return;
+    getTaskDiff(selected)
+      .then((text) => setDiff({ taskId: selected, text }))
+      .catch(() => {});
+  }, [selected]);
 
   return (
     <div className="flex h-full">
@@ -445,9 +454,8 @@ export default function App() {
               </span>
             </div>
 
-            {!selectedRunning && (
-              <div className="flex flex-wrap items-center gap-2 px-6 pt-2 text-xs">
-                {hasAuthError && (
+            <div className="flex flex-wrap items-center gap-2 px-6 pt-2 text-xs">
+                {hasAuthError && !selectedRunning && (
                   <button
                     onClick={() =>
                       runLogin(selectedRow?.harness ?? "zcode").catch(() => {})
@@ -464,15 +472,14 @@ export default function App() {
                     className="flex items-center gap-1.5 rounded-full border border-stone-200 px-3 py-1 text-stone-600 transition-colors hover:bg-stone-100"
                   >
                     <IconDiff size={13} />
-                    查看 Diff
+                    {selectedRunning ? "实时 Diff" : "查看 Diff"}
                   </button>
                 )}
-                {selectedCanResume && (
+                {!selectedRunning && selectedCanResume && (
                   <span className="text-stone-400">在下方输入可续接此会话</span>
                 )}
                 {actionError && <span className="text-red-600">{actionError}</span>}
-              </div>
-            )}
+            </div>
 
             {/* 会话接力：把会话记录交给另一个 harness 继续（额度/登录失败时的正解） */}
             {!selectedRunning && selectedRow && (
@@ -620,6 +627,8 @@ export default function App() {
         {diff && selectedRow && (
           <DiffModal
             text={diff.text}
+            running={selectedRunning}
+            onRefresh={refreshDiff}
             harness={selectedRow.harness}
             model={selectedRow.model}
             mode={selectedRow.mode}
