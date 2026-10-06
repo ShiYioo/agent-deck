@@ -4,6 +4,7 @@
 //! 上补一个分支，前端无需改动。
 
 pub mod codex;
+pub mod opencode;
 pub mod zcode;
 
 use serde::Serialize;
@@ -124,7 +125,9 @@ impl Harness {
         match self {
             // opencode 的 --format json 也是单行 JSON 事件（type 判别 +
             // sessionID 字段），复用 zcode 的防御式解析器
-            Self::Zcode | Self::Opencode => zcode::parse_line(line),
+            Self::Zcode => zcode::parse_line(line),
+            // opencode 专用解析器（事件 schema 抄 VK opencode/types.rs）
+            Self::Opencode => opencode::parse_line(line),
             Self::Codex => codex::parse_line(line),
         }
     }
