@@ -17,6 +17,7 @@ pub struct TaskRow {
     pub cwd: String,
     pub prompt: String,
     pub mode: Option<String>,
+    pub model: Option<String>,
     pub session_id: Option<String>,
     /// running | done | failed | cancelled
     pub status: String,
@@ -64,6 +65,7 @@ impl Store {
                  cwd         TEXT NOT NULL,
                  prompt      TEXT NOT NULL,
                  mode        TEXT,
+                 model       TEXT,
                  session_id  TEXT,
                  status      TEXT NOT NULL DEFAULT 'running',
                  exit_code   INTEGER,
@@ -82,6 +84,8 @@ impl Store {
              );",
         )
         .map_err(|e| e.to_string())?;
+        // 既有数据库补 model 列（重复执行报 duplicate column，忽略即可）
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN model TEXT", []);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -101,12 +105,13 @@ impl Store {
         cwd: &str,
         prompt: &str,
         mode: Option<&str>,
+        model: Option<&str>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute(
-            "INSERT INTO tasks (id, harness, cwd, prompt, mode, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, harness, cwd, prompt, mode, Self::now_millis()],
+            "INSERT INTO tasks (id, harness, cwd, prompt, mode, model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, harness, cwd, prompt, mode, model, Self::now_millis()],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -146,7 +151,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, session_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
@@ -159,11 +164,12 @@ impl Store {
                     cwd: row.get(2)?,
                     prompt: row.get(3)?,
                     mode: row.get(4)?,
-                    session_id: row.get(5)?,
-                    status: row.get(6)?,
-                    exit_code: row.get(7)?,
-                    created_at: row.get(8)?,
-                    finished_at: row.get(9)?,
+                    model: row.get(5)?,
+                    session_id: row.get(6)?,
+                    status: row.get(7)?,
+                    exit_code: row.get(8)?,
+                    created_at: row.get(9)?,
+                    finished_at: row.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -176,7 +182,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, session_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks WHERE id = ?1",
             )
@@ -188,11 +194,12 @@ impl Store {
                 cwd: row.get(2)?,
                 prompt: row.get(3)?,
                 mode: row.get(4)?,
-                session_id: row.get(5)?,
-                status: row.get(6)?,
-                exit_code: row.get(7)?,
-                created_at: row.get(8)?,
-                finished_at: row.get(9)?,
+                model: row.get(5)?,
+                session_id: row.get(6)?,
+                status: row.get(7)?,
+                exit_code: row.get(8)?,
+                created_at: row.get(9)?,
+                finished_at: row.get(10)?,
             })
         })
         .optional()
@@ -266,7 +273,14 @@ mod tests {
     fn create_finish_and_list_task() {
         let store = Store::in_memory().unwrap();
         store
-            .create_task("t1", "zcode", "E:\\demo", "修 bug", Some("yolo"))
+            .create_task(
+                "t1",
+                "zcode",
+                "E:\\demo",
+                "修 bug",
+                Some("yolo"),
+                Some("glm-4.7"),
+            )
             .unwrap();
 
         let row = store.get_task("t1").unwrap().unwrap();
@@ -278,6 +292,7 @@ mod tests {
 
         let row = store.get_task("t1").unwrap().unwrap();
         assert_eq!(row.session_id.as_deref(), Some("sess_9"));
+        assert_eq!(row.model.as_deref(), Some("glm-4.7"));
         assert_eq!(row.status, "done");
         assert_eq!(row.exit_code, Some(0));
 
@@ -288,7 +303,9 @@ mod tests {
     #[test]
     fn events_are_appended_in_order() {
         let store = Store::in_memory().unwrap();
-        store.create_task("t1", "codex", ".", "hi", None).unwrap();
+        store
+            .create_task("t1", "codex", ".", "hi", None, None)
+            .unwrap();
         for i in 0..5 {
             store.append_event("t1", &format!("e{i}")).unwrap();
         }

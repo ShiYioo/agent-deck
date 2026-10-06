@@ -32,6 +32,7 @@ export default function App() {
   // composer 的全局默认值
   const [harness, setHarness] = useState("zcode");
   const [mode, setMode] = useState("yolo");
+  const [model, setModel] = useState("");
   const [cwd, setCwd] = useState("");
 
   // 运行态与历史
@@ -145,7 +146,8 @@ export default function App() {
         harness: canResume ? row.harness : harness,
         cwd: useCwd,
         prompt: text,
-        mode: canResume ? row.mode : harness === "zcode" ? mode : mode,
+        mode: canResume ? row.mode : mode,
+        model: canResume ? row.model : model.trim() || null,
         resumeSessionId: canResume ? row.session_id : null,
       });
       setLive((prev) => ({
@@ -360,9 +362,14 @@ export default function App() {
             cwd={cwd}
             onCwdChange={setCwd}
             harness={harness}
-            onHarnessChange={setHarness}
+            onHarnessChange={(h) => {
+              setHarness(h);
+              setModel(""); // 切 harness 时模型目录不同，重置
+            }}
             mode={mode}
             onModeChange={setMode}
+            model={model}
+            onModelChange={setModel}
             onSend={handleSend}
             disabled={selectedRunning}
             placeholder={selectedCanResume ? "续接此会话…" : "随心输入"}

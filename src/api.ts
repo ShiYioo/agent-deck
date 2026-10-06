@@ -17,8 +17,8 @@ export async function startTask(params: {
   cwd: string;
   prompt: string;
   mode: string | null;
+  model: string | null;
   resumeSessionId: string | null;
-  apiKey?: string;
 }): Promise<string> {
   if (!inTauri) browserStub("派任务");
   const { task_id } = await invoke<{ task_id: string }>("start_task", params);

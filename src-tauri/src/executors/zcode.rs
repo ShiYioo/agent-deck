@@ -253,12 +253,12 @@ fn truncate_json(value: &Value) -> String {
     }
 }
 
-/// 任意深度搜索会话 ID：优先 `session_id`/`sessionId` 字段，
-/// 其次任何以 `sess_` 开头的字符串值。
+/// 任意深度搜索会话 ID：优先 session_id/sessionId/sessionID 字段，
+/// 其次 sess_/ses_ 前缀的字符串值（zcode 与 opencode 各用其一）。
 pub(crate) fn extract_session_id(value: &Value) -> Option<String> {
     match value {
         Value::Object(map) => {
-            for key in ["session_id", "sessionId"] {
+            for key in ["session_id", "sessionId", "sessionID", "thread_id"] {
                 if let Some(Value::String(s)) = map.get(key) {
                     return Some(s.clone());
                 }
@@ -266,7 +266,7 @@ pub(crate) fn extract_session_id(value: &Value) -> Option<String> {
             map.values().find_map(extract_session_id)
         }
         Value::Array(items) => items.iter().find_map(extract_session_id),
-        Value::String(s) if s.starts_with("sess_") => Some(s.clone()),
+        Value::String(s) if s.starts_with("sess_") || s.starts_with("ses_") => Some(s.clone()),
         _ => None,
     }
 }

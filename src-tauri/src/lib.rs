@@ -62,13 +62,14 @@ async fn start_task(
     cwd: String,
     prompt: String,
     mode: Option<String>,
+    model: Option<String>,
     resume_session_id: Option<String>,
     api_key: Option<String>,
 ) -> Result<TaskStartInfo, String> {
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
-        store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref())?;
+        store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref(), None)?;
         // API key 从设置读取（前端设置面板写入），入参与环境变量作为回退
         let api_key = store
             .get_setting("deck_api_key")?
@@ -105,12 +106,26 @@ async fn start_task(
     let harness = Harness::parse(&harness)?;
     let task_id = runner::new_task_id(harness);
 
-    store.create_task(&task_id, harness.name(), &cwd, &prompt, mode.as_deref())?;
+    store.create_task(
+        &task_id,
+        harness.name(),
+        &cwd,
+        &prompt,
+        mode.as_deref(),
+        model.as_deref(),
+    )?;
 
-    let child = runner::spawn(harness, &mode, &cwd, &prompt, resume_session_id.as_deref())
-        .await
-        .inspect_err(|_| store.finish_task(&task_id, "failed", None))
-        .map_err(|e| e.to_string())?;
+    let child = runner::spawn(
+        harness,
+        &mode,
+        &model,
+        &cwd,
+        &prompt,
+        resume_session_id.as_deref(),
+    )
+    .await
+    .inspect_err(|_| store.finish_task(&task_id, "failed", None))
+    .map_err(|e| e.to_string())?;
 
     let mut child = child;
     let stdout = child.stdout.take();

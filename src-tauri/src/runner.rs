@@ -36,12 +36,13 @@ async fn resolve_program(program: &str) -> Result<(PathBuf, Vec<String>), String
 pub async fn spawn(
     harness: Harness,
     mode: &Option<String>,
+    model: &Option<String>,
     cwd: &str,
     prompt: &str,
     resume_session_id: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
     let (program, mut prefix) = resolve_program(harness.program()).await?;
-    let args = harness.build_args(mode.as_deref(), prompt, resume_session_id);
+    let args = harness.build_args(mode.as_deref(), model.as_deref(), prompt, resume_session_id);
     prefix.extend(args);
 
     let mut command = tokio::process::Command::new(program);

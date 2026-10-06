@@ -14,6 +14,7 @@ use serde_json::Value;
 pub enum Harness {
     Zcode,
     Codex,
+    Opencode,
 }
 
 impl Harness {
@@ -21,7 +22,10 @@ impl Harness {
         match s.to_ascii_lowercase().as_str() {
             "zcode" => Ok(Self::Zcode),
             "codex" => Ok(Self::Codex),
-            other => Err(format!("未知的 harness：{other}（当前支持 zcode、codex）")),
+            "opencode" => Ok(Self::Opencode),
+            other => Err(format!(
+                "未知的 harness：{other}（当前支持 zcode、codex、opencode）"
+            )),
         }
     }
 
@@ -29,6 +33,7 @@ impl Harness {
         match self {
             Self::Zcode => "zcode",
             Self::Codex => "codex",
+            Self::Opencode => "opencode",
         }
     }
 
@@ -36,16 +41,19 @@ impl Harness {
         match self {
             Self::Zcode => "zcode",
             Self::Codex => "codex",
+            Self::Opencode => "opencode",
         }
     }
 
     /// 组装无头命令参数（不含程序名本身）。
     ///
     /// - `mode` 仅 zcode 使用（plan/build/edit/yolo），默认 yolo
+    /// - `model` 为 harness 特定格式：codex 用裸模型名，opencode 用 provider/model
     /// - `resume` 传入会话 ID 时生成续接命令
     pub fn build_args(
         &self,
         mode: Option<&str>,
+        model: Option<&str>,
         prompt: &str,
         resume: Option<&str>,
     ) -> Vec<String> {
@@ -74,6 +82,24 @@ impl Harness {
                     args.push("resume".into());
                     args.push(sid.to_string());
                 }
+                if let Some(m) = model {
+                    args.push("-m".into());
+                    args.push(m.to_string());
+                }
+                args.push(prompt.to_string());
+                args
+            }
+            Self::Opencode => {
+                // `opencode run -m provider/model -s <session> [message]`
+                let mut args = vec!["run".to_string(), "--format".into(), "json".into()];
+                if let Some(m) = model {
+                    args.push("-m".into());
+                    args.push(m.to_string());
+                }
+                if let Some(sid) = resume {
+                    args.push("-s".into());
+                    args.push(sid.to_string());
+                }
                 args.push(prompt.to_string());
                 args
             }
@@ -83,7 +109,9 @@ impl Harness {
     /// 解析一行 stdout/stderr 输出为统一事件。
     pub fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         match self {
-            Self::Zcode => zcode::parse_line(line),
+            // opencode 的 --format json 也是单行 JSON 事件（type 判别 +
+            // sessionID 字段），复用 zcode 的防御式解析器
+            Self::Zcode | Self::Opencode => zcode::parse_line(line),
             Self::Codex => codex::parse_line(line),
         }
     }
@@ -185,23 +213,59 @@ mod tests {
 
     #[test]
     fn zcode_args_initial_and_resume() {
-        let args = Harness::Zcode.build_args(Some("build"), "重构 utils", None);
+        let args = Harness::Zcode.build_args(Some("build"), None, "重构 utils", None);
         assert_eq!(args, vec!["--json", "--mode", "build", "-p", "重构 utils"]);
 
-        let args = Harness::Zcode.build_args(None, "继续", Some("sess_1"));
+        let args = Harness::Zcode.build_args(None, None, "继续", Some("sess_1"));
         assert!(args.windows(2).any(|w| w == ["--resume", "sess_1"]));
         assert!(args.contains(&"yolo".to_string()));
     }
 
     #[test]
     fn codex_args_initial_and_resume() {
-        let args = Harness::Codex.build_args(None, "修复 bug", None);
+        let args = Harness::Codex.build_args(None, None, "修复 bug", None);
         assert_eq!(
             args,
             vec!["exec", "--json", "--skip-git-repo-check", "修复 bug"]
         );
 
-        let args = Harness::Codex.build_args(None, "继续", Some("abc123"));
+        let args = Harness::Codex.build_args(None, Some("gpt-5.1"), "继续", Some("abc123"));
         assert!(args.windows(2).any(|w| w == ["resume", "abc123"]));
+        assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.1"]));
+    }
+
+    #[test]
+    fn opencode_args_initial_resume_and_model() {
+        let args = Harness::Opencode.build_args(
+            None,
+            Some("anthropic/claude-sonnet-4-5"),
+            "写个脚本",
+            None,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "--format",
+                "json",
+                "-m",
+                "anthropic/claude-sonnet-4-5",
+                "写个脚本"
+            ]
+        );
+
+        let args = Harness::Opencode.build_args(None, None, "继续", Some("ses_abc"));
+        assert!(args.windows(2).any(|w| w == ["-s", "ses_abc"]));
+        assert!(!args.contains(&"-m".to_string()));
+    }
+
+    #[test]
+    fn opencode_session_id_extraction_via_zcode_parser() {
+        let evs = Harness::Opencode
+            .parse_line(r#"{"type":"error","sessionID":"ses_eeef46","error":{"name":"APIError"}}"#);
+        assert!(evs.contains(&AgentEvent::SessionId {
+            id: "ses_eeef46".into()
+        }));
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
     }
 }

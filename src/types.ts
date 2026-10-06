@@ -84,6 +84,7 @@ export type TaskRow = {
   cwd: string;
   prompt: string;
   mode: string | null;
+  model: string | null;
   session_id: string | null;
   status: "running" | "done" | "failed" | "cancelled";
   exit_code: number | null;

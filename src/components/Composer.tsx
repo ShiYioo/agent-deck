@@ -15,6 +15,8 @@ export function Composer({
   onHarnessChange,
   mode,
   onModeChange,
+  model,
+  onModelChange,
   onSend,
   disabled,
   placeholder,
@@ -25,6 +27,8 @@ export function Composer({
   onHarnessChange: (v: string) => void;
   mode: string;
   onModeChange: (v: string) => void;
+  model: string;
+  onModelChange: (v: string) => void;
   onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
@@ -39,6 +43,22 @@ export function Composer({
   };
 
   const accent = HARNESS_ACCENT[harness] ?? "var(--text-3)";
+
+  /** 各 harness 的模型目录（"" = 走 CLI 账号默认模型） */
+  const MODEL_CATALOG: Record<string, { value: string; label: string }[]> = {
+    codex: [
+      { value: "", label: "默认模型" },
+      { value: "gpt-5.1-codex", label: "gpt-5.1-codex" },
+      { value: "gpt-5.1", label: "gpt-5.1" },
+      { value: "o4-mini", label: "o4-mini" },
+    ],
+    opencode: [
+      { value: "", label: "默认模型" },
+      { value: "anthropic/claude-sonnet-4-5", label: "claude-sonnet-4.5" },
+      { value: "openai/gpt-5.1", label: "gpt-5.1" },
+      { value: "zai-coding-plan/glm-4.6", label: "glm-4.6" },
+    ],
+  };
 
   return (
     <div className="composer-card mx-auto w-full max-w-3xl rounded-2xl border border-stone-200 bg-white shadow-[var(--shadow-1)] focus-within:border-stone-300">
@@ -100,6 +120,7 @@ export function Composer({
             { value: "deck", label: "AgentDeck Agent" },
             { value: "zcode", label: "ZCode · GLM" },
             { value: "codex", label: "Codex · GPT" },
+            { value: "opencode", label: "OpenCode" },
           ]}
           title="选择 harness"
         />
@@ -114,6 +135,16 @@ export function Composer({
               { value: "gpt", label: "GPT" },
             ]}
             title="底层模型"
+          />
+        )}
+
+        {/* codex/opencode：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
+        {MODEL_CATALOG[harness] && (
+          <Dropdown
+            value={model}
+            onChange={onModelChange}
+            options={MODEL_CATALOG[harness]}
+            title="模型"
           />
         )}
 
