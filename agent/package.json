@@ -1,0 +1,11 @@
+{
+  "name": "deck-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AgentDeck \u7edf\u4e00 agent \u8fd0\u884c\u65f6\uff08\u57fa\u4e8e pi \u4e8c\u6b21\u5f00\u53d1\uff09",
+  "packageManager": "pnpm@10.13.1",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.73.1"
+  }
+}
