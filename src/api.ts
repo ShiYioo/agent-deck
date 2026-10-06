@@ -75,6 +75,41 @@ export async function setSetting(key: string, value: string): Promise<void> {
   await invoke("set_setting", { key, value });
 }
 
+export type ModelProfile = {
+  id: string;
+  provider: string;
+  label: string | null;
+  api_key: string;
+  base_url: string | null;
+  enabled: boolean;
+  created_at: number;
+};
+
+export async function listModelProfiles(): Promise<ModelProfile[]> {
+  if (!inTauri) return [];
+  return await invoke<ModelProfile[]>("list_model_profiles", {});
+}
+
+export async function addModelProfile(params: {
+  provider: string;
+  label: string | null;
+  api_key: string;
+  base_url: string | null;
+}): Promise<void> {
+  await invoke("add_model_profile", params);
+}
+
+export async function setModelProfileEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<void> {
+  await invoke("set_model_profile_enabled", { id, enabled });
+}
+
+export async function deleteModelProfile(id: string): Promise<void> {
+  await invoke("delete_model_profile", { id });
+}
+
 export async function getDefaultCwd(): Promise<string> {
   if (!inTauri) return "";
   return await invoke<string>("get_default_cwd");
@@ -84,29 +119,6 @@ export async function getDefaultCwd(): Promise<string> {
 export async function buildSmartHandoffPrompt(taskId: string): Promise<string> {
   if (!inTauri) browserStub("会话接力");
   return await invoke<string>("build_smart_handoff_prompt", { taskId });
-}
-
-export type ModelPoolEntry = {
-  target: string;
-  configured: boolean;
-  source: string | null;
-  masked: string | null;
-};
-
-/** 模型池解析结果（自动扫描本机凭据，透明展示） */
-export async function getModelPool(): Promise<ModelPoolEntry[]> {
-  if (!inTauri) return [];
-  return await invoke<ModelPoolEntry[]>("get_model_pool", {});
-}
-
-/** 扫描本机可复用凭据（opencode auth.json / 环境变量） */
-export async function discoverCredentials(): Promise<
-  { target: string; source: string; key: string }[]
-> {
-  if (!inTauri) return [];
-  return await invoke<
-    { target: string; source: string; key: string }[]
-  >("discover_credentials", {});
 }
 
 /** 动态发现 harness 的真实模型列表（codex 读 desktop 状态、opencode 调 CLI） */

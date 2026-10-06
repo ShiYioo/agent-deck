@@ -13,7 +13,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::executors::Harness;
-use crate::store::{Store, TaskRow};
+use crate::store::{ModelProfile, Store, TaskRow};
 
 /// deck-agent.mjs 的位置：优先资源目录（打包后），回退仓库源码（开发模式）。
 fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
@@ -74,21 +74,21 @@ async fn start_task(
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
         store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref(), None)?;
-        // 双池 key 自动解析：设置覆盖 > 本机凭据（opencode/环境变量）
-        let api_key_glm = resolve_key_for(&store, "glm").map(|(k, _)| k);
-        let api_key_gpt = resolve_key_for(&store, "gpt").map(|(k, _)| k);
-        let base_url_glm = store.get_setting("deck_base_url_glm")?;
-        let base_url_gpt = store.get_setting("deck_base_url_gpt")?;
+        // 模型池：启用的配置档案按创建顺序构成自治链（sidecar 内自动降级）
+        let profiles: Vec<pi_session::ModelProfileParam> = store
+            .list_model_profiles(true)?
+            .into_iter()
+            .map(|p| pi_session::ModelProfileParam {
+                provider: p.provider,
+                key: p.api_key,
+                base_url: p.base_url,
+            })
+            .collect();
         let params = pi_session::PiRunParams {
             prompt,
-            // "auto"：模型自治链由 sidecar 决定（GLM 优先，失败自动降级）
             model: "auto".into(),
             cwd,
-            api_key: None,
-            api_key_glm,
-            api_key_gpt,
-            base_url_glm,
-            base_url_gpt,
+            profiles,
             // approved = 工具执行前经 UI 审批（P2 权限门）
             mode: if permission.as_deref() == Some("approved") {
                 "approved"
@@ -278,34 +278,21 @@ async fn build_smart_handoff_prompt(
         String::from("（该任务无对话记录。请直接执行下方的原始任务。）")
     } else {
         // 压缩模型与 key：优先 GLM，退 GPT（来自设置面板）
-        let glm_key = store.get_setting("deck_api_key_glm").ok().flatten();
-        let gpt_key = store.get_setting("deck_api_key_gpt").ok().flatten();
-        let (model, api_key) =
-            match (
-                glm_key.filter(|k| !k.trim().is_empty()),
-                gpt_key.filter(|k| !k.trim().is_empty()),
-            ) {
-                (Some(k), _) => ("glm", k),
-                (None, Some(k)) => ("gpt", k),
-                (None, None) => return Err(
-                    "未配置 GLM/GPT API Key，无法生成 AI 交接简报——请点右下角齿轮到设置面板填写"
-                        .into(),
-                ),
-            };
+        let profiles = store.list_model_profiles(true)?;
+        let profile = profiles
+            .iter()
+            .find(|p| p.provider == "glm")
+            .or(profiles.first())
+            .ok_or("未配置任何启用的模型档案——请到设置面板添加并启用")?;
 
-        let base_url = if model == "gpt" {
-            store.get_setting("deck_base_url_gpt").ok().flatten()
-        } else {
-            store.get_setting("deck_base_url_glm").ok().flatten()
-        };
         let sidecar = sidecar_path(&app);
         match tokio::time::timeout(
             std::time::Duration::from_secs(90),
             pi_session::pi_summarize_text(
                 &sidecar,
-                model,
-                &api_key,
-                base_url.as_deref(),
+                &profile.provider,
+                &profile.api_key,
+                profile.base_url.as_deref(),
                 &row.cwd,
                 &convo,
             ),
@@ -491,69 +478,74 @@ fn discover_credentials_inner() -> Vec<DiscoveredCredential> {
     out
 }
 
+// ── 模型配置档案（多供应商，用户启停） ─────────────────────
+
+/// 前端 → Rust：模型配置档案列表（空表时自动从本机凭据种子导入）。
 #[tauri::command]
-fn discover_credentials() -> Vec<DiscoveredCredential> {
-    discover_credentials_inner()
-}
-
-/// 解析某目标的可用 key：设置覆盖 > 本机发现（opencode/环境变量）。
-/// 返回 (key, 来源)。对用户透明——手输只是覆盖项。
-fn resolve_key_for(store: &Store, target: &str) -> Option<(String, String)> {
-    let override_key = match target {
-        "glm" => store.get_setting("deck_api_key_glm"),
-        "gpt" => store.get_setting("deck_api_key_gpt"),
-        _ => Ok(None),
+fn list_model_profiles(store: State<'_, Store>) -> Result<Vec<ModelProfile>, String> {
+    let profiles = store.list_model_profiles(false)?;
+    if !profiles.is_empty() {
+        return Ok(profiles);
     }
-    .ok()
-    .flatten()
-    .filter(|k| !k.trim().is_empty());
-    if let Some(k) = override_key {
-        return Some((k, "手动配置".into()));
+    // 自动种子：本机可发现的凭据 → 启用档案（opencode 登录的 key 等）
+    let base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    for (i, c) in discover_credentials_inner().into_iter().enumerate() {
+        store.add_model_profile(
+            &format!("mp-{}-{i}", base),
+            &c.target,
+            Some(&format!("自动导入 · {}", c.source)),
+            &c.key,
+            None,
+            true,
+        )?;
     }
-    discover_credentials_inner()
-        .into_iter()
-        .find(|c| c.target == target)
-        .map(|c| (c.key, c.source))
+    store.list_model_profiles(false)
 }
 
-fn mask_key(k: &str) -> String {
-    if k.chars().count() <= 8 {
-        "•••".into()
-    } else {
-        let chars: Vec<char> = k.chars().collect();
-        format!("{}…{}", chars[..4].iter().collect::<String>(), chars[chars.len() - 4..].iter().collect::<String>())
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ModelPoolEntry {
-    pub target: String,
-    pub configured: bool,
-    pub source: Option<String>,
-    pub masked: Option<String>,
-}
-
-/// 前端 → Rust：模型池解析结果（透明展示，无需手填）。
+/// 前端 → Rust：新增模型配置档案。
 #[tauri::command]
-fn get_model_pool(store: State<'_, Store>) -> Vec<ModelPoolEntry> {
-    ["glm", "gpt"]
-        .iter()
-        .map(|target| match resolve_key_for(&store, target) {
-            Some((key, source)) => ModelPoolEntry {
-                target: target.to_string(),
-                configured: true,
-                source: Some(source),
-                masked: Some(mask_key(&key)),
-            },
-            None => ModelPoolEntry {
-                target: target.to_string(),
-                configured: false,
-                source: None,
-                masked: None,
-            },
-        })
-        .collect()
+fn add_model_profile(
+    store: State<'_, Store>,
+    provider: String,
+    label: Option<String>,
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<ModelProfile, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let id = format!("mp-{nanos}");
+    store.add_model_profile(
+        &id,
+        &provider,
+        label.as_deref(),
+        &api_key,
+        base_url.as_deref(),
+        true,
+    )?;
+    store
+        .get_model_profile(&id)?
+        .ok_or_else(|| "创建后未找到档案".into())
+}
+
+/// 前端 → Rust：启停配置档案。
+#[tauri::command]
+fn set_model_profile_enabled(
+    store: State<'_, Store>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    store.set_model_profile_enabled(&id, enabled)
+}
+
+/// 前端 → Rust：删除配置档案。
+#[tauri::command]
+fn delete_model_profile(store: State<'_, Store>, id: String) -> Result<(), String> {
+    store.delete_model_profile(&id)
 }
 
 /// 前端 → Rust：默认工作目录。优先最近一次使用的目录，
@@ -603,11 +595,13 @@ pub fn run() {
             set_setting,
             get_default_cwd,
             discover_models,
-            discover_credentials,
-            get_model_pool,
             build_smart_handoff_prompt,
             diff_watch::diff_watch_start,
-            diff_watch::diff_watch_stop
+            diff_watch::diff_watch_stop,
+            list_model_profiles,
+            add_model_profile,
+            set_model_profile_enabled,
+            delete_model_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

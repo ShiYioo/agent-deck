@@ -11,6 +11,18 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ModelProfile {
+    pub id: String,
+    pub provider: String,
+    pub label: Option<String>,
+    pub api_key: String,
+    pub base_url: Option<String>,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskRow {
     pub id: String,
     pub harness: String,
@@ -81,6 +93,15 @@ impl Store {
              CREATE TABLE IF NOT EXISTS settings (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS model_profiles (
+                 id         TEXT PRIMARY KEY,
+                 provider   TEXT NOT NULL,
+                 label      TEXT,
+                 api_key    TEXT NOT NULL,
+                 base_url   TEXT,
+                 enabled    INTEGER NOT NULL DEFAULT 1,
+                 created_at INTEGER NOT NULL
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -233,6 +254,86 @@ impl Store {
         .map_err(|e| e.to_string())
     }
 
+    // ── 模型配置档案（多供应商，用户启停） ─────────────────────
+
+    pub fn list_model_profiles(&self, enabled_only: bool) -> Result<Vec<ModelProfile>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let sql = if enabled_only {
+            "SELECT id, provider, label, api_key, base_url, enabled, created_at
+             FROM model_profiles WHERE enabled = 1 ORDER BY created_at ASC"
+        } else {
+            "SELECT id, provider, label, api_key, base_url, enabled, created_at
+             FROM model_profiles ORDER BY created_at ASC"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ModelProfile {
+                    id: row.get(0)?,
+                    provider: row.get(1)?,
+                    label: row.get(2)?,
+                    api_key: row.get(3)?,
+                    base_url: row.get(4)?,
+                    enabled: row.get::<_, i64>(5)? != 0,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    pub fn get_model_profile(&self, id: &str) -> Result<Option<ModelProfile>, String> {
+        self.list_model_profiles(false)
+            .map(|all| all.into_iter().find(|p| p.id == id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_model_profile(
+        &self,
+        id: &str,
+        provider: &str,
+        label: Option<&str>,
+        api_key: &str,
+        base_url: Option<&str>,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "INSERT INTO model_profiles (id, provider, label, api_key, base_url, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                provider,
+                label,
+                api_key,
+                base_url,
+                enabled as i64,
+                Self::now_millis()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_model_profile_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "UPDATE model_profiles SET enabled = ?2 WHERE id = ?1",
+            params![id, enabled as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_model_profile(&self, id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute("DELETE FROM model_profiles WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// 事件计数（主要供测试与调试）。
     #[cfg(test)]
     pub fn get_event_count(&self, task_id: &str) -> Result<i64, String> {
@@ -318,6 +419,28 @@ mod tests {
         let page2 = store.get_events("t1", 3, 3).unwrap();
         assert_eq!(page1, vec!["e0", "e1", "e2"]);
         assert_eq!(page2, vec!["e3", "e4"]);
+    }
+
+    #[test]
+    fn model_profiles_crud_and_enabled_filter() {
+        let store = Store::in_memory().unwrap();
+        store
+            .add_model_profile("p1", "glm", Some("主力"), "key-glm", None, true)
+            .unwrap();
+        store
+            .add_model_profile("p2", "gpt", None, "key-gpt", Some("https://x"), true)
+            .unwrap();
+
+        assert_eq!(store.list_model_profiles(false).unwrap().len(), 2);
+        assert_eq!(store.list_model_profiles(true).unwrap().len(), 2);
+
+        store.set_model_profile_enabled("p2", false).unwrap();
+        let enabled = store.list_model_profiles(true).unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].id, "p1");
+
+        store.delete_model_profile("p1").unwrap();
+        assert_eq!(store.list_model_profiles(false).unwrap().len(), 1);
     }
 
     #[test]
