@@ -78,6 +78,12 @@ async fn start_task(
             .or(api_key)
             .or_else(|| std::env::var("ZAI_API_KEY").ok())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        // API 端点同样从设置读取（空 = provider 默认）
+        let base_url = if mode.as_deref() == Some("gpt") {
+            store.get_setting("deck_base_url_gpt")?
+        } else {
+            store.get_setting("deck_base_url_glm")?
+        };
         let params = pi_session::PiRunParams {
             prompt,
             model: if mode.as_deref() == Some("gpt") {
@@ -88,6 +94,7 @@ async fn start_task(
             .into(),
             cwd,
             api_key,
+            base_url,
             // approved = 工具执行前经 UI 审批（P2 权限门）
             mode: if permission.as_deref() == Some("approved") {
                 "approved"
@@ -292,10 +299,22 @@ async fn build_smart_handoff_prompt(
                 ),
             };
 
+        let base_url = if model == "gpt" {
+            store.get_setting("deck_base_url_gpt").ok().flatten()
+        } else {
+            store.get_setting("deck_base_url_glm").ok().flatten()
+        };
         let sidecar = sidecar_path(&app);
         match tokio::time::timeout(
             std::time::Duration::from_secs(90),
-            pi_session::pi_summarize_text(&sidecar, model, &api_key, &row.cwd, &convo),
+            pi_session::pi_summarize_text(
+                &sidecar,
+                model,
+                &api_key,
+                base_url.as_deref(),
+                &row.cwd,
+                &convo,
+            ),
         )
         .await
         {
@@ -416,6 +435,69 @@ fn discover_opencode_models() -> Vec<String> {
     out
 }
 
+/// 本机发现的可复用凭据（避免用户重复配 key）
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DiscoveredCredential {
+    /// glm | gpt
+    pub target: String,
+    /// 来源描述（如 "opencode（zhipuai-coding-plan）"）
+    pub source: String,
+    pub key: String,
+}
+
+/// 前端 → Rust：扫描本机可复用的明文凭据。
+/// ZCode 的 credentials.json 是机器绑定加密存储（enc: 前缀）读不了；
+/// opencode 的 auth.json 是明文，ZCode 登录用户的 coding-plan key 就在里面。
+#[tauri::command]
+fn discover_credentials() -> Vec<DiscoveredCredential> {
+    let mut out: Vec<DiscoveredCredential> = Vec::new();
+    let mut push = |target: &str, source: &str, key: &str| {
+        if !key.trim().is_empty()
+            && !key.starts_with("enc:")
+            && !out.iter().any(|c| c.target == target)
+        {
+            out.push(DiscoveredCredential {
+                target: target.to_string(),
+                source: source.to_string(),
+                key: key.trim().to_string(),
+            });
+        }
+    };
+
+    if let Some(home) = dirs::home_dir() {
+        let path = home
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json");
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(map) = v.as_object()
+        {
+            for (provider, entry) in map {
+                let key = entry
+                    .get("key")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default();
+                let lower = provider.to_lowercase();
+                if lower.contains("zhipuai") || lower.contains("zai") {
+                    push("glm", &format!("opencode（{provider}）"), key);
+                } else if lower.contains("openai") {
+                    push("gpt", &format!("opencode（{provider}）"), key);
+                }
+            }
+        }
+    }
+    if let Ok(k) = std::env::var("ZAI_API_KEY") {
+        push("glm", "环境变量 ZAI_API_KEY", &k);
+    }
+    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+        push("gpt", "环境变量 OPENAI_API_KEY", &k);
+    }
+    out
+}
+
 /// 前端 → Rust：默认工作目录。优先设置里的 default_cwd，否则用户家目录。
 #[tauri::command]
 fn get_default_cwd(store: State<'_, Store>) -> String {
@@ -453,6 +535,7 @@ pub fn run() {
             set_setting,
             get_default_cwd,
             discover_models,
+            discover_credentials,
             build_smart_handoff_prompt
         ])
         .run(tauri::generate_context!())

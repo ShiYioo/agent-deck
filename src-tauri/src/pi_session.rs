@@ -26,6 +26,9 @@ pub struct PiRunParams {
     pub api_key: Option<String>,
     /// "auto"（全自动）| "approved"（工具执行前审批）
     pub mode: String,
+    /// OpenAI 兼容端点（可选，空 = 各 provider 默认）
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// 每个 task_id 一个发送端：往 sidecar stdin 写指令。
@@ -94,6 +97,7 @@ pub async fn run_pi_task(
         "model": params.model,
         "cwd": params.cwd,
         "apiKey": params.api_key,
+        "baseUrl": params.base_url,
         "mode": params.mode,
     });
     stdin
@@ -209,6 +213,7 @@ pub async fn pi_summarize_text(
     sidecar_js: &std::path::Path,
     model: &str,
     api_key: &str,
+    base_url: Option<&str>,
     cwd: &str,
     text: &str,
 ) -> Result<String, String> {
@@ -242,6 +247,7 @@ pub async fn pi_summarize_text(
         "text": text,
         "model": model,
         "apiKey": api_key,
+        "baseUrl": base_url,
         "cwd": cwd,
     });
     stdin

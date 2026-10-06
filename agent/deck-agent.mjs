@@ -166,31 +166,32 @@ const DELEGATE_TOOLS = [
 
 // ── 模型解析：GLM / GPT（pi-ai ModelRegistry 风格的内置目录） ──────
 
-function resolveModel(name, apiKey) {
+function resolveModel(name, apiKey, baseUrl) {
   // pi-ai 的 Model 对象最小面：provider/id/apiKey/baseURL
   if (name === "glm") {
     return {
       provider: "zai",
       id: "glm-4.7",
       apiKey,
-      baseUrl: process.env.ZAI_BASE_URL || "https://api.z.ai/api/paas/v4",
+      // Z.ai coding-plan key 配套的 OpenAI 兼容端点
+      baseUrl: baseUrl || process.env.ZAI_BASE_URL || "https://api.z.ai/api/coding/paas/v4",
     };
   }
   return {
     provider: "openai",
     id: "gpt-5.1",
     apiKey,
-    baseUrl: process.env.OPENAI_BASE_URL,
+    baseUrl: baseUrl || process.env.OPENAI_BASE_URL,
   };
 }
 
 // ── 会话生命周期 ─────────────────────────────────────────────
 
-async function ensureSession({ model, apiKey, cwd, mode }) {
-  const want = JSON.stringify([model, Boolean(apiKey), cwd, mode]);
+async function ensureSession({ model, apiKey, baseUrl, cwd, mode }) {
+  const want = JSON.stringify([model, Boolean(apiKey), baseUrl, cwd, mode]);
   if (session && currentModel === want) return session;
 
-  const resolved = resolveModel(model, apiKey);
+  const resolved = resolveModel(model, apiKey, baseUrl);
   if (!resolved.apiKey) {
     throw new Error(
       `缺少 ${model === "glm" ? "ZAI_API_KEY" : "OPENAI_API_KEY"}（指令里带 apiKey 或环境变量均可）`,
@@ -297,6 +298,7 @@ async function handle(msg) {
         const s = await ensureSession({
           model: msg.model || "glm",
           apiKey: msg.apiKey,
+          baseUrl: msg.baseUrl,
           cwd: msg.cwd || process.cwd(),
           mode: "auto",
         });
