@@ -186,7 +186,12 @@ export function Composer({
             options={[
               { value: "", label: "默认模型" },
               ...(discovered.length
-                ? discovered.map((m) => ({ value: m, label: m }))
+                ? discovered.map((m) => ({
+                    value: m,
+                    label: m,
+                    // opencode 的 free 模型（如 -free 后缀）标注免费徽章
+                    tag: /free/i.test(m) ? "免费" : undefined,
+                  }))
                 : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
             ]}
             searchable

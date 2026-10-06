@@ -5,6 +5,8 @@ import { IconCheck, IconChevronDown, IconSearch } from "./icons";
 export type DropdownOption = {
   value: string;
   label: string;
+  /** 小徽章（如「免费」），渲染在标签右侧 */
+  tag?: string;
 };
 
 /** 自绘下拉框：药丸触发器 + 向上弹出的菜单（composer 贴近视口底部）。
@@ -165,6 +167,11 @@ export function Dropdown({
         }`}
       >
         <span className="min-w-0 flex-1 truncate">{o.label}</span>
+        {o.tag && (
+          <span className="shrink-0 rounded bg-emerald-100 px-1 py-0.5 text-[9px] font-medium text-emerald-700">
+            {o.tag}
+          </span>
+        )}
         {selected && <IconCheck size={13} className="shrink-0 text-emerald-600" />}
       </button>
     );
