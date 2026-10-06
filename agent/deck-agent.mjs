@@ -19,11 +19,14 @@
 import { createAgentSession, createCodingTools } from "@earendil-works/pi-coding-agent";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 
 let session = null;
 let currentModel = null;
-let pendingApproval = null; // { id, resolve }
-let aborting = false;
+let pendingApproval = null; // { resolve, info: {id, tool, args} }
+let currentCwd = null;
+let currentApiKey = null;
+let currentModeName = null;
 
 function emit(event) {
   process.stdout.write(JSON.stringify(event) + "\n");
@@ -32,6 +35,134 @@ function emit(event) {
 function deckEvent(type, extra = {}) {
   emit({ type: `deck_${type}`, ...extra });
 }
+
+// ── 委派工具：pi agent 原生调用 zcode/codex CLI（互调语义） ────────
+
+function runHeadless(program, args, cwd, timeoutMs = 10 * 60 * 1000) {
+  return new Promise((resolve) => {
+    const options = {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, NO_COLOR: "1" },
+      windowsHide: true,
+    };
+    if (cwd) options.cwd = cwd;
+
+    let child;
+    if (process.platform === "win32") {
+      const q = (s) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+      const line = [program, ...args].map(q).join(" ");
+      child = spawn("cmd.exe", ["/d", "/s", "/c", `"${line}"`], {
+        ...options,
+        windowsVerbatimArguments: true,
+      });
+    } else {
+      child = spawn(program, args, options);
+    }
+
+    let out = "";
+    let errTail = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ code: -1, out, errTail: `委派超时（${timeoutMs / 60000} 分钟）` });
+    }, timeoutMs);
+
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (errTail = (d.toString() + errTail).slice(0, 1500)));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ code: -1, out, errTail: e.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, out, errTail });
+    });
+  });
+}
+
+/** 从无头 CLI 的 JSONL 输出提取最终回复（与主程序解析语义一致） */
+function extractFinalText(raw) {
+  let text = null;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const v = JSON.parse(trimmed);
+      const kind = v.kind ?? v.type;
+      const inner = v.message ?? v;
+      if (kind === "assistant" || kind === "assistant_message") {
+        const c = inner?.content ?? v.content;
+        if (typeof c === "string") text = c;
+        else if (Array.isArray(c)) {
+          const t = c.filter((b) => b?.type === "text").map((b) => b.text).join("");
+          if (t) text = t;
+        }
+      }
+      if (kind === "item.completed" && inner?.item?.type === "agent_message" && inner.item.text) {
+        text = inner.item.text;
+      }
+    } catch {}
+  }
+  return text;
+}
+
+const DELEGATE_TOOLS = [
+  {
+    name: "delegate_to_zcode",
+    label: "委派给 ZCode (GLM)",
+    description:
+      "把一个自包含的编码子任务委派给 ZCode（GLM）无头执行，阻塞直到完成并返回最终结论。适合实现类子任务。",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "任务描述，必须自包含（对方看不到当前对话）" },
+        cwd: { type: "string", description: "工作目录，默认当前项目目录" },
+      },
+      required: ["prompt"],
+    },
+    execute: async (_id, args) => {
+      const r = await runHeadless(
+        "zcode",
+        ["--json", "--mode", "yolo", "-p", String(args?.prompt ?? "")],
+        args?.cwd || currentCwd,
+      );
+      const text = extractFinalText(r.out);
+      const ok = r.code === 0 && !/invalid token|unauthorized/i.test(r.errTail);
+      const parts = [ok ? "【ZCode 完成】" : "【ZCode 失败】"];
+      if (!ok && r.errTail.trim()) parts.push(r.errTail.trim());
+      if (text) parts.push(text);
+      else if (ok && !text) parts.push("（无文本输出）");
+      return { content: [{ type: "text", text: parts.join("\n\n") }], isError: !ok };
+    },
+  },
+  {
+    name: "delegate_to_codex",
+    label: "委派给 Codex (GPT)",
+    description:
+      "把一个自包含的编码子任务委派给 Codex（GPT）无头执行，阻塞直到完成并返回最终结论。适合推理/算法类子任务。",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "任务描述，必须自包含" },
+        cwd: { type: "string", description: "工作目录，默认当前项目目录" },
+      },
+      required: ["prompt"],
+    },
+    execute: async (_id, args) => {
+      const r = await runHeadless(
+        "codex",
+        ["exec", "--json", "--skip-git-repo-check", String(args?.prompt ?? "")],
+        args?.cwd || currentCwd,
+      );
+      const text = extractFinalText(r.out);
+      const ok = r.code === 0;
+      const parts = [ok ? "【Codex 完成】" : "【Codex 失败】"];
+      if (!ok && r.errTail.trim()) parts.push(r.errTail.trim());
+      if (text) parts.push(text);
+      else if (ok && !text) parts.push("（无文本输出）");
+      return { content: [{ type: "text", text: parts.join("\n\n") }], isError: !ok };
+    },
+  },
+];
 
 // ── 模型解析：GLM / GPT（pi-ai ModelRegistry 风格的内置目录） ──────
 
@@ -71,12 +202,20 @@ async function ensureSession({ model, apiKey, cwd, mode }) {
     session = null;
   }
 
-  const tools = createCodingTools();
+  currentCwd = cwd || process.cwd();
+  const builtin = createCodingTools();
+  const gated = mode === "approved" ? builtin.map(wrapWithGate) : builtin;
   session = await createAgentSession({
-    cwd: cwd || process.cwd(),
+    cwd: currentCwd,
     model: resolved,
-    // 权限门在 approved 模式下由 deck_approval 流程接管
-    customTools: mode === "approved" ? tools.map(wrapWithGate) : tools,
+    // 委派工具始终注册（互调是 deck 运行时的一等能力）；
+    // approved 模式下委派工具同样过权限门
+    customTools: [
+      ...gated,
+      ...(mode === "approved"
+        ? DELEGATE_TOOLS.map(wrapWithGate)
+        : DELEGATE_TOOLS),
+    ],
     noTools: undefined,
   });
   currentModel = want;
@@ -87,15 +226,23 @@ async function ensureSession({ model, apiKey, cwd, mode }) {
   return session;
 }
 
-/** 工具包装：执行前发审批请求，等 stdin 的 approve/abort */
+/** 工具包装：执行前发审批请求（带工具名与参数），等 stdin 的 approve/reject */
 function wrapWithGate(tool) {
   return {
     ...tool,
     execute: async (toolCallId, args, signal, onUpdate) => {
       const id = toolCallId || randomUUID();
-      pendingApproval = { id, resolve: null };
       const approved = await new Promise((resolve) => {
-        pendingApproval.resolve = resolve;
+        pendingApproval = {
+          resolve,
+          info: { id, tool: tool.name ?? "tool", args },
+        };
+        emit({
+          type: "deck_approval_request",
+          id,
+          tool: tool.name ?? "tool",
+          args,
+        });
       });
       pendingApproval = null;
       if (!approved) {
