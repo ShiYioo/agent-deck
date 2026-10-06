@@ -1,18 +1,56 @@
 @import "tailwindcss";
 
-/* Codex 风格亮色主题 */
+/* ============================================================
+   AgentDeck 设计系统 · Design Tokens
+   原则：中性纸面 + 双品牌信号色 + 三档动效时长 + 尊重系统减弱动效
+   详见 docs/DESIGN.md
+   ============================================================ */
+
+:root {
+  /* —— 色板：纸面中性色 —— */
+  --bg: #ffffff;
+  --bg-subtle: #f7f7f8;
+  --surface: #ffffff;
+  --border: rgba(24, 24, 27, 0.08);
+  --border-strong: rgba(24, 24, 27, 0.16);
+  --text-1: #18181b;
+  --text-2: #52525b;
+  --text-3: #a1a1aa;
+
+  /* —— 色板：品牌信号色（harness 身份色，贯穿全站） —— */
+  --harness-zcode: #059669; /* ZCode · GLM：翠绿 */
+  --harness-codex: #0284c7; /* Codex · GPT：天蓝 */
+
+  /* —— 语义色 —— */
+  --danger: #dc2626;
+  --warn: #d97706;
+  --ok: #059669;
+
+  /* —— 动效：三档时长 + 出场曲线 —— */
+  --dur-1: 150ms; /* 微交互：hover、按钮 */
+  --dur-2: 240ms; /* 元素进出场：事件、弹层 */
+  --dur-3: 420ms; /* 场景切换：空态↔任务视图 */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* 快出缓停 */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1); /* 轻微回弹 */
+
+  /* —— 阴影：两层温和阴影 —— */
+  --shadow-1: 0 1px 2px rgba(24, 24, 27, 0.05);
+  --shadow-2: 0 2px 8px rgba(24, 24, 27, 0.06), 0 12px 32px rgba(24, 24, 27, 0.07);
+}
+
 html,
 body,
 #root {
   height: 100%;
-  background-color: #ffffff;
-  color: #1a1d21;
+  background: var(--bg);
+  color: var(--text-1);
   font-family:
     system-ui,
     -apple-system,
     "Segoe UI",
     "Microsoft YaHei",
     sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* 细滚动条 */
@@ -26,4 +64,235 @@ body,
 }
 *::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* ============================================================
+   动效关键帧
+   ============================================================ */
+
+@keyframes ev-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes scene-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 思考流光：文字上有光带缓慢扫过 */
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* 运行中脉冲：圆点外圈扩散 */
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 7px rgba(59, 130, 246, 0);
+  }
+}
+
+/* 运行中三点打字指示 */
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  30% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+/* ============================================================
+   动效工具类
+   ============================================================ */
+
+/* 场景切换（空态↔任务视图） */
+.anim-scene {
+  animation: scene-in var(--dur-3) var(--ease-out) both;
+}
+
+/* 单元素进出场 */
+.anim-rise {
+  animation: rise-in var(--dur-3) var(--ease-out) both;
+}
+.anim-fade {
+  animation: fade-in var(--dur-2) var(--ease-out) both;
+}
+
+/* 日志事件滑入；支持 --stagger 排队 */
+.ev-in {
+  animation: ev-in var(--dur-2) var(--ease-out) both;
+  animation-delay: var(--stagger, 0ms);
+}
+
+/* 弹层 */
+.anim-backdrop {
+  animation: fade-in var(--dur-1) ease-out both;
+}
+.anim-pop {
+  animation: pop-in var(--dur-2) var(--ease-spring) both;
+}
+
+/* 思考流光文字 */
+.shimmer-text {
+  background: linear-gradient(90deg, #a1a1aa 30%, #52525b 50%, #a1a1aa 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.8s linear infinite;
+}
+
+/* 运行中脉冲点 */
+.pulse-dot {
+  position: relative;
+  background-color: #3b82f6;
+  animation: pulse-ring 2s var(--ease-out) infinite;
+}
+
+/* 三点打字指示 */
+.typing-dots span {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--text-3);
+  margin-right: 3px;
+  animation: typing-dot 1.2s ease-in-out infinite;
+}
+.typing-dots span:nth-child(2) {
+  animation-delay: 150ms;
+}
+.typing-dots span:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+/* 空态点阵底纹：中心聚焦、边缘淡出 */
+.grid-bg {
+  background-image: radial-gradient(circle, rgba(24, 24, 27, 0.055) 1px, transparent 1px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 42%, black 30%, transparent 78%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 42%, black 30%, transparent 78%);
+}
+
+/* 微交互：通用 hover 抬升 */
+.hover-lift {
+  transition:
+    transform var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) ease,
+    color var(--dur-1) ease;
+}
+.hover-lift:hover {
+  transform: translateY(-1px);
+}
+.hover-lift:active {
+  transform: translateY(0) scale(0.97);
+}
+
+/* Composer 聚焦态：边框深化 + 阴影抬升 */
+.composer-card {
+  transition:
+    border-color var(--dur-1) ease,
+    box-shadow var(--dur-2) var(--ease-out);
+}
+.composer-card:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-2);
+}
+
+/* 侧栏选中项左侧信号条 */
+.side-item {
+  position: relative;
+  transition:
+    background-color var(--dur-1) ease,
+    color var(--dur-1) ease;
+}
+.side-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 18%;
+  bottom: 18%;
+  width: 2.5px;
+  border-radius: 2px;
+  background: var(--harness-accent, transparent);
+  opacity: 0;
+  transition: opacity var(--dur-1) ease;
+}
+.side-item[data-active="true"]::before {
+  opacity: 1;
+}
+
+/* 日志自动滚动走平滑曲线 */
+.log-scroll {
+  scroll-behavior: smooth;
+}
+
+/* 尊重系统「减弱动效」：一切动画与过渡直接关闭 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -1,40 +1,73 @@
 import type { AgentEvent } from "../types";
 
-/** 单条事件渲染：不同事件类型不同颜色与图标（亮色主题） */
-export function EventLine({ event }: { event: AgentEvent }) {
+/** 单条事件渲染：入场滑入动画 + 语义配色；thinking 用流光 */
+export function EventLine({
+  event,
+  stagger = 0,
+}: {
+  event: AgentEvent;
+  stagger?: number;
+}) {
+  const style = { ["--stagger" as string]: `${Math.min(stagger, 12) * 24}ms` };
+
   switch (event.type) {
     case "user_message":
-      return <div className="whitespace-pre-wrap font-medium text-blue-600">▶ {event.text}</div>;
+      return (
+        <div className="ev-in whitespace-pre-wrap font-medium text-blue-600" style={style}>
+          ▶ {event.text}
+        </div>
+      );
     case "assistant_message":
-      return <div className="whitespace-pre-wrap text-zinc-900">{event.text}</div>;
+      return (
+        <div className="ev-in whitespace-pre-wrap text-zinc-900" style={style}>
+          {event.text}
+        </div>
+      );
     case "thinking":
       return (
-        <div className="whitespace-pre-wrap italic text-zinc-400">💭 {event.text}</div>
+        <div className="ev-in whitespace-pre-wrap" style={style}>
+          <span className="shimmer-text italic">💭 {event.text}</span>
+        </div>
       );
     case "tool_use":
       return (
-        <div className="text-amber-700">
+        <div className="ev-in text-amber-700" style={style}>
           🔧 [{event.tool}] {event.detail}
         </div>
       );
     case "tool_result":
       return (
         <div
-          className={`whitespace-pre-wrap ${event.ok ? "text-zinc-500" : "text-red-600"}`}
+          className={`ev-in whitespace-pre-wrap ${event.ok ? "text-zinc-500" : "text-red-600"}`}
+          style={style}
         >
           {event.ok ? "✓" : "✗"} {event.detail}
         </div>
       );
     case "status":
-      return <div className="text-zinc-400">{event.text}</div>;
+      return (
+        <div className="ev-in text-zinc-400" style={style}>
+          {event.text}
+        </div>
+      );
     case "complete":
-      return <div className="text-emerald-600">✅ 任务{event.ok ? "完成" : "结束"}</div>;
+      return (
+        <div className="ev-in text-emerald-600" style={style}>
+          ✅ 任务{event.ok ? "完成" : "结束"}
+        </div>
+      );
     case "error":
       return (
-        <div className="whitespace-pre-wrap text-red-600">✗ {event.message}</div>
+        <div className="ev-in whitespace-pre-wrap text-red-600" style={style}>
+          ✗ {event.message}
+        </div>
       );
     case "raw":
-      return <div className="whitespace-pre-wrap text-zinc-400">{event.line}</div>;
+      return (
+        <div className="ev-in whitespace-pre-wrap text-zinc-400" style={style}>
+          {event.line}
+        </div>
+      );
     default:
       return null;
   }

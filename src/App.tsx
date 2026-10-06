@@ -9,7 +9,7 @@ import {
   startTask,
 } from "./api";
 import type { AgentEvent, LiveTask, TaskRow } from "./types";
-import { Sidebar, projectName } from "./components/Sidebar";
+import { Sidebar, projectName, HARNESS_ACCENT } from "./components/Sidebar";
 import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
@@ -125,6 +125,7 @@ export default function App() {
   const selectedRunning = selectedLive?.running ?? selectedRow?.status === "running";
   const selectedSession = selectedLive?.sessionId ?? selectedRow?.session_id ?? null;
   const selectedCanResume = !!selectedRow && !!selectedSession && !selectedRunning;
+  const selectedHarness = selectedRow?.harness ?? selectedLive?.harness ?? harness;
   const hasAuthError = selectedEvents.some(
     (e) => e.type === "error" && e.kind === "auth",
   );
@@ -148,10 +149,16 @@ export default function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         {selected === null ? (
-          // 空态：大字居中（Codex 式）
-          <div className="flex flex-1 flex-col items-center justify-center px-8">
-            <div className="mb-8 text-5xl text-zinc-300">❖</div>
-            <div className="text-2xl font-medium tracking-tight text-zinc-800">
+          // ── 空态：点阵底纹 + 错落入场 ──
+          <div key="empty" className="anim-scene relative flex flex-1 flex-col items-center justify-center px-8">
+            <div className="grid-bg pointer-events-none absolute inset-0" />
+            <div className="anim-rise relative mb-8 text-5xl text-zinc-300">
+              ❖
+            </div>
+            <div
+              className="anim-rise relative text-2xl font-medium tracking-tight text-zinc-800"
+              style={{ animationDelay: "70ms" }}
+            >
               我们应该在
               <span className="mx-1 border-b-2 border-dotted border-zinc-400">
                 {projectName(cwd)}
@@ -160,18 +167,22 @@ export default function App() {
             </div>
           </div>
         ) : (
-          // 任务详情视图
-          <div className="flex min-h-0 flex-1 flex-col">
+          // ── 任务详情视图：场景切换动画 ──
+          <div key={`task-${selected}`} className="anim-scene flex min-h-0 flex-1 flex-col">
             <div className="flex items-center gap-2 border-b border-zinc-100 px-6 py-3 text-sm">
               <button
                 onClick={() => setSelected(null)}
-                className="rounded-md px-2 py-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+                className="rounded-md px-2 py-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
                 title="返回新任务"
               >
                 ←
               </button>
-              <span className="font-mono text-xs text-emerald-600">
-                {selectedRow?.harness ?? selectedLive?.harness}
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ backgroundColor: HARNESS_ACCENT[selectedHarness] }}
+              />
+              <span className="font-mono text-xs" style={{ color: HARNESS_ACCENT[selectedHarness] }}>
+                {selectedHarness}
               </span>
               <span className="truncate text-zinc-500">
                 {selectedRow?.cwd ?? selectedLive?.cwd}
@@ -180,7 +191,7 @@ export default function App() {
               {selectedRunning && (
                 <button
                   onClick={() => selected && cancelTask(selected).catch(() => {})}
-                  className="rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 hover:bg-red-50"
+                  className="rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 transition-colors hover:bg-red-50"
                 >
                   终止
                 </button>
@@ -203,7 +214,7 @@ export default function App() {
                     onClick={() =>
                       runLogin(selectedRow?.harness ?? "zcode").catch(() => {})
                     }
-                    className="rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-medium text-amber-700 hover:bg-amber-100"
+                    className="rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-100"
                   >
                     🔑 唤起登录
                   </button>
@@ -211,7 +222,7 @@ export default function App() {
                 {canShowDiff && (
                   <button
                     onClick={showDiff}
-                    className="rounded-full border border-zinc-200 px-3 py-1 text-zinc-600 hover:bg-zinc-100"
+                    className="rounded-full border border-zinc-200 px-3 py-1 text-zinc-600 transition-colors hover:bg-zinc-100"
                   >
                     查看 Diff
                   </button>
@@ -223,11 +234,11 @@ export default function App() {
               </div>
             )}
 
-            <LogPanel events={selectedEvents} />
+            <LogPanel key={selected} events={selectedEvents} running={selectedRunning} />
           </div>
         )}
 
-        {/* 底部输入卡：始终可见（Codex 式）；任务运行中禁用 */}
+        {/* 底部输入卡：始终可见；任务运行中禁用并显示打字指示 */}
         <div className="px-6 pb-5 pt-2">
           <Composer
             cwd={cwd}
@@ -248,23 +259,44 @@ export default function App() {
   );
 }
 
-/** 会话日志面板：自动滚动到底部 */
-function LogPanel({ events }: { events: AgentEvent[] }) {
+/** 会话日志面板：历史回放时错落入场，实时流式时逐条滑入；自动平滑滚动到底部 */
+function LogPanel({
+  events,
+  running,
+}: {
+  events: AgentEvent[];
+  running: boolean;
+}) {
   const logRef = useRef<HTMLDivElement | null>(null);
+  const prevCount = useRef(0);
+  // 仅当本次渲染是「从零加载」（历史回放/新任务首条）时才排队入场
+  const staggerInitial = prevCount.current === 0 && events.length > 0;
+
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    prevCount.current = events.length;
   }, [events.length]);
 
   return (
     <div
       ref={logRef}
-      className="min-h-0 flex-1 space-y-2 overflow-y-auto px-6 py-4 font-mono text-xs leading-relaxed"
+      className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 py-4 font-mono text-xs leading-relaxed"
     >
       {events.length === 0 && (
-        <div className="py-10 text-center text-zinc-400">（暂无日志）</div>
+        <div className="py-10 text-center text-zinc-400">
+          {running ? (
+            <span className="typing-dots inline-flex items-center">
+              <span />
+              <span />
+              <span />
+            </span>
+          ) : (
+            "（暂无日志）"
+          )}
+        </div>
       )}
       {events.map((event, i) => (
-        <EventLine key={i} event={event} />
+        <EventLine key={i} event={event} stagger={staggerInitial ? i : 0} />
       ))}
     </div>
   );

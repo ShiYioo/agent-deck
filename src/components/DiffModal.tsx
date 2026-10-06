@@ -6,11 +6,11 @@ export function DiffModal({ text, onClose }: { text: string; onClose: () => void
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
+      className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
       onClick={onClose}
     >
       <div
-        className="flex h-full w-full max-w-4xl flex-col rounded-xl border border-zinc-200 bg-white shadow-xl"
+        className="anim-pop flex h-full w-full max-w-4xl flex-col rounded-xl border border-zinc-200 bg-white shadow-[var(--shadow-2)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-2">

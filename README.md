@@ -29,6 +29,10 @@
 新增 harness 的方式：`src-tauri/src/executors/` 加一个模块，实现
 `parse_line`（JSONL → 统一事件）并在 `Harness` 枚举上补一个分支，前端零改动。
 
+## 设计系统
+
+美术风格与动效令牌见 [docs/DESIGN.md](docs/DESIGN.md)——色板、三档动效时长、入场曲线、以及「新增动效检查单」都在那里。所有令牌实现于 `src/styles.css`。
+
 ## 开发
 
 前置要求：Node 20+、pnpm、Rust 1.85+（Windows 需 MSVC）、ZCode CLI / Codex CLI 已安装并在 PATH 上。
