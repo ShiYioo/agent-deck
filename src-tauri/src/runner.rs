@@ -143,6 +143,11 @@ pub async fn stream_loop(
     };
     store.finish_task(&task_id, status, code.map(|c| c as i64));
 
+    // 任务表清账：条目残留会让注册表随任务数无限增长
+    if let Ok(mut guard) = registry.0.lock() {
+        guard.remove(&task_id);
+    }
+
     let _ = app.emit(
         "task-exit",
         serde_json::json!({ "taskId": task_id, "code": code }),

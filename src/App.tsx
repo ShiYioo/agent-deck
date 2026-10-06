@@ -34,7 +34,8 @@ import {
   IconStop,
 } from "./components/icons";
 
-const emptyEvents: AgentEvent[] = [];
+type LogItem = { event: AgentEvent; key: number };
+const emptyEvents: LogItem[] = [];
 
 export default function App() {
   // composer 的全局默认值
@@ -298,23 +299,28 @@ export default function App() {
 
   const selectedRow = selected ? history.find((t) => t.id === selected) : undefined;
   const selectedLive = selected ? live[selected] : undefined;
-  const selectedEvents =
-    useMemo(
-      () =>
-        selectedLive?.events.map((e) => e.event) ??
-        (selected ? historyEvents[selected] : undefined) ??
-        emptyEvents,
-      [selectedLive, selected, historyEvents],
-    );
+  // 条目携带稳定 key：live 用追加时分配的递增 key，回放用序号。
+  // LogPanel 超 500 条折叠后 key 不漂移，避免每条新事件全列表重渲染。
+  const selectedEvents = useMemo<LogItem[]>(
+    () =>
+      selectedLive?.events ??
+      (selected
+        ? (historyEvents[selected] ?? emptyEvents).map((event, i) => ({
+            event,
+            key: i,
+          }))
+        : emptyEvents),
+    [selectedLive, selected, historyEvents],
+  );
   const selectedRunning = selectedLive?.running ?? selectedRow?.status === "running";
   const selectedSession = selectedLive?.sessionId ?? selectedRow?.session_id ?? null;
   const selectedCanResume = !!selectedRow && !!selectedSession && !selectedRunning;
   const selectedHarness = selectedRow?.harness ?? selectedLive?.harness ?? harness;
   const hasAuthError = selectedEvents.some(
-    (e) => e.type === "error" && e.kind === "auth",
+    ({ event: e }) => e.type === "error" && e.kind === "auth",
   );
   const hasQuotaError = selectedEvents.some(
-    (e) => e.type === "error" && e.kind === "quota",
+    ({ event: e }) => e.type === "error" && e.kind === "quota",
   );
   const canShowDiff = !!selectedRow && selectedRow.status === "done";
 
@@ -631,7 +637,7 @@ function LogPanel({
   events,
   running,
 }: {
-  events: AgentEvent[];
+  events: { event: AgentEvent; key: number }[];
   running: boolean;
 }) {
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -651,6 +657,7 @@ function LogPanel({
 
   const overflow = events.length - MAX_RENDER;
   const visible = overflow > 0 ? events.slice(overflow) : events;
+  void overflow;
 
   return (
     <div
@@ -675,9 +682,9 @@ function LogPanel({
           )}
         </div>
       )}
-      {visible.map((event, i) => (
+      {visible.map(({ event, key }, i) => (
         <EventLine
-          key={Math.max(overflow, 0) + i}
+          key={key}
           event={event}
           stagger={staggerInitial ? i : 0}
         />

@@ -209,7 +209,9 @@ pub(crate) fn error_kind(message: &str) -> &'static str {
     {
         "auth"
     } else if lower.contains("429")
+        || lower.contains("402")
         || lower.contains("quota")
+        || lower.contains("insufficient_quota")
         || lower.contains("usage limit")
         || lower.contains("rate limit")
         || lower.contains("insufficient")

@@ -28,6 +28,11 @@ export async function startTask(params: {
 
 export async function cancelTask(taskId: string): Promise<void> {
   if (!inTauri) browserStub("终止任务");
+  // deck 任务走 pi 会话的协作式中断；CLI 任务走进程组强杀
+  if (taskId.startsWith("deck-")) {
+    await invoke("pi_command", { taskId, cmd: "abort", id: null });
+    return;
+  }
   await invoke("cancel_task", { taskId });
 }
 

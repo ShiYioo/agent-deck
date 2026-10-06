@@ -25,8 +25,6 @@ let session = null;
 let currentModel = null;
 let pendingApproval = null; // { resolve, info: {id, tool, args} }
 let currentCwd = null;
-let currentApiKey = null;
-let currentModeName = null;
 
 function emit(event) {
   process.stdout.write(JSON.stringify(event) + "\n");

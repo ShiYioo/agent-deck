@@ -76,6 +76,19 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             let tool = field_str(obj, TOOL_ID_KEYS).unwrap_or("tool").to_string();
             events.push(AgentEvent::ToolResult { tool, ok, detail });
         }
+        // opencode --format json 的增量消息：message.part / message.part.updated
+        k if k.contains("message.part") => {
+            let part = obj.get("part").unwrap_or(&Value::Null);
+            if let Some(text) = part
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|t| !t.trim().is_empty())
+            {
+                events.push(AgentEvent::AssistantMessage {
+                    text: text.to_string(),
+                });
+            }
+        }
         "thinking" => {
             if let Some(text) = obj
                 .get("thinking")
