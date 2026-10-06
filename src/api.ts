@@ -75,6 +75,12 @@ export async function getDefaultCwd(): Promise<string> {
   return await invoke<string>("get_default_cwd");
 }
 
+/** 构建跨 harness 会话交接 prompt（会话记录压缩 + 接手指令） */
+export async function buildHandoffPrompt(taskId: string): Promise<string> {
+  if (!inTauri) browserStub("会话接力");
+  return await invoke<string>("build_handoff_prompt", { taskId });
+}
+
 /** 动态发现 harness 的真实模型列表（codex 读 desktop 状态、opencode 调 CLI） */
 export async function discoverModels(harness: string): Promise<string[]> {
   if (!inTauri) return [];

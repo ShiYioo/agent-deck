@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
+  buildHandoffPrompt,
   cancelTask,
   getDefaultCwd,
   getTaskDiff,
@@ -49,6 +50,7 @@ export default function App() {
   // 待审批的工具调用（deck 运行时 approved 模式）
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [busyHandoff, setBusyHandoff] = useState(false);
 
   const refreshHistory = useCallback(() => {
     listTasks().then(setHistory).catch(() => {});
@@ -200,7 +202,47 @@ export default function App() {
   const hasAuthError = selectedEvents.some(
     (e) => e.type === "error" && e.kind === "auth",
   );
+  const hasQuotaError = selectedEvents.some(
+    (e) => e.type === "error" && e.kind === "quota",
+  );
   const canShowDiff = !!selectedRow && selectedRow.status === "done";
+
+  // 会话接力：会话记录压缩为交接简报 → 派给目标 harness（同一工作目录）
+  const handoff = async (target: string) => {
+    if (!selectedRow || busyHandoff) return;
+    setBusyHandoff(true);
+    setActionError(null);
+    try {
+      const briefing = await buildHandoffPrompt(selectedRow.id);
+      const taskId = await startTask({
+        harness: target,
+        cwd: selectedRow.cwd,
+        prompt: briefing,
+        mode: target === "zcode" ? "yolo" : target === "codex" ? "full" : null,
+        model: null,
+        permission: "auto",
+        resumeSessionId: null,
+      });
+      setLive((prev) => ({
+        ...prev,
+        [taskId]: {
+          harness: target,
+          cwd: selectedRow.cwd,
+          prompt: `（接力自 ${selectedRow.harness}）${selectedRow.prompt}`,
+          mode: null,
+          events: [],
+          running: true,
+          exitCode: null,
+        },
+      }));
+      setSelected(taskId);
+      setTimeout(refreshHistory, 200);
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusyHandoff(false);
+    }
+  };
 
   const showDiff = async () => {
     if (!selected) return;
@@ -314,6 +356,43 @@ export default function App() {
                   <span className="text-stone-400">在下方输入可续接此会话</span>
                 )}
                 {actionError && <span className="text-red-600">{actionError}</span>}
+              </div>
+            )}
+
+            {/* 会话接力：把会话记录交给另一个 harness 继续（额度/登录失败时的正解） */}
+            {!selectedRunning && selectedRow && (
+              <div className="mx-6 mt-2 rounded-xl border border-stone-200 bg-white p-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="font-medium text-stone-600">
+                    {hasQuotaError
+                      ? "额度可能已耗尽——把会话记录交给其他 harness 接力："
+                      : "会话接力："}
+                  </span>
+                  {(["deck", "zcode", "codex", "opencode"] as const)
+                    .filter((h) => h !== selectedRow.harness)
+                    .map((h) => (
+                      <button
+                        key={h}
+                        onClick={() => handoff(h)}
+                        disabled={busyHandoff}
+                        className="flex items-center gap-1.5 rounded-full border px-3 py-1 transition-colors hover:bg-stone-100 disabled:opacity-50"
+                        style={{ borderColor: HARNESS_ACCENT[h], color: HARNESS_ACCENT[h] }}
+                      >
+                        <span
+                          className="h-1.5 w-1.5 rounded-full"
+                          style={{ backgroundColor: HARNESS_ACCENT[h] }}
+                        />
+                        用 {h === "deck" ? "AgentDeck Agent" : h} 接力
+                      </button>
+                    ))}
+                  <span className="flex-1" />
+                  <span className="text-stone-400">
+                    会话记录将随首条消息一并注入，工作目录不变
+                  </span>
+                </div>
+                {busyHandoff && (
+                  <div className="mt-2 text-xs text-stone-400">正在生成交接简报…</div>
+                )}
               </div>
             )}
 

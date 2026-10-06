@@ -1,4 +1,5 @@
 mod executors;
+mod handoff;
 mod pi_session;
 mod runner;
 mod store;
@@ -257,6 +258,12 @@ fn pi_session_task_id() -> String {
     format!("deck-{nanos}")
 }
 
+/// 前端 → Rust：构建跨 harness 会话交接 prompt。
+#[tauri::command]
+fn build_handoff_prompt(store: State<'_, Store>, task_id: String) -> Result<String, String> {
+    handoff::build_handoff_prompt(&store, &task_id)
+}
+
 /// 前端 → Rust：向 pi 会话发审批/中止指令。
 #[tauri::command]
 fn pi_command(
@@ -388,7 +395,8 @@ pub fn run() {
             get_setting,
             set_setting,
             get_default_cwd,
-            discover_models
+            discover_models,
+            build_handoff_prompt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

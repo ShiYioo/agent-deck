@@ -208,6 +208,15 @@ pub(crate) fn error_kind(message: &str) -> &'static str {
         || lower.contains("auth required")
     {
         "auth"
+    } else if lower.contains("429")
+        || lower.contains("quota")
+        || lower.contains("usage limit")
+        || lower.contains("rate limit")
+        || lower.contains("insufficient")
+        || lower.contains("balance")
+        || lower.contains("额度")
+    {
+        "quota"
     } else {
         "other"
     }
