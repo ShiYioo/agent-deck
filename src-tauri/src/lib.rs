@@ -264,6 +264,66 @@ fn build_handoff_prompt(store: State<'_, Store>, task_id: String) -> Result<Stri
     handoff::build_handoff_prompt(&store, &task_id)
 }
 
+/// 前端 → Rust：AI 交接——用 deck 运行时（pi）把会话记录压缩成交接简报再组装。
+/// 压缩失败/无 key 时静默回退机械版，交接永不阻塞。
+#[tauri::command]
+async fn build_smart_handoff_prompt(
+    app: AppHandle,
+    store: State<'_, Store>,
+    task_id: String,
+) -> Result<String, String> {
+    let row = store
+        .get_task(&task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let events = store.get_events(&task_id, 0, i64::MAX)?;
+    let convo = handoff::render_conversation(&events);
+    if convo.trim().is_empty() {
+        return handoff::build_handoff_prompt(&store, &task_id);
+    }
+
+    // 压缩模型与 key：优先 GLM，退 GPT（来自设置面板）
+    let glm_key = store.get_setting("deck_api_key_glm").ok().flatten();
+    let gpt_key = store.get_setting("deck_api_key_gpt").ok().flatten();
+    let (model, api_key) = match (
+        glm_key.filter(|k| !k.trim().is_empty()),
+        gpt_key.filter(|k| !k.trim().is_empty()),
+    ) {
+        (Some(k), _) => ("glm", k),
+        (None, Some(k)) => ("gpt", k),
+        (None, None) => {
+            return handoff::build_handoff_prompt(&store, &task_id);
+        }
+    };
+
+    let model_note = row
+        .model
+        .as_deref()
+        .map(|m| format!("（模型 {m}）"))
+        .unwrap_or_default();
+
+    let sidecar = sidecar_path(&app);
+    let summary = match tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        pi_session::pi_summarize_text(&sidecar, model, &api_key, &row.cwd, &convo),
+    )
+    .await
+    {
+        Ok(Ok(s)) if !s.trim().is_empty() => s,
+        _ => {
+            // 压缩失败：静默回退机械版
+            return handoff::build_handoff_prompt(&store, &task_id);
+        }
+    };
+
+    Ok(handoff::assemble_ai_handoff(
+        &row.harness,
+        &model_note,
+        &row.prompt,
+        &summary,
+        &handoff::convo_tail(&convo, 3_000),
+    ))
+}
+
 /// 前端 → Rust：向 pi 会话发审批/中止指令。
 #[tauri::command]
 fn pi_command(
@@ -396,7 +456,8 @@ pub fn run() {
             set_setting,
             get_default_cwd,
             discover_models,
-            build_handoff_prompt
+            build_handoff_prompt,
+            build_smart_handoff_prompt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

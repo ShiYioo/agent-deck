@@ -202,3 +202,90 @@ pub fn send_command(
         .send(serde_json::to_string(&msg).unwrap())
         .map_err(|e| format!("发送失败：{e}"))
 }
+
+/// 用 deck 运行时压缩一段文本（会话记录 → 交接简报）。
+/// spawn 独立 sidecar 进程，等待 summarize_result 事件；失败返回 Err 由调用方回退。
+pub async fn pi_summarize_text(
+    sidecar_js: &std::path::Path,
+    model: &str,
+    api_key: &str,
+    cwd: &str,
+    text: &str,
+) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let node = which::which("node").map_err(|_| "未找到 node".to_string())?;
+    let mut command = Command::new(node);
+    command
+        .arg(sidecar_js)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("NO_COLOR", "1")
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动 deck-agent 失败：{e}"))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+
+    let cmd = serde_json::json!({
+        "cmd": "summarize",
+        "text": text,
+        "model": model,
+        "apiKey": api_key,
+        "cwd": cwd,
+    });
+    stdin
+        .write_all(serde_json::to_string(&cmd).unwrap().as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
+    drop(stdin); // 关 stdin 促使 sidecar 处理完后可退出
+
+    let mut reader = BufReader::new(stdout);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                match v.get("type").and_then(|x| x.as_str()) {
+                    Some("summarize_result") => {
+                        let text = v
+                            .get("text")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if text.trim().is_empty() {
+                            return Err("压缩结果为空".into());
+                        }
+                        return Ok(text);
+                    }
+                    Some("summarize_error") | Some("deck_error") => {
+                        let msg = v
+                            .get("message")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        return Err(msg);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Err("sidecar 在返回结果前退出".into())
+}

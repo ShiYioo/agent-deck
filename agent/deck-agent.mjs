@@ -291,6 +291,45 @@ async function handle(msg) {
       aborting = false;
       break;
     }
+    case "summarize": {
+      // 会话压缩：把交接记录压成结构化简报（AI 交接的核心步骤）
+      try {
+        const s = await ensureSession({
+          model: msg.model || "glm",
+          apiKey: msg.apiKey,
+          cwd: msg.cwd || process.cwd(),
+          mode: "auto",
+        });
+        let last = "";
+        let active = true;
+        const un = s.subscribe((ev) => {
+          if (!active) return;
+          if (ev.type === "message_end" && ev.message?.role === "assistant") {
+            const text = (ev.message.content ?? [])
+              .filter((c) => c.type === "text")
+              .map((c) => c.text ?? "")
+              .join("");
+            if (text.trim()) last = text;
+          }
+        });
+        deckEvent("summarize_start");
+        await s.prompt(
+          "你是一个会话压缩器。把下面的编码任务会话记录压缩成给下一个 AI 助手的交接简报，" +
+            "严格按此结构输出（Markdown）：\n" +
+            "## 任务\n（原始目标，1-2 句）\n## 已完成\n（带具体文件路径/命令的完成项）\n" +
+            "## 未完成\n（剩余工作，按优先级）\n## 关键决策与注意事项\n（约定、坑、参数）\n\n" +
+            "要求：只输出简报本身，不要执行任务；保留具体路径、命令名、参数；总长不超过 500 字。\n\n" +
+            "===== 会话记录 =====\n" +
+            String(msg.text ?? ""),
+        );
+        active = false;
+        un();
+        deckEvent("summarize_result", { text: last });
+      } catch (err) {
+        deckEvent("summarize_error", { message: String(err?.message ?? err) });
+      }
+      break;
+    }
     case "ping":
       deckEvent("pong");
       break;

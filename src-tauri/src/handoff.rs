@@ -32,7 +32,7 @@ fn field(v: &serde_json::Value, key: &str) -> String {
 }
 
 /// 从事件流构建会话记录段落（纯文本，LLM 友好）。
-fn render_conversation(events: &[String]) -> String {
+pub(crate) fn render_conversation(events: &[String]) -> String {
     let mut lines: Vec<String> = Vec::new();
     for raw in events {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
@@ -184,6 +184,36 @@ mod tests {
     }
 
     #[test]
+    fn ai_handoff_assembly_contains_all_sections() {
+        let prompt = assemble_ai_handoff(
+            "zcode",
+            "（模型 glm-4.7）",
+            "重构支付模块",
+            "## 任务
+重构支付模块
+## 已完成
+- 改了 payment.rs",
+            "【助手】改完 payment.rs，还没跑测试",
+        );
+        assert!(prompt.contains("重构支付模块"));
+        assert!(prompt.contains("AI 交接简报"));
+        assert!(prompt.contains("payment.rs"));
+        assert!(prompt.contains("git status"));
+        assert!(prompt.contains("不要重做"));
+    }
+
+    #[test]
+    fn convo_tail_keeps_suffix() {
+        let convo = "a
+"
+        .repeat(100)
+            + "最后的现场";
+        let tail = convo_tail(&convo, 20);
+        assert!(tail.ends_with("最后的现场"));
+        assert!(tail.chars().count() <= 21);
+    }
+
+    #[test]
     fn long_conversation_gets_budget_marker() {
         let store = Store::in_memory().unwrap();
         store
@@ -203,4 +233,49 @@ mod tests {
         assert!(prompt.contains("已省略"), "超预算必须有省略标记");
         assert!(prompt.chars().count() < CONVO_BUDGET_CHARS + 2000);
     }
+}
+
+// ── AI 交接（pi 运行时压缩） ────────────────────────────────
+
+/// AI 交接 prompt 组装：原始任务 + AI 简报 + 会话尾部原文 + 接手指令。
+/// 简报为空（压缩失败）时调用方应回退到机械版 build_handoff_prompt。
+pub fn assemble_ai_handoff(
+    harness: &str,
+    model_note: &str,
+    original_prompt: &str,
+    summary: &str,
+    convo_tail: &str,
+) -> String {
+    format!(
+        "你接手一个此前由另一个助手（{harness}{model_note}）执行的任务。
+
+         ===== 原始任务 =====
+{original_prompt}
+
+         ===== AI 交接简报（由独立模型从完整会话记录压缩生成）=====
+{summary}
+
+         ===== 最近会话原文（尾部）=====
+{convo_tail}
+
+         ===== 接手指令 =====
+         1. 先用 git status / git diff 核对工作目录当前状态，确认哪些工作已完成；
+         2. 不要重做已完成的部分，不要偏离原始任务目标；
+         3. 从简报所述的中断处继续，完成剩余工作。
+         现在开始，先核对状态再行动。"
+    )
+}
+
+/// 会话原文的尾部截断（AI 简报之外的原文锚，防幻觉）
+pub fn convo_tail(convo: &str, keep_chars: usize) -> String {
+    let total = convo.chars().count();
+    if total <= keep_chars {
+        return convo.to_string();
+    }
+    let skip = total - keep_chars;
+    let mut tail: String = convo.chars().skip(skip).collect();
+    if let Some(pos) = tail.find('\n') {
+        tail = tail[pos + 1..].to_string();
+    }
+    tail
 }

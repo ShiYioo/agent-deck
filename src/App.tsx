@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
-  buildHandoffPrompt,
+  buildSmartHandoffPrompt,
   cancelTask,
   getDefaultCwd,
   getTaskDiff,
@@ -213,7 +213,7 @@ export default function App() {
     setBusyHandoff(true);
     setActionError(null);
     try {
-      const briefing = await buildHandoffPrompt(selectedRow.id);
+      const briefing = await buildSmartHandoffPrompt(selectedRow.id);
       const taskId = await startTask({
         harness: target,
         cwd: selectedRow.cwd,
@@ -391,7 +391,12 @@ export default function App() {
                   </span>
                 </div>
                 {busyHandoff && (
-                  <div className="mt-2 text-xs text-stone-400">正在生成交接简报…</div>
+                  <div className="typing-dots mt-2 flex items-center text-xs text-stone-400">
+                    正在由 AgentDeck 运行时压缩会话记录…
+                    <span />
+                    <span />
+                    <span />
+                  </div>
                 )}
               </div>
             )}
