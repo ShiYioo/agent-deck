@@ -1,4 +1,5 @@
-//! 任务运行器：解析可执行文件 → 派生无头 CLI 子进程 → 逐行解析 JSONL → 以事件推给前端。
+//! 任务运行器：解析可执行文件 → 派生无头 CLI 子进程 → 逐行解析 JSONL →
+//! 事件入库（SQLite）并推送给前端。
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -6,7 +7,8 @@ use std::process::Stdio;
 use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::executors::Harness;
+use crate::executors::{AgentEvent, Harness};
+use crate::store::Store;
 use crate::{TaskRegistry, emit_task_event};
 
 pub fn new_task_id(harness: Harness) -> String {
@@ -61,12 +63,13 @@ pub async fn spawn(
     command.spawn().map_err(|e| format!("启动失败：{e}"))
 }
 
-/// 读取一个输出流，逐行解析为事件并推送给前端。stderr 同样送入解析器
-/// （zcode 的鉴权错误就写在 stderr 上）。
+/// 读取一个输出流，逐行解析为事件：入库 + 推送前端。
+/// stderr 同样送入解析器（zcode 的鉴权错误就写在 stderr 上）。
 async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     app: &tauri::AppHandle,
     task_id: &str,
     harness: Harness,
+    store: &Store,
     stream: Option<R>,
 ) {
     let Some(stream) = stream else { return };
@@ -83,6 +86,12 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                     continue;
                 }
                 for event in harness.parse_line(trimmed) {
+                    if let AgentEvent::SessionId { id } = &event {
+                        let _ = store.set_session_id(task_id, id);
+                    }
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        let _ = store.append_event(task_id, &json);
+                    }
                     emit_task_event(app, task_id, &event);
                 }
             }
@@ -98,14 +107,15 @@ pub async fn stream_loop(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     registry: TaskRegistry,
+    store: Store,
 ) {
     let app2 = app.clone();
     let task_id2 = task_id.clone();
     let out_reader = async {
-        read_stream(&app2, &task_id2, harness, stdout).await;
+        read_stream(&app2, &task_id2, harness, &store, stdout).await;
     };
     let err_reader = async {
-        read_stream(&app, &task_id, harness, stderr).await;
+        read_stream(&app, &task_id, harness, &store, stderr).await;
     };
     tokio::join!(out_reader, err_reader);
 
@@ -122,6 +132,13 @@ pub async fn stream_loop(
         Some(c) => c.wait().await.ok().and_then(|s| s.code()),
         None => None,
     };
+
+    let status = match code {
+        Some(0) => "done",
+        Some(_) => "failed",
+        None => "cancelled",
+    };
+    store.finish_task(&task_id, status, code.map(|c| c as i64));
 
     let _ = app.emit(
         "task-exit",

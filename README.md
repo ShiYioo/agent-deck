@@ -43,8 +43,8 @@ cargo test            # 运行 Rust 适配器单元测试（在 src-tauri/ 下�
 ## Roadmap
 
 - [x] M1：派任务 + 日志流 + 会话续接 + 取消
-- [ ] M2：SQLite 会话历史持久化、任务列表管理
-- [ ] M3：git diff 面板、并行任务视图、失败重试 / 登录引导按钮
+- [x] M2：SQLite 会话历史持久化、任务列表管理
+- [x] M3：git diff 面板、并行任务视图、失败重试 / 登录引导按钮
 - [ ] M4：打包分发、更多 harness（claude、qoder via ACP）
 
 ## License
