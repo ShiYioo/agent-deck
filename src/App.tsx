@@ -220,13 +220,33 @@ export default function App() {
     };
   }, [refreshHistory]);
 
-  // 发送：选中已完成任务且有会话 ID → 续接；否则开新任务
+  // 发送：@ 智能体唤醒（可并行）；选中已完成任务且有会话 ID → 续接；否则开新任务
   const handleSend = useCallback(
-    async (text: string) => {
+    async (rawText: string) => {
       setActionError(null);
+
+      // @ 路由：@deck/@zcode/@codex/@opencode 唤醒对应智能体
+      const at = /^@(deck|zcode|codex|opencode)\s+/i.exec(rawText.trim());
+      let text = rawText.trim();
+      let atTarget: string | null = null;
+      if (at) {
+        atTarget = at[1].toLowerCase();
+        text = text.slice(at[0].length);
+      }
+      if (!text.trim()) {
+        setActionError("请输入任务描述");
+        return;
+      }
+
       const row = selected ? history.find((t) => t.id === selected) : undefined;
-      // 运行中：消息入队（抄 VK queued message），任务成功结束后自动续发
-      if (selected && liveRef.current[selected]?.running) {
+      const runningTask = selected ? liveRef.current[selected] : undefined;
+
+      // 运行中排队：仅当未 @ 其他智能体（@ 别家 = 并行唤醒新任务）
+      if (
+        selected &&
+        runningTask?.running &&
+        (!atTarget || atTarget === runningTask.harness)
+      ) {
         setLive((prev) => ({
           ...prev,
           [selected]: {
@@ -236,43 +256,79 @@ export default function App() {
         }));
         return;
       }
-    // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
-    const canResume = !!row && !!row.session_id && row.status !== "running";
-    // 记住这次的工作目录，下次启动作为默认
-    const useCwd = canResume ? row.cwd : cwd || ".";
-    if (!canResume && cwd.trim()) {
-      setSetting("default_cwd", cwd.trim()).catch(() => {});
-    }
-    try {
-      const taskId = await startTask({
-        harness: canResume ? row.harness : harness,
-        cwd: useCwd,
-        prompt: text,
-        mode: canResume ? row.mode : mode === "default" ? null : mode,
-        model: canResume ? row.model : model.trim() || null,
-        permission: canResume ? null : permission,
-        resumeSessionId: canResume ? row.session_id : null,
-      });
-      setLive((prev) => ({
-        ...prev,
-        [taskId]: {
-          harness: canResume ? row.harness : harness,
+
+      // @ 路由的任务是全新派发（不续接旧会话）
+      const routeFresh = atTarget !== null;
+      const useHarness = routeFresh ? (atTarget as string) : harness;
+      // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
+      const canResume =
+        !routeFresh &&
+        !!row &&
+        !!row.session_id &&
+        row.status !== "running" &&
+        // @ 同一家且在运行的情况已在上面排队处理
+        true;
+      // 记住这次的工作目录，下次启动作为默认
+      const useCwd = routeFresh ? cwd || "." : canResume ? row.cwd : cwd || ".";
+      if (!routeFresh && cwd.trim()) {
+        setSetting("default_cwd", cwd.trim()).catch(() => {});
+      }
+      try {
+        const taskId = await startTask({
+          harness: canResume ? row.harness : useHarness,
           cwd: useCwd,
           prompt: text,
-          mode: canResume ? row.mode : harness === "zcode" ? mode : null,
-          events: [],
-          running: true,
-          exitCode: null,
-          sessionId: canResume ? row.session_id ?? undefined : undefined,
-        },
-      }));
-      setSelected(taskId);
-      setTimeout(refreshHistory, 200);
-    } catch (e) {
-      setActionError(String(e));
-    }
+          mode: canResume
+            ? row.mode
+            : useHarness === "deck"
+              ? null
+              : useHarness === "zcode"
+                ? mode
+                : mode === "default"
+                  ? null
+                  : mode,
+          model: canResume ? row.model : model.trim() || null,
+          permission: canResume ? null : permission,
+          resumeSessionId: canResume ? row.session_id : null,
+        });
+        setLive((prev) => ({
+          ...prev,
+          [taskId]: {
+            harness: canResume ? row.harness : useHarness,
+            cwd: useCwd,
+            prompt: text,
+            mode: canResume
+              ? row.mode
+              : useHarness === "deck"
+                ? null
+                : useHarness === "zcode"
+                  ? mode
+                  : mode === "default"
+                    ? null
+                    : mode,
+            events: [],
+            running: true,
+            exitCode: null,
+            sessionId: canResume ? row.session_id ?? undefined : undefined,
+          },
+        }));
+        setSelected(taskId);
+        setTimeout(refreshHistory, 200);
+      } catch (e) {
+        setActionError(String(e));
+      }
     },
-    [selected, harness, mode, model, cwd, history, permission, flushQueued, refreshHistory],
+    [
+      selected,
+      harness,
+      mode,
+      model,
+      cwd,
+      history,
+      permission,
+      flushQueued,
+      refreshHistory,
+    ],
   );
 
   // 查看任务：优先实时缓冲，否则回放数据库事件
@@ -635,10 +691,10 @@ export default function App() {
             recentModels={recentModels}
             placeholder={
               selectedRunning
-                ? "运行中——发送将排队，任务结束后自动续发"
+                ? "运行中——发送将排队；@其他智能体 可并行唤醒"
                 : selectedCanResume
                   ? "续接此会话…"
-                  : "随心输入"
+                  : "随心输入 · @zcode/@codex/@deck/@opencode 可指定执行者"
             }
           />
         </div>

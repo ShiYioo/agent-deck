@@ -16,15 +16,41 @@
  * 收到 approve 后继续（AgentDeck UI 呈现审批卡片）。
  */
 
-import { createAgentSession, createCodingTools } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession,
+  createCodingTools,
+  createReadTool as m_createReadTool,
+  createWriteTool as m_createWriteTool,
+  createEditTool as m_createEditTool,
+  createBashTool as m_createBashTool,
+  createGrepTool as m_createGrepTool,
+  createFindTool as m_createFindTool,
+  createLsTool as m_createLsTool,
+} from "@earendil-works/pi-coding-agent";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
 let session = null;
-let currentModel = null;
+let currentModel = null; // 当前底层模型名（glm/gpt）
 let pendingApproval = null; // { resolve, info: {id, tool, args} }
 let currentCwd = null;
+let firstRun = true;
+
+// 模型自治：双池 key/url（设置面板写入，随 run/summarize 指令下发）
+const modelKeys = { glm: null, gpt: null };
+const modelUrls = { glm: null, gpt: null };
+
+/** 通用级运行规范（会话首轮注入，全局纪律只说一次） */
+const UNIVERSAL_PROMPT = [
+  "【运行规范 · AgentDeck】",
+  "你是在用户本机工作的编码智能体，直接操作真实文件系统。纪律：",
+  "1) 先理解再动手：改动前先读相关文件；不确定就 ls/grep 查证，不猜接口。",
+  "2) 计划先行：超过 3 步的任务先给出极简计划，再逐步执行。",
+  "3) 小步修改 + 即时验证：每次改动后运行编译/测试/脚本自证；验证不过就修，不许留红。",
+  "4) 诚实汇报：失败如实报告并附错误原文；绝不伪造成功。",
+  "5) 中文沟通，结论先行，关键路径与命令原样给出。",
+].join("\n");
 
 function emit(event) {
   process.stdout.write(JSON.stringify(event) + "\n");
@@ -103,6 +129,42 @@ function extractFinalText(raw) {
   return text;
 }
 
+/** 模型自治工具：agent 自己切换底层模型（setModel 保留会话上下文） */
+const SWITCH_MODEL_TOOL = {
+  name: "switch_model",
+  description:
+    "切换你自己（deck 运行时）的底层模型：glm（GLM）或 gpt（GPT）。当前模型额度不足、任务更适合另一家时使用。切换保留当前会话上下文。",
+  parameters: {
+    type: "object",
+    properties: {
+      model: { type: "string", enum: ["glm", "gpt"], description: "目标模型" },
+    },
+    required: ["model"],
+  },
+  execute: async (_id, args) => {
+    const target = String(args?.model ?? "").toLowerCase();
+    if (!["glm", "gpt"].includes(target) || !modelKeys[target]) {
+      return {
+        content: [{ type: "text", text: `未配置 ${target} 的 API Key，无法切换` }],
+        isError: true,
+      };
+    }
+    try {
+      if (!session) throw new Error("会话未建立");
+      await session.setModel(resolveModel(target));
+      currentModel = JSON.stringify([target, currentCwd, "auto"]);
+      return {
+        content: [{ type: "text", text: `已切换到底层模型 ${target}，会话上下文保留` }],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: "切换失败：" + String(e?.message ?? e) }],
+        isError: true,
+      };
+    }
+  },
+};
+
 const DELEGATE_TOOLS = [
   {
     name: "delegate_to_zcode",
@@ -164,57 +226,82 @@ const DELEGATE_TOOLS = [
 
 // ── 模型解析：GLM / GPT（pi-ai ModelRegistry 风格的内置目录） ──────
 
-function resolveModel(name, apiKey, baseUrl) {
+function resolveModel(name) {
   // pi-ai 的 Model 对象最小面：provider/id/apiKey/baseURL
   if (name === "glm") {
     return {
       provider: "zai",
       id: "glm-4.7",
-      apiKey,
+      apiKey: modelKeys.glm,
       // Z.ai coding-plan key 配套的 OpenAI 兼容端点
-      baseUrl: baseUrl || process.env.ZAI_BASE_URL || "https://api.z.ai/api/coding/paas/v4",
+      baseUrl: modelUrls.glm || process.env.ZAI_BASE_URL || "https://api.z.ai/api/coding/paas/v4",
     };
   }
   return {
     provider: "openai",
     id: "gpt-5.1",
-    apiKey,
-    baseUrl: baseUrl || process.env.OPENAI_BASE_URL,
+    apiKey: modelKeys.gpt,
+    baseUrl: modelUrls.gpt || process.env.OPENAI_BASE_URL,
   };
+}
+
+/** 模型自治链：按可用 key 顺序降级（glm 优先） */
+function modelChain() {
+  const chain = [];
+  if (modelKeys.glm) chain.push("glm");
+  if (modelKeys.gpt) chain.push("gpt");
+  return chain;
 }
 
 // ── 会话生命周期 ─────────────────────────────────────────────
 
-async function ensureSession({ model, apiKey, baseUrl, cwd, mode }) {
-  const want = JSON.stringify([model, Boolean(apiKey), baseUrl, cwd, mode]);
+/** deck 自持工具集（抄 OpenCode 工具形态）：读/写/改/命令/搜索/定位/列表 */
+function buildTools(mode) {
+  const factories = [
+    m_createReadTool,
+    m_createWriteTool,
+    m_createEditTool,
+    m_createBashTool,
+    m_createGrepTool,
+    m_createFindTool,
+    m_createLsTool,
+  ];
+  let tools = [];
+  for (const f of factories) {
+    try {
+      const t = f?.();
+      if (t) tools.push(t);
+    } catch {
+      /* 逐个容错 */
+    }
+  }
+  if (tools.length === 0) tools = [...createCodingTools()];
+  // 委派工具：互调是 deck 运行时的一等能力；switch_model：模型自治
+  tools = [...tools, ...DELEGATE_TOOLS, SWITCH_MODEL_TOOL];
+  // 权限门：approved 模式下全部工具（含委派）执行前经 UI 审批
+  return mode === "approved" ? tools.map(wrapWithGate) : tools;
+}
+
+async function ensureSessionFor(name, { cwd, mode }) {
+  const resolved = resolveModel(name);
+  if (!resolved.apiKey) {
+    throw new Error(`未配置 ${name === "glm" ? "GLM" : "GPT"} 的 API Key（设置面板）`);
+  }
+  const want = JSON.stringify([name, cwd, mode]);
   if (session && currentModel === want) return session;
 
-  const resolved = resolveModel(model, apiKey, baseUrl);
-  if (!resolved.apiKey) {
-    throw new Error(
-      `缺少 ${model === "glm" ? "ZAI_API_KEY" : "OPENAI_API_KEY"}（指令里带 apiKey 或环境变量均可）`,
-    );
-  }
-
   if (session) {
-    try { await session.dispose?.(); } catch {}
+    try {
+      await session.dispose?.();
+    } catch {}
     session = null;
   }
 
   currentCwd = cwd || process.cwd();
-  const builtin = createCodingTools();
-  const gated = mode === "approved" ? builtin.map(wrapWithGate) : builtin;
   session = await createAgentSession({
     cwd: currentCwd,
     model: resolved,
-    // 委派工具始终注册（互调是 deck 运行时的一等能力）；
-    // approved 模式下委派工具同样过权限门
-    customTools: [
-      ...gated,
-      ...(mode === "approved"
-        ? DELEGATE_TOOLS.map(wrapWithGate)
-        : DELEGATE_TOOLS),
-    ],
+    customTools: buildTools(mode),
     noTools: undefined,
   });
   currentModel = want;
@@ -260,13 +347,53 @@ function wrapWithGate(tool) {
 async function handle(msg) {
   switch (msg.cmd) {
     case "run": {
-      try {
-        const s = await ensureSession(msg);
-        deckEvent("run_start", { model: msg.model });
-        await s.prompt(msg.prompt);
-        deckEvent("run_end");
-      } catch (err) {
-        deckEvent("error", { message: String(err?.message ?? err) });
+      // 同步双池 key/url
+      modelKeys.glm = msg.apiKeyGlm || null;
+      modelKeys.gpt = msg.apiKeyGpt || null;
+      modelUrls.glm = msg.baseUrlGlm || null;
+      modelUrls.gpt = msg.baseUrlGpt || null;
+
+      const chain = modelChain();
+      if (chain.length === 0) {
+        deckEvent("error", {
+          message: "未配置任何模型 Key——请到设置面板填写 GLM/GPT 的 API Key",
+        });
+        break;
+      }
+
+      // 模型自治：主模型失败（额度/认证/网络）自动降级到链中下一个
+      let lastErr = null;
+      let succeeded = false;
+      for (let i = 0; i < chain.length; i++) {
+        const name = chain[i];
+        try {
+          const s = await ensureSessionFor(name, {
+            cwd: msg.cwd,
+            mode: msg.mode === "approved" ? "approved" : "auto",
+          });
+          deckEvent("run_start", { model: name });
+          // 通用级运行规范：仅会话首轮注入（纪律只说一次）
+          const promptText = firstRun
+            ? UNIVERSAL_PROMPT + "\n\n==== 任务 ====\n" + msg.prompt
+            : msg.prompt;
+          await s.prompt(promptText);
+          firstRun = false;
+          succeeded = true;
+          deckEvent("run_end");
+          break;
+        } catch (err) {
+          lastErr = err;
+          const reason = String(err?.message ?? err).slice(0, 160);
+          deckEvent("status", { text: `${name} 执行失败：${reason}` });
+          if (i < chain.length - 1) {
+            deckEvent("status", { text: `自动切换到 ${chain[i + 1]} 继续` });
+          }
+        }
+      }
+      if (!succeeded && lastErr) {
+        deckEvent("error", {
+          message: `所有已配置模型均失败：${String(lastErr?.message ?? lastErr)}`,
+        });
       }
       break;
     }
@@ -293,10 +420,13 @@ async function handle(msg) {
     case "summarize": {
       // 会话压缩：把交接记录压成结构化简报（AI 交接的核心步骤）
       try {
-        const s = await ensureSession({
-          model: msg.model || "glm",
-          apiKey: msg.apiKey,
-          baseUrl: msg.baseUrl,
+        modelKeys.glm = msg.apiKeyGlm || null;
+        modelKeys.gpt = msg.apiKeyGpt || null;
+        modelUrls.glm = msg.baseUrlGlm || null;
+        modelUrls.gpt = msg.baseUrlGpt || null;
+        const chain = modelChain();
+        if (chain.length === 0) throw new Error("未配置任何模型 Key（设置面板）");
+        const s = await ensureSessionFor(chain[0], {
           cwd: msg.cwd || process.cwd(),
           mode: "auto",
         });

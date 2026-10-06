@@ -26,9 +26,18 @@ pub struct PiRunParams {
     pub api_key: Option<String>,
     /// "auto"（全自动）| "approved"（工具执行前审批）
     pub mode: String,
-    /// OpenAI 兼容端点（可选，空 = 各 provider 默认）
+    /// GLM key（模型自治链的主模型）
     #[serde(default)]
-    pub base_url: Option<String>,
+    pub api_key_glm: Option<String>,
+    /// GPT key（降级模型）
+    #[serde(default)]
+    pub api_key_gpt: Option<String>,
+    /// GLM OpenAI 兼容端点（可选）
+    #[serde(default)]
+    pub base_url_glm: Option<String>,
+    /// GPT 端点（可选）
+    #[serde(default)]
+    pub base_url_gpt: Option<String>,
 }
 
 /// 每个 task_id 一个发送端：往 sidecar stdin 写指令。
@@ -96,8 +105,10 @@ pub async fn run_pi_task(
         "prompt": params.prompt,
         "model": params.model,
         "cwd": params.cwd,
-        "apiKey": params.api_key,
-        "baseUrl": params.base_url,
+        "apiKeyGlm": params.api_key_glm,
+        "apiKeyGpt": params.api_key_gpt,
+        "baseUrlGlm": params.base_url_glm,
+        "baseUrlGpt": params.base_url_gpt,
         "mode": params.mode,
     });
     stdin

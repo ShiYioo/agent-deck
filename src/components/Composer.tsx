@@ -168,19 +168,6 @@ export const Composer = memo(function Composer({
           title="选择 harness"
         />
 
-        {/* deck 执行器：选底层模型（GLM/GPT 经 pi 运行时） */}
-        {harness === "deck" && (
-          <Dropdown
-            value={mode === "gpt" ? "gpt" : "glm"}
-            onChange={onModeChange}
-            options={[
-              { value: "glm", label: "GLM" },
-              { value: "gpt", label: "GPT" },
-            ]}
-            title="底层模型"
-          />
-        )}
-
         {/* codex/opencode：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
         {MODEL_CATALOG[harness] && (
           <Dropdown

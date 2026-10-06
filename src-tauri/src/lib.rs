@@ -69,35 +69,30 @@ async fn start_task(
     model: Option<String>,
     permission: Option<String>,
     resume_session_id: Option<String>,
-    api_key: Option<String>,
 ) -> Result<TaskStartInfo, String> {
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
         store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref(), None)?;
-        // API key 从设置读取（前端设置面板写入），入参与环境变量作为回退
-        let api_key = store
-            .get_setting("deck_api_key")?
-            .or(api_key)
-            .or_else(|| std::env::var("ZAI_API_KEY").ok())
+        // 双池 key/url 从设置读取（模型自治链在 sidecar 内自动降级）
+        let api_key_glm = store
+            .get_setting("deck_api_key_glm")?
+            .or_else(|| std::env::var("ZAI_API_KEY").ok());
+        let api_key_gpt = store
+            .get_setting("deck_api_key_gpt")?
             .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-        // API 端点同样从设置读取（空 = provider 默认）
-        let base_url = if mode.as_deref() == Some("gpt") {
-            store.get_setting("deck_base_url_gpt")?
-        } else {
-            store.get_setting("deck_base_url_glm")?
-        };
+        let base_url_glm = store.get_setting("deck_base_url_glm")?;
+        let base_url_gpt = store.get_setting("deck_base_url_gpt")?;
         let params = pi_session::PiRunParams {
             prompt,
-            model: if mode.as_deref() == Some("gpt") {
-                "gpt"
-            } else {
-                "glm"
-            }
-            .into(),
+            // "auto"：模型自治链由 sidecar 决定（GLM 优先，失败自动降级）
+            model: "auto".into(),
             cwd,
-            api_key,
-            base_url,
+            api_key: None,
+            api_key_glm,
+            api_key_gpt,
+            base_url_glm,
+            base_url_gpt,
             // approved = 工具执行前经 UI 审批（P2 权限门）
             mode: if permission.as_deref() == Some("approved") {
                 "approved"
