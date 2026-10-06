@@ -69,6 +69,12 @@ async fn start_task(
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
         store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref())?;
+        // API key 从设置读取（前端设置面板写入），入参与环境变量作为回退
+        let api_key = store
+            .get_setting("deck_api_key")?
+            .or(api_key)
+            .or_else(|| std::env::var("ZAI_API_KEY").ok())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
         let params = pi_session::PiRunParams {
             prompt,
             model: if mode.as_deref() == Some("gpt") {
@@ -240,6 +246,17 @@ fn pi_command(
     pi_session::send_command(&pi_registry, &task_id, &cmd, id)
 }
 
+/// 前端 → Rust：读写设置（如 deck API key）。
+#[tauri::command]
+fn get_setting(store: State<'_, Store>, key: String) -> Result<Option<String>, String> {
+    store.get_setting(&key)
+}
+
+#[tauri::command]
+fn set_setting(store: State<'_, Store>, key: String, value: String) -> Result<(), String> {
+    store.set_setting(&key, &value)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -259,7 +276,9 @@ pub fn run() {
             get_task_events,
             get_task_diff,
             run_login,
-            pi_command
+            pi_command,
+            get_setting,
+            set_setting
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

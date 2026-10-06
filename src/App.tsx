@@ -4,17 +4,19 @@ import {
   cancelTask,
   getTaskDiff,
   getTaskEvents,
+  invokePiCommand,
   listTasks,
   runLogin,
   startTask,
 } from "./api";
-import type { AgentEvent, LiveTask, TaskRow } from "./types";
+import type { AgentEvent, ApprovalRequest, LiveTask, TaskRow } from "./types";
 import { piEventToAgentEvent } from "./types";
 import { Sidebar, projectName, HARNESS_ACCENT } from "./components/Sidebar";
 import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
 import { DiffModal } from "./components/DiffModal";
+import { SettingsModal } from "./components/SettingsModal";
 import {
   IconBrandMark,
   IconBack,
@@ -38,6 +40,10 @@ export default function App() {
   // diff 弹层
   const [diff, setDiff] = useState<{ taskId: string; text: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // 待审批的工具调用（deck 运行时 approved 模式）
+  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refreshHistory = useCallback(() => {
     listTasks().then(setHistory).catch(() => {});
@@ -76,6 +82,18 @@ export default function App() {
         const payload = e.payload as { taskId?: string } & Record<string, unknown>;
         const taskId = payload.taskId;
         if (!taskId) return;
+        // 审批请求：单独呈现在操作区
+        if (payload.type === "deck_approval_request") {
+          setApproval({
+            id: String(payload.id ?? ""),
+            tool: String(payload.tool ?? "tool"),
+            args: (payload.args as Record<string, unknown>) ?? {},
+          });
+          return;
+        }
+        if (payload.type === "deck_approval_decided") {
+          setApproval(null);
+        }
         const mapped = piEventToAgentEvent(payload as never);
         setLive((prev) => {
           const task = prev[taskId];
@@ -89,7 +107,10 @@ export default function App() {
                 : task.running;
           return { ...prev, [taskId]: { ...task, events, running } };
         });
-        if (payload.type === "deck_run_end") setTimeout(refreshHistory, 300);
+        if (payload.type === "deck_run_end") {
+          setApproval(null);
+          setTimeout(refreshHistory, 300);
+        }
       }),
     ];
     return () => {
@@ -101,26 +122,15 @@ export default function App() {
   const handleSend = async (text: string) => {
     setActionError(null);
     const row = selected ? history.find((t) => t.id === selected) : undefined;
-    const isDeck = !row && harness === "deck";
-    // deck 执行器的 API key：localStorage 简易存储（设置面板在 M4）
-    const apiKey = isDeck
-      ? localStorage.getItem("deck_api_key") || undefined
-      : undefined;
-    if (isDeck && !apiKey) {
-      setActionError(
-        "AgentDeck Agent 需要 API key：在控制台执行 localStorage.setItem('deck_api_key','你的key') 后重试（设置面板开发中）",
-      );
-      return;
-    }
+    // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
     const canResume = !!row && !!row.session_id && row.status !== "running";
     try {
       const taskId = await startTask({
         harness: canResume ? row.harness : harness,
         cwd: canResume ? row.cwd : cwd || ".",
         prompt: text,
-        mode: canResume ? row.mode : harness === "zcode" ? mode : null,
+        mode: canResume ? row.mode : harness === "zcode" ? mode : mode,
         resumeSessionId: canResume ? row.session_id : null,
-        apiKey,
       });
       setLive((prev) => ({
         ...prev,
@@ -185,7 +195,7 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <Rail onNew={() => setSelected(null)} />
+      <Rail onNew={() => setSelected(null)} onSettings={() => setSettingsOpen(true)} />
       <Sidebar tasks={history} selectedId={selected} onSelect={(id) => viewTask(id)} />
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -287,6 +297,43 @@ export default function App() {
               </div>
             )}
 
+            {/* 审批卡片：deck 运行时 approved 模式的工具授权 */}
+            {approval && selectedRunning && (
+              <div className="anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
+                <div className="text-xs font-medium text-amber-800">
+                  Agent 请求执行工具：<span className="font-mono">{approval.tool}</span>
+                </div>
+                <pre className="mt-1.5 max-h-32 overflow-auto rounded-md bg-white/80 p-2 font-mono text-[10px] leading-relaxed text-stone-600">
+                  {JSON.stringify(approval.args, null, 2)}
+                </pre>
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    onClick={() =>
+                      selected &&
+                      invokePiCommand(selected, "approve", approval.id).finally(() =>
+                        setApproval(null),
+                      )
+                    }
+                    className="rounded-full bg-emerald-600 px-3.5 py-1 font-medium text-white transition-colors hover:bg-emerald-500"
+                  >
+                    允许
+                  </button>
+                  <button
+                    onClick={() =>
+                      selected &&
+                      invokePiCommand(selected, "reject", approval.id).finally(() =>
+                        setApproval(null),
+                      )
+                    }
+                    className="rounded-full border border-red-300 px-3.5 py-1 font-medium text-red-600 transition-colors hover:bg-red-50"
+                  >
+                    拒绝
+                  </button>
+                  <span className="text-stone-400">执行将阻塞等待你的决定</span>
+                </div>
+              </div>
+            )}
+
             <LogPanel key={selected} events={selectedEvents} running={selectedRunning} />
           </div>
         )}
@@ -307,6 +354,7 @@ export default function App() {
         </div>
 
         {diff && <DiffModal text={diff.text} onClose={() => setDiff(null)} />}
+        {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       </main>
     </div>
   );

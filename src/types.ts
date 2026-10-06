@@ -15,11 +15,23 @@ export type AgentEvent =
 export type PiEvent = {
   type: string;
   taskId?: string;
+  // 审批请求携带的工具信息
+  id?: string;
+  tool?: string;
+  args?: Record<string, unknown>;
   // message_update / message_end 等按需展开的松散字段
   [key: string]: unknown;
 };
 
-/** 把 pi 事件归一化为可渲染事件（与 CLI 事件同一套 UI） */
+/** 审批请求渲染用的结构 */
+export type ApprovalRequest = {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+};
+
+/** 把 pi 事件归一化为可渲染事件（与 CLI 事件同一套 UI）。
+ *  审批请求不进日志流，由 App 单独呈现为操作卡片。 */
 export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
   const t = ev.type;
   if (t === "deck_error") {
@@ -27,8 +39,11 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
   }
   if (t === "deck_run_start") return { type: "status", text: "pi 运行时启动" };
   if (t === "deck_run_end") return { type: "complete", ok: true };
-  if (t === "deck_approval_request") {
-    return { type: "status", text: "等待工具审批…" };
+  if (t === "deck_approval_decided") {
+    return {
+      type: "status",
+      text: ev.approved ? "已批准" : "已拒绝",
+    };
   }
   if (t === "tool_execution_start") {
     return {

@@ -34,3 +34,19 @@ export async function getTaskDiff(taskId: string): Promise<string> {
 export async function runLogin(harness: string): Promise<void> {
   await invoke("run_login", { harness });
 }
+
+export async function invokePiCommand(
+  taskId: string,
+  cmd: string,
+  id?: string,
+): Promise<void> {
+  await invoke("pi_command", { taskId, cmd, id: id ?? null });
+}
+
+export async function getSetting(key: string): Promise<string | null> {
+  return await invoke<string | null>("get_setting", { key });
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  await invoke("set_setting", { key, value });
+}

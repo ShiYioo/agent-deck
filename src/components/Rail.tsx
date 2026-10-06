@@ -1,7 +1,13 @@
 import { IconBrandMark, IconPlus, IconClock, IconGear } from "./icons";
 
 /** 最左侧窄图标栏：品牌符 + 主操作，全部自绘图标 */
-export function Rail({ onNew }: { onNew: () => void }) {
+export function Rail({
+  onNew,
+  onSettings,
+}: {
+  onNew: () => void;
+  onSettings: () => void;
+}) {
   return (
     <nav className="flex h-full w-14 shrink-0 flex-col items-center border-r border-stone-200/70 bg-stone-50 py-4">
       {/* 品牌砖：墨色渐变 + 内侧高光 + 双色品牌符 */}
@@ -31,8 +37,9 @@ export function Rail({ onNew }: { onNew: () => void }) {
       </button>
       <div className="mt-auto">
         <button
-          title="设置（开发中）"
-          className="hover-lift flex h-9 w-9 items-center justify-center rounded-lg text-stone-300 hover:bg-stone-200/70 hover:text-stone-600"
+          onClick={onSettings}
+          title="设置"
+          className="hover-lift flex h-9 w-9 items-center justify-center rounded-lg text-stone-400 hover:bg-stone-200/70 hover:text-stone-700"
         >
           <IconGear size={18} />
         </button>
