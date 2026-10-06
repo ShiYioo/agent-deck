@@ -86,6 +86,16 @@ export async function buildSmartHandoffPrompt(taskId: string): Promise<string> {
   return await invoke<string>("build_smart_handoff_prompt", { taskId });
 }
 
+/** 扫描本机可复用凭据（opencode auth.json / 环境变量） */
+export async function discoverCredentials(): Promise<
+  { target: string; source: string; key: string }[]
+> {
+  if (!inTauri) return [];
+  return await invoke<
+    { target: string; source: string; key: string }[]
+  >("discover_credentials", {});
+}
+
 /** 动态发现 harness 的真实模型列表（codex 读 desktop 状态、opencode 调 CLI） */
 export async function discoverModels(harness: string): Promise<string[]> {
   if (!inTauri) return [];
