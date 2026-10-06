@@ -1,14 +1,10 @@
 import { useState } from "react";
 
 import { HARNESS_ACCENT } from "./Sidebar";
-import {
-  IconFolder,
-  IconSend,
-  IconPlus,
-  IconChevronDown,
-} from "./icons";
+import { IconFolder, IconSend, IconPlus } from "./icons";
+import { Dropdown } from "./Dropdown";
 
-/** 底部输入卡：目录 chip + 多行输入 + harness/模式选择 + 圆形发送键。
+/** 底部输入卡：目录 chip + 多行输入 + harness/模式下拉 + 圆形发送键。
  *  聚焦时边框深化、阴影抬升、底部品牌色细线渐显。 */
 export function Composer({
   cwd,
@@ -80,8 +76,8 @@ export function Composer({
           <IconPlus size={15} />
         </button>
 
-        {/* harness 选择：身份色信号点 + 自绘 chevron */}
-        <SelectChip
+        {/* harness 下拉：身份色信号点 */}
+        <Dropdown
           value={harness}
           onChange={onHarnessChange}
           dotColor={accent}
@@ -89,10 +85,11 @@ export function Composer({
             { value: "zcode", label: "ZCode · GLM" },
             { value: "codex", label: "Codex · GPT" },
           ]}
+          title="选择 harness"
         />
 
         {harness === "zcode" && (
-          <SelectChip
+          <Dropdown
             value={mode}
             onChange={onModeChange}
             options={[
@@ -101,6 +98,7 @@ export function Composer({
               { value: "edit", label: "edit" },
               { value: "plan", label: "只读规划" },
             ]}
+            title="权限模式"
           />
         )}
 
@@ -134,41 +132,5 @@ export function Composer({
         }}
       />
     </div>
-  );
-}
-
-/** 极简 select：无边框、身份色信号点（可选）、自绘 chevron */
-function SelectChip({
-  value,
-  onChange,
-  options,
-  dotColor,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-  dotColor?: string;
-}) {
-  return (
-    <label className="hover-lift relative flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs text-stone-600 hover:bg-stone-100">
-      {dotColor && (
-        <span
-          className="h-1.5 w-1.5 rounded-full"
-          style={{ backgroundColor: dotColor }}
-        />
-      )}
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="cursor-pointer appearance-none bg-transparent pr-4 outline-none"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <IconChevronDown size={12} className="pointer-events-none absolute right-1.5 text-stone-400" />
-    </label>
   );
 }

@@ -231,6 +231,14 @@ export function IconGlobe({ size = 14, className }: IconProps) {
   );
 }
 
+export function IconCheck({ size = 14, className }: IconProps) {
+  return (
+    <svg {...stroke(size, { className })}>
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </svg>
+  );
+}
+
 export function IconCheckCircle({ size = 14, className }: IconProps) {
   return (
     <svg {...stroke(size, { className })}>
