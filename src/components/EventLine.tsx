@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { AgentEvent } from "../types";
 import {
   IconPrompt,
@@ -21,7 +22,8 @@ function ToolIcon({ tool }: { tool: string }) {
 }
 
 /** 单条事件渲染：入场滑入动画 + 语义图标 + 语义配色（暖纸主题） */
-export function EventLine({
+/** 单条事件渲染：memo 化——流式高频更新时只渲染新增的一条 */
+export const EventLine = memo(function EventLine({
   event,
   stagger = 0,
 }: {
@@ -109,4 +111,4 @@ export function EventLine({
     default:
       return null;
   }
-}
+});

@@ -138,12 +138,15 @@ impl Store {
 
     pub fn append_event(&self, task_id: &str, event_json: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
-        conn.execute(
-            "INSERT INTO task_events (task_id, seq, event)
-             SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2 FROM task_events WHERE task_id = ?1",
-            params![task_id, event_json],
-        )
-        .map_err(|e| e.to_string())?;
+        // 热路径（每条事件一次）：prepare_cached 避免逐条重复编译 SQL
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT INTO task_events (task_id, seq, event)
+                 SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2 FROM task_events WHERE task_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        stmt.execute(params![task_id, event_json])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

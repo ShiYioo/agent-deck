@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
@@ -33,6 +33,8 @@ import {
   IconDiff,
   IconStop,
 } from "./components/icons";
+
+const emptyEvents: AgentEvent[] = [];
 
 export default function App() {
   // composer 的全局默认值
@@ -209,20 +211,21 @@ export default function App() {
   }, [refreshHistory]);
 
   // 发送：选中已完成任务且有会话 ID → 续接；否则开新任务
-  const handleSend = async (text: string) => {
-    setActionError(null);
-    const row = selected ? history.find((t) => t.id === selected) : undefined;
-    // 运行中：消息入队（抄 VK queued message），任务成功结束后自动续发
-    if (selected && live[selected]?.running) {
-      setLive((prev) => ({
-        ...prev,
-        [selected]: {
-          ...prev[selected],
-          queued: [...(prev[selected].queued ?? []), text],
-        },
-      }));
-      return;
-    }
+  const handleSend = useCallback(
+    async (text: string) => {
+      setActionError(null);
+      const row = selected ? history.find((t) => t.id === selected) : undefined;
+      // 运行中：消息入队（抄 VK queued message），任务成功结束后自动续发
+      if (selected && liveRef.current[selected]?.running) {
+        setLive((prev) => ({
+          ...prev,
+          [selected]: {
+            ...prev[selected],
+            queued: [...(prev[selected].queued ?? []), text],
+          },
+        }));
+        return;
+      }
     // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
     const canResume = !!row && !!row.session_id && row.status !== "running";
     // 记住这次的工作目录，下次启动作为默认
@@ -258,25 +261,25 @@ export default function App() {
     } catch (e) {
       setActionError(String(e));
     }
-  };
-
-  // 查看任务：优先实时缓冲，否则回放数据库事件
-  const viewTask = useCallback(
-    async (taskId: string) => {
-      setSelected(taskId);
-      if (live[taskId] || historyEvents[taskId]) return;
-      try {
-        const events = await getTaskEvents(taskId);
-        setHistoryEvents((prev) => ({ ...prev, [taskId]: events }));
-      } catch {
-        setHistoryEvents((prev) => ({ ...prev, [taskId]: [] }));
-      }
     },
-    [live, historyEvents],
+    [selected, harness, mode, model, cwd, history, permission, flushQueued, refreshHistory],
   );
 
-  // 常用模型（按历史使用频次排序，抄 VK ExecutorRecentModels）
-  const recentModels = (() => {
+  // 查看任务：优先实时缓冲，否则回放数据库事件
+  const historyEventsRef = useRef(historyEvents);
+  historyEventsRef.current = historyEvents;
+  const viewTask = useCallback(async (taskId: string) => {
+    setSelected(taskId);
+    if (liveRef.current[taskId] || historyEventsRef.current[taskId]) return;
+    try {
+      const events = await getTaskEvents(taskId);
+      setHistoryEvents((prev) => ({ ...prev, [taskId]: events }));
+    } catch {
+      setHistoryEvents((prev) => ({ ...prev, [taskId]: [] }));
+    }
+  }, []);
+
+  const recentModels = useMemo(() => {
     const counts = new Map<string, number>();
     for (const t of history) {
       if (t.model && t.harness === harness) {
@@ -284,14 +287,25 @@ export default function App() {
       }
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m);
-  })();
+  }, [history, harness]);
+
+  const handleSelect = useCallback(
+    (id: string) => {
+      void viewTask(id);
+    },
+    [viewTask],
+  );
 
   const selectedRow = selected ? history.find((t) => t.id === selected) : undefined;
   const selectedLive = selected ? live[selected] : undefined;
   const selectedEvents =
-    selectedLive?.events.map((e) => e.event) ??
-    (selected ? historyEvents[selected] : undefined) ??
-    [];
+    useMemo(
+      () =>
+        selectedLive?.events.map((e) => e.event) ??
+        (selected ? historyEvents[selected] : undefined) ??
+        emptyEvents,
+      [selectedLive, selected, historyEvents],
+    );
   const selectedRunning = selectedLive?.running ?? selectedRow?.status === "running";
   const selectedSession = selectedLive?.sessionId ?? selectedRow?.session_id ?? null;
   const selectedCanResume = !!selectedRow && !!selectedSession && !selectedRunning;
@@ -355,7 +369,7 @@ export default function App() {
   return (
     <div className="flex h-full">
       <Rail onNew={() => setSelected(null)} onSettings={() => setSettingsOpen(true)} />
-      <Sidebar tasks={history} selectedId={selected} onSelect={(id) => viewTask(id)} />
+      <Sidebar tasks={history} selectedId={selected} onSelect={handleSelect} />
 
       <main className="flex min-w-0 flex-1 flex-col">
         {selected === null ? (
@@ -609,7 +623,10 @@ export default function App() {
   );
 }
 
-/** 会话日志面板：历史回放时错落入场，实时流式时逐条滑入；自动平滑滚动到底部 */
+/** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
+const MAX_RENDER = 500;
+
+/** 会话日志面板：历史回放时错落入场，实时流式时逐条滑入；rAF 节流自动滚底 */
 function LogPanel({
   events,
   running,
@@ -619,18 +636,32 @@ function LogPanel({
 }) {
   const logRef = useRef<HTMLDivElement | null>(null);
   const prevCount = useRef(0);
+  const scrollPending = useRef(false);
   const staggerInitial = prevCount.current === 0 && events.length > 0;
 
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    if (scrollPending.current) return;
+    scrollPending.current = true;
+    requestAnimationFrame(() => {
+      scrollPending.current = false;
+      logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    });
     prevCount.current = events.length;
   }, [events.length]);
+
+  const overflow = events.length - MAX_RENDER;
+  const visible = overflow > 0 ? events.slice(overflow) : events;
 
   return (
     <div
       ref={logRef}
       className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 py-4 font-mono text-xs leading-relaxed"
     >
+      {overflow > 0 && (
+        <div className="py-1 text-center text-[10px] text-stone-400">
+          前 {overflow} 条已折叠（完整记录在数据库中）
+        </div>
+      )}
       {events.length === 0 && (
         <div className="py-10 text-center text-stone-400">
           {running ? (
@@ -644,8 +675,12 @@ function LogPanel({
           )}
         </div>
       )}
-      {events.map((event, i) => (
-        <EventLine key={i} event={event} stagger={staggerInitial ? i : 0} />
+      {visible.map((event, i) => (
+        <EventLine
+          key={Math.max(overflow, 0) + i}
+          event={event}
+          stagger={staggerInitial ? i : 0}
+        />
       ))}
     </div>
   );

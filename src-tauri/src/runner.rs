@@ -63,9 +63,7 @@ pub async fn spawn(
 
     // 进程组启动：终止时整树杀（cmd → node → CLI 不留孤儿）
     use command_group::AsyncCommandGroup;
-    command
-        .group_spawn()
-        .map_err(|e| format!("启动失败：{e}"))
+    command.group_spawn().map_err(|e| format!("启动失败：{e}"))
 }
 
 /// 读取一个输出流，逐行解析为事件：入库 + 推送前端。

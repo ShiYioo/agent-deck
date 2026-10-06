@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { HARNESS_ACCENT } from "./Sidebar";
@@ -8,7 +8,7 @@ import { Dropdown } from "./Dropdown";
 
 /** 底部输入卡：目录 chip + 多行输入 + harness/模式下拉 + 圆形发送键。
  *  聚焦时边框深化、阴影抬升、底部品牌色细线渐显。 */
-export function Composer({
+export const Composer = memo(function Composer({
   cwd,
   onCwdChange,
   harness,
@@ -268,4 +268,4 @@ export function Composer({
       />
     </div>
   );
-}
+});

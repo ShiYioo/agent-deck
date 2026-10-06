@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { TaskRow } from "../types";
 import { IconBell, IconSearch, IconFolder, IconXCircle } from "./icons";
 
@@ -17,7 +18,7 @@ export const HARNESS_ACCENT: Record<string, string> = {
 };
 
 /** 左侧边栏：按项目（工作目录）分组的任务列表，带选中信号条与运行脉冲点 */
-export function Sidebar({
+export const Sidebar = memo(function Sidebar({
   tasks,
   selectedId,
   onSelect,
@@ -95,7 +96,7 @@ export function Sidebar({
       </div>
     </aside>
   );
-}
+});
 
 function IconChevronTiny() {
   return (
