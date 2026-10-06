@@ -52,6 +52,17 @@ AgentDeck 是一张「指挥台」：人负责意图与验收，agent 负责执�
 - **弹层**：背景 150ms 淡入，面板 240ms 弹性 pop（scale 0.97→1）。
 - **滚动**：日志平滑滚底（`.log-scroll`）。
 
+## 图标语言
+
+全部图标自绘于 `src/components/icons.tsx`，**全站禁用 emoji**。
+
+- 规格：24 视窗 / 1.8 描边 / 圆角端点 / `currentColor`，尺寸由 `size` 控制；
+- 母题：几何语言从品牌符「四菱风车」出发——直线、菱形、圆弧，不用斜切装饰；
+- 品牌符 `IconBrandMark`（实心四菱+半透中菱）只用于三处：rail 标识、空态主视觉（暖灰、
+  带环境浮动 `float-slow`）、应用图标（`scripts/gen_icons.py` 生成）；
+- 语义图标按工具名自动映射（EventLine）：shell→终端、file→文档笔、web→地球、其余→扳手；
+- 新增图标必须沿用同一规格，禁止引入图标库或 emoji。
+
 ## 无障碍
 
 `prefers-reduced-motion: reduce` 时，所有动画与过渡时长压到 0.01ms——

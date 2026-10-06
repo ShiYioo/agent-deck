@@ -1,4 +1,5 @@
 import type { TaskRow } from "../types";
+import { IconBell, IconSearch, IconFolder, IconXCircle } from "./icons";
 
 /** 取路径末段作为项目名（与 Codex 的项目分组一致） */
 export function projectName(cwd: string): string {
@@ -7,7 +8,7 @@ export function projectName(cwd: string): string {
   return seg || norm || "未设置目录";
 }
 
-/** harness 身份色：贯穿侧栏、任务头部、空态 */
+/** harness 身份色：贯穿侧栏、任务头部、发送键 */
 export const HARNESS_ACCENT: Record<string, string> = {
   zcode: "var(--harness-zcode)",
   codex: "var(--harness-codex)",
@@ -23,7 +24,6 @@ export function Sidebar({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
-  // 按项目分组，保持后端返回的时间倒序
   const groups: { name: string; rows: TaskRow[] }[] = [];
   for (const t of tasks) {
     const name = projectName(t.cwd);
@@ -36,37 +36,31 @@ export function Sidebar({
   }
 
   return (
-    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-zinc-100 bg-zinc-50/80">
+    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-stone-200/70 bg-stone-100/60">
       <div className="flex items-center justify-between px-4 pb-2 pt-4">
         <span className="text-lg font-semibold tracking-tight">AgentDeck</span>
-        <span className="text-xs text-zinc-300">⌄</span>
+        <IconChevronTiny />
       </div>
 
-      <div className="flex items-center gap-2 px-4 pb-3 text-zinc-400">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
-          <path d="M13.7 21a2 2 0 0 1-3.4 0" />
-        </svg>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="ml-auto">
-          <circle cx="11" cy="11" r="7" />
-          <path d="m21 21-4.3-4.3" />
-        </svg>
+      <div className="flex items-center gap-2 px-4 pb-3 text-stone-400">
+        <IconBell size={15} />
+        <IconSearch size={15} className="ml-auto" />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-        <div className="px-4 pb-1 text-xs font-medium text-zinc-400">项目</div>
+        <div className="px-4 pb-1 text-xs font-medium text-stone-400">项目</div>
         {groups.length === 0 && (
-          <div className="px-4 py-6 text-xs text-zinc-400">还没有任务</div>
+          <div className="px-4 py-6 text-xs text-stone-400">还没有任务</div>
         )}
         {groups.map((g) => {
           const hasRunning = g.rows.some((r) => r.status === "running");
           return (
             <div key={g.name + g.rows[0]?.id} className="mb-2">
-              <div className="mx-2 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-zinc-700">
-                <span className="text-zinc-400">📁</span>
+              <div className="mx-2 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-stone-700">
+                <IconFolder size={15} className="shrink-0 text-stone-400" />
                 <span className="truncate">{g.name}</span>
                 {hasRunning && (
-                  <span className="pulse-dot ml-auto h-2 w-2 rounded-full" />
+                  <span className="pulse-dot ml-auto h-2 w-2 shrink-0 rounded-full" />
                 )}
               </div>
               {g.rows.map((t) => {
@@ -79,8 +73,8 @@ export function Sidebar({
                     style={{ ["--harness-accent" as string]: HARNESS_ACCENT[t.harness] }}
                     className={`side-item group mx-2 flex w-[calc(100%-1rem)] items-center gap-2 rounded-lg py-1.5 pl-6 pr-2 text-left text-sm ${
                       active
-                        ? "bg-zinc-200/70 text-zinc-900"
-                        : "text-zinc-600 hover:bg-zinc-200/50"
+                        ? "bg-stone-200/80 text-stone-900"
+                        : "text-stone-600 hover:bg-stone-200/50"
                     }`}
                   >
                     <span className="truncate">{t.prompt}</span>
@@ -88,7 +82,7 @@ export function Sidebar({
                       <span className="pulse-dot ml-auto h-2 w-2 shrink-0 rounded-full" />
                     )}
                     {t.status === "failed" && (
-                      <span className="ml-auto shrink-0 text-xs text-red-500">✗</span>
+                      <IconXCircle size={14} className="ml-auto shrink-0 text-red-500" />
                     )}
                   </button>
                 );
@@ -98,5 +92,13 @@ export function Sidebar({
         })}
       </div>
     </aside>
+  );
+}
+
+function IconChevronTiny() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-stone-300">
+      <path d="m6 9 6 6 6-6" />
+    </svg>
   );
 }

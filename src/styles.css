@@ -2,22 +2,22 @@
 
 /* ============================================================
    AgentDeck 设计系统 · Design Tokens
-   原则：中性纸面 + 双品牌信号色 + 三档动效时长 + 尊重系统减弱动效
-   详见 docs/DESIGN.md
+   视觉身份：暖纸 + 墨色 + 双品牌信号色；几何母题「四菱风车」
+   原则：三档动效时长 + 尊重系统减弱动效。详见 docs/DESIGN.md
    ============================================================ */
 
 :root {
-  /* —— 色板：纸面中性色 —— */
-  --bg: #ffffff;
-  --bg-subtle: #f7f7f8;
+  /* —— 色板：暖纸中性色（stone 系，区别于冷灰客户端） —— */
+  --bg: #fafaf9;
+  --bg-subtle: #f5f5f4;
   --surface: #ffffff;
-  --border: rgba(24, 24, 27, 0.08);
-  --border-strong: rgba(24, 24, 27, 0.16);
-  --text-1: #18181b;
-  --text-2: #52525b;
-  --text-3: #a1a1aa;
+  --border: rgba(28, 25, 23, 0.09);
+  --border-strong: rgba(28, 25, 23, 0.18);
+  --text-1: #1c1917;
+  --text-2: #57534e;
+  --text-3: #a8a29e;
 
-  /* —— 色板：品牌信号色（harness 身份色，贯穿全站） —— */
+  /* —— 品牌信号色（harness 身份，贯穿全站） —— */
   --harness-zcode: #059669; /* ZCode · GLM：翠绿 */
   --harness-codex: #0284c7; /* Codex · GPT：天蓝 */
 
@@ -27,15 +27,15 @@
   --ok: #059669;
 
   /* —— 动效：三档时长 + 出场曲线 —— */
-  --dur-1: 150ms; /* 微交互：hover、按钮 */
-  --dur-2: 240ms; /* 元素进出场：事件、弹层 */
-  --dur-3: 420ms; /* 场景切换：空态↔任务视图 */
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* 快出缓停 */
-  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1); /* 轻微回弹 */
+  --dur-1: 150ms;
+  --dur-2: 240ms;
+  --dur-3: 420ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
 
-  /* —— 阴影：两层温和阴影 —— */
-  --shadow-1: 0 1px 2px rgba(24, 24, 27, 0.05);
-  --shadow-2: 0 2px 8px rgba(24, 24, 27, 0.06), 0 12px 32px rgba(24, 24, 27, 0.07);
+  /* —— 阴影：暖墨色两层 —— */
+  --shadow-1: 0 1px 2px rgba(28, 25, 23, 0.05);
+  --shadow-2: 0 2px 8px rgba(28, 25, 23, 0.06), 0 12px 32px rgba(28, 25, 23, 0.08);
 }
 
 html,
@@ -53,13 +53,12 @@ body,
   -webkit-font-smoothing: antialiased;
 }
 
-/* 细滚动条 */
 *::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 *::-webkit-scrollbar-thumb {
-  background: #d4d4d8;
+  background: #d6d3d1;
   border-radius: 3px;
 }
 *::-webkit-scrollbar-track {
@@ -123,7 +122,16 @@ body,
   }
 }
 
-/* 思考流光：文字上有光带缓慢扫过 */
+/* 品牌符的环境浮动：缓慢上下，几不可察 */
+@keyframes float {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-7px);
+  }
+}
+
 @keyframes shimmer {
   from {
     background-position: 200% 0;
@@ -133,7 +141,6 @@ body,
   }
 }
 
-/* 运行中脉冲：圆点外圈扩散 */
 @keyframes pulse-ring {
   0% {
     box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45);
@@ -144,7 +151,6 @@ body,
   }
 }
 
-/* 运行中三点打字指示 */
 @keyframes typing-dot {
   0%,
   60%,
@@ -162,12 +168,9 @@ body,
    动效工具类
    ============================================================ */
 
-/* 场景切换（空态↔任务视图） */
 .anim-scene {
   animation: scene-in var(--dur-3) var(--ease-out) both;
 }
-
-/* 单元素进出场 */
 .anim-rise {
   animation: rise-in var(--dur-3) var(--ease-out) both;
 }
@@ -175,13 +178,11 @@ body,
   animation: fade-in var(--dur-2) var(--ease-out) both;
 }
 
-/* 日志事件滑入；支持 --stagger 排队 */
 .ev-in {
   animation: ev-in var(--dur-2) var(--ease-out) both;
   animation-delay: var(--stagger, 0ms);
 }
 
-/* 弹层 */
 .anim-backdrop {
   animation: fade-in var(--dur-1) ease-out both;
 }
@@ -189,9 +190,12 @@ body,
   animation: pop-in var(--dur-2) var(--ease-spring) both;
 }
 
-/* 思考流光文字 */
+.float-slow {
+  animation: float 5s var(--ease-out) infinite alternate;
+}
+
 .shimmer-text {
-  background: linear-gradient(90deg, #a1a1aa 30%, #52525b 50%, #a1a1aa 70%);
+  background: linear-gradient(90deg, #a8a29e 30%, #57534e 50%, #a8a29e 70%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -199,14 +203,12 @@ body,
   animation: shimmer 1.8s linear infinite;
 }
 
-/* 运行中脉冲点 */
 .pulse-dot {
   position: relative;
   background-color: #3b82f6;
   animation: pulse-ring 2s var(--ease-out) infinite;
 }
 
-/* 三点打字指示 */
 .typing-dots span {
   display: inline-block;
   width: 4px;
@@ -223,15 +225,14 @@ body,
   animation-delay: 300ms;
 }
 
-/* 空态点阵底纹：中心聚焦、边缘淡出 */
+/* 空态底纹：菱形晶格（品牌母题），中心聚焦、边缘淡出 */
 .grid-bg {
-  background-image: radial-gradient(circle, rgba(24, 24, 27, 0.055) 1px, transparent 1px);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M11 9.6 12.4 11 11 12.4 9.6 11z' fill='rgba(28,25,23,0.10)'/%3E%3C/svg%3E");
   background-size: 22px 22px;
   -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 42%, black 30%, transparent 78%);
   mask-image: radial-gradient(ellipse 70% 60% at 50% 42%, black 30%, transparent 78%);
 }
 
-/* 微交互：通用 hover 抬升 */
 .hover-lift {
   transition:
     transform var(--dur-1) var(--ease-out),
@@ -246,7 +247,6 @@ body,
   transform: translateY(0) scale(0.97);
 }
 
-/* Composer 聚焦态：边框深化 + 阴影抬升 */
 .composer-card {
   transition:
     border-color var(--dur-1) ease,
@@ -257,7 +257,7 @@ body,
   box-shadow: var(--shadow-2);
 }
 
-/* 侧栏选中项左侧信号条 */
+/* 侧栏选中项左侧身份色信号条 */
 .side-item {
   position: relative;
   transition:
@@ -280,12 +280,10 @@ body,
   opacity: 1;
 }
 
-/* 日志自动滚动走平滑曲线 */
 .log-scroll {
   scroll-behavior: smooth;
 }
 
-/* 尊重系统「减弱动效」：一切动画与过渡直接关闭 */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -14,6 +14,13 @@ import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
 import { DiffModal } from "./components/DiffModal";
+import {
+  IconBrandMark,
+  IconBack,
+  IconKey,
+  IconDiff,
+  IconStop,
+} from "./components/icons";
 
 export default function App() {
   // composer 的全局默认值
@@ -149,54 +156,64 @@ export default function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         {selected === null ? (
-          // ── 空态：点阵底纹 + 错落入场 ──
-          <div key="empty" className="anim-scene relative flex flex-1 flex-col items-center justify-center px-8">
+          // ── 空态：菱形晶格底纹 + 品牌符浮动 + 错落入场 ──
+          <div
+            key="empty"
+            className="anim-scene relative flex flex-1 flex-col items-center justify-center px-8"
+          >
             <div className="grid-bg pointer-events-none absolute inset-0" />
-            <div className="anim-rise relative mb-8 text-5xl text-zinc-300">
-              ❖
+            <div className="float-slow anim-rise relative mb-8 text-stone-300">
+              <IconBrandMark size={56} />
             </div>
             <div
-              className="anim-rise relative text-2xl font-medium tracking-tight text-zinc-800"
+              className="anim-rise relative text-2xl font-medium tracking-tight text-stone-800"
               style={{ animationDelay: "70ms" }}
             >
               我们应该在
-              <span className="mx-1 border-b-2 border-dotted border-zinc-400">
+              <span className="mx-1 border-b-2 border-dotted border-stone-400">
                 {projectName(cwd)}
               </span>
               中做些什么？
             </div>
           </div>
         ) : (
-          // ── 任务详情视图：场景切换动画 ──
-          <div key={`task-${selected}`} className="anim-scene flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center gap-2 border-b border-zinc-100 px-6 py-3 text-sm">
+          // ── 任务详情视图 ──
+          <div
+            key={`task-${selected}`}
+            className="anim-scene flex min-h-0 flex-1 flex-col"
+          >
+            <div className="flex items-center gap-2 border-b border-stone-200/70 px-6 py-3 text-sm">
               <button
                 onClick={() => setSelected(null)}
-                className="rounded-md px-2 py-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
+                className="rounded-md p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700"
                 title="返回新任务"
               >
-                ←
+                <IconBack size={15} />
               </button>
               <span
                 className="h-2 w-2 rounded-full"
                 style={{ backgroundColor: HARNESS_ACCENT[selectedHarness] }}
               />
-              <span className="font-mono text-xs" style={{ color: HARNESS_ACCENT[selectedHarness] }}>
+              <span
+                className="font-mono text-xs"
+                style={{ color: HARNESS_ACCENT[selectedHarness] }}
+              >
                 {selectedHarness}
               </span>
-              <span className="truncate text-zinc-500">
+              <span className="truncate text-stone-500">
                 {selectedRow?.cwd ?? selectedLive?.cwd}
               </span>
               <span className="flex-1" />
               {selectedRunning && (
                 <button
                   onClick={() => selected && cancelTask(selected).catch(() => {})}
-                  className="rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 transition-colors hover:bg-red-50"
+                  className="flex items-center gap-1.5 rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 transition-colors hover:bg-red-50"
                 >
+                  <IconStop size={13} />
                   终止
                 </button>
               )}
-              <span className="text-xs text-zinc-400">
+              <span className="text-xs text-stone-400">
                 {selectedRunning
                   ? "运行中…"
                   : selectedRow?.status === "done"
@@ -214,21 +231,23 @@ export default function App() {
                     onClick={() =>
                       runLogin(selectedRow?.harness ?? "zcode").catch(() => {})
                     }
-                    className="rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-100"
+                    className="flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-100"
                   >
-                    🔑 唤起登录
+                    <IconKey size={13} />
+                    唤起登录
                   </button>
                 )}
                 {canShowDiff && (
                   <button
                     onClick={showDiff}
-                    className="rounded-full border border-zinc-200 px-3 py-1 text-zinc-600 transition-colors hover:bg-zinc-100"
+                    className="flex items-center gap-1.5 rounded-full border border-stone-200 px-3 py-1 text-stone-600 transition-colors hover:bg-stone-100"
                   >
+                    <IconDiff size={13} />
                     查看 Diff
                   </button>
                 )}
                 {selectedCanResume && (
-                  <span className="text-zinc-400">在下方输入可续接此会话</span>
+                  <span className="text-stone-400">在下方输入可续接此会话</span>
                 )}
                 {actionError && <span className="text-red-600">{actionError}</span>}
               </div>
@@ -269,7 +288,6 @@ function LogPanel({
 }) {
   const logRef = useRef<HTMLDivElement | null>(null);
   const prevCount = useRef(0);
-  // 仅当本次渲染是「从零加载」（历史回放/新任务首条）时才排队入场
   const staggerInitial = prevCount.current === 0 && events.length > 0;
 
   useEffect(() => {
@@ -283,7 +301,7 @@ function LogPanel({
       className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 py-4 font-mono text-xs leading-relaxed"
     >
       {events.length === 0 && (
-        <div className="py-10 text-center text-zinc-400">
+        <div className="py-10 text-center text-stone-400">
           {running ? (
             <span className="typing-dots inline-flex items-center">
               <span />
