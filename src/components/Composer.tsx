@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { HARNESS_ACCENT } from "./Sidebar";
+import { inTauri } from "../api";
 import { IconFolder, IconSend, IconPlus } from "./icons";
 import { Dropdown } from "./Dropdown";
 
@@ -45,6 +46,10 @@ export function Composer({
       <div className="flex items-center gap-2 px-4 pt-3">
         <button
           onClick={async () => {
+            if (!inTauri) {
+              onCwdChange("（桌面应用内可选择文件夹）");
+              return;
+            }
             const picked = await open({ directory: true, multiple: false });
             if (typeof picked === "string") onCwdChange(picked);
           }}

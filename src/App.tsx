@@ -6,6 +6,7 @@ import {
   getTaskDiff,
   getTaskEvents,
   invokePiCommand,
+  inTauri,
   listTasks,
   runLogin,
   setSetting,
@@ -60,6 +61,7 @@ export default function App() {
 
   useEffect(() => {
     refreshHistory();
+    if (!inTauri) return; // 纯浏览器预览：无 IPC 桥，跳过事件监听
     const unlisteners: Promise<UnlistenFn>[] = [
       listen<{ taskId: string; event: AgentEvent }>("task-event", (e) => {
         const { taskId, event } = e.payload;
