@@ -1,3 +1,4 @@
+mod diff_watch;
 mod executors;
 mod handoff;
 mod pi_session;
@@ -526,6 +527,7 @@ pub fn run() {
         })
         .manage(TaskRegistry::default())
         .manage(pi_session::PiRegistry::default())
+        .manage(diff_watch::DiffWatchRegistry::default())
         .invoke_handler(tauri::generate_handler![
             start_task,
             cancel_task,
@@ -539,7 +541,9 @@ pub fn run() {
             get_default_cwd,
             discover_models,
             discover_credentials,
-            build_smart_handoff_prompt
+            build_smart_handoff_prompt,
+            diff_watch::diff_watch_start,
+            diff_watch::diff_watch_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

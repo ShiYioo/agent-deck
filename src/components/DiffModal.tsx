@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 
 import { IconClose } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
@@ -19,12 +19,9 @@ function diffStats(text: string) {
 /** 轻量 diff 渲染：按 +/-/@@ 行着色，不引入 Monaco 重依赖。
  *  头部标注改动归属（哪个 harness 的哪个模型改的）；
  *  running 时每 POLL_MS 触发一次 onRefresh（实时跟随 harness 改动）。 */
-const POLL_MS = 2000;
-
 export function DiffModal({
   text,
   onClose,
-  onRefresh,
   running = false,
   harness,
   model,
@@ -32,9 +29,7 @@ export function DiffModal({
 }: {
   text: string;
   onClose: () => void;
-  /** 重新拉取当前任务 diff（running 时由弹层定时调用） */
-  onRefresh?: () => void;
-  /** 任务是否运行中（决定实时轮询与徽章） */
+  /** 任务是否运行中（watcher 推流时显示实时徽章） */
   running?: boolean;
   harness?: string;
   model?: string | null;
@@ -46,12 +41,7 @@ export function DiffModal({
   const lines = useMemo(() => text.split("\n"), [text]);
   const stats = useMemo(() => diffStats(text), [text]);
 
-  // 实时跟随：任务运行中每 2s 重拉一次
-  useEffect(() => {
-    if (!running || !onRefresh) return;
-    const id = setInterval(onRefresh, POLL_MS);
-    return () => clearInterval(id);
-  }, [running, onRefresh]);
+  // 实时跟随由后端 watcher 推 diff-update 事件（App 统一监听）
 
   return (
     <div

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
@@ -206,6 +207,13 @@ export default function App() {
           setTimeout(refreshHistory, 300);
         }
       }),
+      // watcher 推流：弹层打开且归属匹配时更新 diff 文本
+      listen<{ taskId: string; text: string }>("diff-update", (e) => {
+        const { taskId, text } = e.payload;
+        if (diffRef.current?.taskId === taskId) {
+          setDiff({ taskId, text });
+        }
+      }),
     ];
     return () => {
       unlisteners.forEach((p) => p.then((un) => un()));
@@ -324,6 +332,19 @@ export default function App() {
     ({ event: e }) => e.type === "error" && e.kind === "quota",
   );
   // 运行中也可查看（实时轮询）；完成后为静态快照
+  // 实时 Diff watcher：弹层打开且任务运行中时监听工作目录，关闭/结束即停
+  const diffTaskId = diff?.taskId ?? null;
+  useEffect(() => {
+    if (!inTauri || !diffTaskId || !selectedRunning) return;
+    const cwd = selectedRowRef.current?.cwd;
+    if (!cwd) return;
+    invoke("diff_watch_start", { taskId: diffTaskId, cwd }).catch(() => {});
+    return () => {
+      invoke("diff_watch_stop", { taskId: diffTaskId }).catch(() => {});
+    };
+  }, [diffTaskId, selectedRunning]);
+
+
   const canShowDiff = !!selectedRow;
 
   // 会话接力：会话记录压缩为交接简报 → 派给目标 harness（同一工作目录）
@@ -374,13 +395,11 @@ export default function App() {
     }
   }, [selected]);
 
-  // DiffModal 实时轮询回调（运行中每 2s 由弹层触发）
-  const refreshDiff = useCallback(() => {
-    if (!selected) return;
-    getTaskDiff(selected)
-      .then((text) => setDiff({ taskId: selected, text }))
-      .catch(() => {});
-  }, [selected]);
+  // watcher 推流的弹层归属镜像
+  const diffRef = useRef(diff);
+  diffRef.current = diff;
+  const selectedRowRef = useRef(selectedRow);
+  selectedRowRef.current = selectedRow;
 
   return (
     <div className="flex h-full">
@@ -628,7 +647,6 @@ export default function App() {
           <DiffModal
             text={diff.text}
             running={selectedRunning}
-            onRefresh={refreshDiff}
             harness={selectedRow.harness}
             model={selectedRow.model}
             mode={selectedRow.mode}
