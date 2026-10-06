@@ -75,12 +75,6 @@ export async function getDefaultCwd(): Promise<string> {
   return await invoke<string>("get_default_cwd");
 }
 
-/** 构建跨 harness 会话交接 prompt（会话记录压缩 + 接手指令） */
-export async function buildHandoffPrompt(taskId: string): Promise<string> {
-  if (!inTauri) browserStub("会话接力");
-  return await invoke<string>("build_handoff_prompt", { taskId });
-}
-
 /** AI 会话接力：deck 运行时压缩会话记录为交接简报（失败自动回退机械版） */
 export async function buildSmartHandoffPrompt(taskId: string): Promise<string> {
   if (!inTauri) browserStub("会话接力");

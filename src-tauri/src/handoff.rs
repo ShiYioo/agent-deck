@@ -1,18 +1,9 @@
 //! 会话交接：把一个任务的会话记录压缩成接力 prompt，
 //! 交给另一个 harness 继续执行。
 //!
-//! 压缩策略（token 预算内保信息密度）：
-//! - 任务原话永远完整保留（意图不能失真）
-//! - 助手消息全保留（决策与结论）
-//! - 工具调用/结果截断（过程细节，够定位即可）
-//! - thinking/status/raw 丢弃（噪音）
-//! - 超预算时保头（前 4000 字符）掐尾，中间插入省略标记
+//! 压缩由 deck 运行时（pi）完成：AI 生成结构化交接简报，
+//! 本模块只负责事件流 → 纯文本记录、组装与尾部原文锚。
 
-use crate::store::Store;
-
-/// 对话记录的字符预算（约 5-6k token，给目标模型留足工作空间）
-const CONVO_BUDGET_CHARS: usize = 24_000;
-const HEAD_KEEP: usize = 4_000;
 const ENTRY_TRUNCATE: usize = 240;
 
 fn trunc(s: &str, max: usize) -> String {
@@ -78,56 +69,6 @@ pub(crate) fn render_conversation(events: &[String]) -> String {
     lines.join("\n")
 }
 
-/// 按预算截断对话：保头掐尾 + 省略标记。
-fn fit_budget(convo: &str) -> String {
-    let total = convo.chars().count();
-    if total <= CONVO_BUDGET_CHARS {
-        return convo.to_string();
-    }
-    let head: String = convo.chars().take(HEAD_KEEP).collect();
-    let tail_keep = CONVO_BUDGET_CHARS - HEAD_KEEP;
-    let skip = total - tail_keep;
-    let mut tail: String = convo.chars().skip(skip).collect();
-    if let Some(pos) = tail.find('\n') {
-        tail = tail[pos + 1..].to_string();
-    }
-    format!("{head}\n\n……（中间部分记录过长，已省略）……\n\n{tail}")
-}
-
-/// 构建接力 prompt：任务原话 + 会话记录 + 接手指令。
-pub fn build_handoff_prompt(store: &Store, task_id: &str) -> Result<String, String> {
-    let row = store
-        .get_task(task_id)?
-        .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let events = store.get_events(task_id, 0, i64::MAX)?;
-
-    let model_note = row
-        .model
-        .as_deref()
-        .map(|m| format!("（模型 {m}）"))
-        .unwrap_or_default();
-
-    let convo = fit_budget(&render_conversation(&events));
-
-    Ok(format!(
-        "你接手一个此前由另一个助手（{}{model_note}）执行的任务。以下是完整的任务与会话记录。\n\n\
-         ===== 原始任务 =====\n{}\n\n\
-         ===== 会话记录 =====\n{}\n\n\
-         ===== 接手指令 =====\n\
-         1. 先用 git status / git diff 核对工作目录当前状态，确认哪些工作已完成；\n\
-         2. 不要重做已完成的部分，不要偏离原始任务目标；\n\
-         3. 从会话记录的中断处继续，完成剩余工作。\n\
-         现在开始，先核对状态再行动。",
-        row.harness,
-        row.prompt,
-        if convo.is_empty() {
-            "（该任务无对话记录，直接执行原始任务）"
-        } else {
-            &convo
-        }
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,35 +93,6 @@ mod tests {
         ] {
             store.append_event(id, event).unwrap();
         }
-    }
-
-    #[test]
-    fn handoff_prompt_contains_intent_convo_and_instructions() {
-        let store = Store::in_memory().unwrap();
-        seed_task(&store, "t1");
-        let prompt = build_handoff_prompt(&store, "t1").unwrap();
-
-        assert!(
-            prompt.contains("把日期工具补上单测"),
-            "任务原话必须完整保留"
-        );
-        assert!(prompt.contains("zcode"));
-        assert!(prompt.contains("【助手】"), "助手消息应保留");
-        assert!(prompt.contains("vitest"), "工具细节应保留");
-        assert!(prompt.contains("quota exceeded"), "错误应保留");
-        assert!(prompt.contains("git status"), "接手指令应包含核对状态");
-        assert!(prompt.contains("不要重做"), "接手指令应包含不重做");
-    }
-
-    #[test]
-    fn handoff_prompt_without_events_still_works() {
-        let store = Store::in_memory().unwrap();
-        store
-            .create_task("t2", "codex", ".", "写 README", None, None)
-            .unwrap();
-        let prompt = build_handoff_prompt(&store, "t2").unwrap();
-        assert!(prompt.contains("写 README"));
-        assert!(prompt.contains("无对话记录"));
     }
 
     #[test]
@@ -214,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn long_conversation_gets_budget_marker() {
+    fn render_conversation_captures_dialogue_and_tools() {
         let store = Store::in_memory().unwrap();
         store
             .create_task("t3", "zcode", ".", "长任务", None, None)
@@ -229,16 +141,19 @@ mod tests {
                 )
                 .unwrap();
         }
-        let prompt = build_handoff_prompt(&store, "t3").unwrap();
-        assert!(prompt.contains("已省略"), "超预算必须有省略标记");
-        assert!(prompt.chars().count() < CONVO_BUDGET_CHARS + 2000);
+        let events = store.get_events("t3", 0, i64::MAX).unwrap();
+        let convo = render_conversation(&events);
+        assert!(convo.contains("#0"), "早期消息应保留");
+        assert!(convo.contains("#14"), "最新消息应保留");
+        assert!(convo.contains("【助手】"));
+        // 尾部锚应保留最新现场
+        assert!(convo_tail(&convo, 3000).ends_with("#14"));
     }
 }
 
 // ── AI 交接（pi 运行时压缩） ────────────────────────────────
 
 /// AI 交接 prompt 组装：原始任务 + AI 简报 + 会话尾部原文 + 接手指令。
-/// 简报为空（压缩失败）时调用方应回退到机械版 build_handoff_prompt。
 pub fn assemble_ai_handoff(
     harness: &str,
     model_note: &str,
