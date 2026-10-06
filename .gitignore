@@ -1,0 +1,17 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# Rust
+src-tauri/target/
+src-tauri/gen/
+
+# 日志与本地数据
+*.log
+*.local
+.devdata/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
