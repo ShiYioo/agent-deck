@@ -1,60 +1,94 @@
 import type { TaskRow } from "../types";
 
-const STATUS_DOT: Record<string, string> = {
-  running: "bg-amber-400 animate-pulse",
-  done: "bg-emerald-500",
-  failed: "bg-red-500",
-  cancelled: "bg-zinc-500",
-};
-
-function fmtTime(millis: number): string {
-  const d = new Date(millis);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+/** 取路径末段作为项目名（与 Codex 的项目分组一致） */
+export function projectName(cwd: string): string {
+  const norm = cwd.replace(/[\\/]+$/, "");
+  const seg = norm.split(/[\\/]/).filter(Boolean).pop();
+  return seg || norm || "未设置目录";
 }
 
-/** 左侧任务栏：新任务入口 + 历史/并行任务列表 */
+/** 左侧边栏：按项目（工作目录）分组的任务列表 */
 export function Sidebar({
   tasks,
   selectedId,
   onSelect,
-  onNew,
 }: {
   tasks: TaskRow[];
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onNew: () => void;
 }) {
+  // 按项目分组，保持后端返回的时间倒序
+  const groups: { name: string; rows: TaskRow[] }[] = [];
+  for (const t of tasks) {
+    const name = projectName(t.cwd);
+    const last = groups[groups.length - 1];
+    if (last && last.name === name) {
+      last.rows.push(t);
+    } else {
+      groups.push({ name, rows: [t] });
+    }
+  }
+
   return (
-    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/60">
-      <div className="p-3">
-        <button
-          onClick={onNew}
-          className="w-full rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-500"
-        >
-          ＋ 新任务
-        </button>
+    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-zinc-100 bg-zinc-50/80">
+      <div className="flex items-center justify-between px-4 pb-2 pt-4">
+        <span className="text-lg font-semibold tracking-tight">AgentDeck</span>
+        <span className="text-xs text-zinc-400">⌄</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {tasks.length === 0 && (
-          <div className="px-2 py-6 text-center text-xs text-zinc-600">暂无任务</div>
+
+      <div className="flex items-center gap-2 px-3 pb-3">
+        <div className="flex items-center gap-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-500">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+            <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+          </svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="ml-auto text-zinc-500">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m21 21-4.3-4.3" />
+          </svg>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto pb-4">
+        <div className="px-4 pb-1 text-xs font-medium text-zinc-400">项目</div>
+        {groups.length === 0 && (
+          <div className="px-4 py-6 text-xs text-zinc-400">还没有任务</div>
         )}
-        {tasks.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => onSelect(t.id)}
-            className={`mb-1 w-full rounded-md px-3 py-2 text-left transition-colors ${
-              selectedId === t.id ? "bg-zinc-800" : "hover:bg-zinc-900"
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[t.status] ?? "bg-zinc-500"}`} />
-              <span className="font-mono text-xs text-emerald-400">{t.harness}</span>
-              <span className="ml-auto text-[10px] text-zinc-600">{fmtTime(t.created_at)}</span>
+        {groups.map((g) => {
+          const hasRunning = g.rows.some((r) => r.status === "running");
+          return (
+            <div key={g.name + g.rows[0]?.id} className="mb-2">
+              <div
+                className={`mx-2 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
+                  hasRunning ? "text-zinc-900" : "text-zinc-700"
+                }`}
+              >
+                <span className="text-zinc-400">📁</span>
+                <span className="truncate">{g.name}</span>
+                {hasRunning && <span className="ml-auto h-2 w-2 rounded-full bg-blue-500" />}
+              </div>
+              {g.rows.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => onSelect(t.id)}
+                  className={`group mx-2 flex w-[calc(100%-1rem)] items-center gap-2 rounded-lg py-1.5 pl-8 pr-2 text-left text-sm ${
+                    selectedId === t.id
+                      ? "bg-zinc-200/70 text-zinc-900"
+                      : "text-zinc-600 hover:bg-zinc-200/50"
+                  }`}
+                >
+                  <span className="truncate">{t.prompt}</span>
+                  {t.status === "running" && (
+                    <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-blue-500" />
+                  )}
+                  {t.status === "failed" && (
+                    <span className="ml-auto shrink-0 text-xs text-red-500">✗</span>
+                  )}
+                </button>
+              ))}
             </div>
-            <div className="mt-0.5 truncate text-xs text-zinc-300">{t.prompt}</div>
-          </button>
-        ))}
+          );
+        })}
       </div>
     </aside>
   );

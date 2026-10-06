@@ -1,9 +1,29 @@
 @import "tailwindcss";
 
+/* Codex 风格亮色主题 */
 html,
 body,
 #root {
   height: 100%;
-  background-color: #0f1117;
-  color: #e6e8ee;
+  background-color: #ffffff;
+  color: #1a1d21;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "Microsoft YaHei",
+    sans-serif;
+}
+
+/* 细滚动条 */
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
