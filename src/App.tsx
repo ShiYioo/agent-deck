@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
+import {
   buildSmartHandoffPrompt,
   cancelTask,
   getDefaultCwd,
@@ -56,6 +61,56 @@ export default function App() {
     listTasks().then(setHistory).catch(() => {});
   }, []);
 
+  // 事件监听里读取最新 live 用的镜像
+  const liveRef = useRef(live);
+  liveRef.current = live;
+
+  /** 窗口失焦时的系统通知（抄 VK 的 NotificationService） */
+  const notify = useCallback(async (title: string, body: string) => {
+    if (document.hasFocus()) return;
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (granted) sendNotification({ title, body });
+    } catch {
+      // 通知失败不影响主流程
+    }
+  }, []);
+
+  // 把排队消息作为续接任务派发（复用原 harness/cwd/mode 与会话）
+  const flushQueued = useCallback(
+    (task: LiveTask, text: string) => {
+      startTask({
+        harness: task.harness,
+        cwd: task.cwd,
+        prompt: text,
+        mode: task.mode,
+        model: null,
+        permission: "auto",
+        resumeSessionId: task.sessionId ?? null,
+      })
+        .then((taskId) => {
+          setLive((prev) => ({
+            ...prev,
+            [taskId]: {
+              harness: task.harness,
+              cwd: task.cwd,
+              prompt: text,
+              mode: task.mode,
+              events: [],
+              running: true,
+              exitCode: null,
+              sessionId: task.sessionId,
+            },
+          }));
+          setSelected(taskId);
+          setTimeout(refreshHistory, 200);
+        })
+        .catch((e) => setActionError(String(e)));
+    },
+    [refreshHistory],
+  );
+
   // 工作目录：启动时取默认（设置里的 default_cwd，否则家目录）
   useEffect(() => {
     getDefaultCwd()
@@ -84,10 +139,26 @@ export default function App() {
       }),
       listen<{ taskId: string; code: number | null }>("task-exit", (e) => {
         const { taskId, code } = e.payload;
+        const task = liveRef.current[taskId];
+        if (task) {
+          notify(
+            code === 0 ? "AgentDeck · 任务完成" : "AgentDeck · 任务结束",
+            `${task.harness}：${task.prompt.slice(0, 40)}`,
+          );
+          // 队列续发：成功且有会话 → 取队首消息作为续接派发（抄 VK 队列消息）
+          if (code === 0 && task.queued && task.queued.length > 0 && task.sessionId) {
+            const [next] = task.queued;
+            flushQueued(task, next);
+            setLive((prev) => ({
+              ...prev,
+              [taskId]: { ...prev[taskId], queued: prev[taskId].queued?.slice(1) },
+            }));
+          }
+        }
         setLive((prev) => {
-          const task = prev[taskId];
-          if (!task) return prev;
-          return { ...prev, [taskId]: { ...task, running: false, exitCode: code } };
+          const t = prev[taskId];
+          if (!t) return prev;
+          return { ...prev, [taskId]: { ...t, running: false, exitCode: code } };
         });
         setTimeout(refreshHistory, 300);
       }),
@@ -104,6 +175,10 @@ export default function App() {
             tool: String(payload.tool ?? "tool"),
             args: (payload.args as Record<string, unknown>) ?? {},
           });
+          notify(
+            "AgentDeck · 需要审批",
+            `Agent 请求执行工具：${payload.tool ?? "tool"}`,
+          );
           return;
         }
         if (payload.type === "deck_approval_decided") {
@@ -137,6 +212,17 @@ export default function App() {
   const handleSend = async (text: string) => {
     setActionError(null);
     const row = selected ? history.find((t) => t.id === selected) : undefined;
+    // 运行中：消息入队（抄 VK queued message），任务成功结束后自动续发
+    if (selected && live[selected]?.running) {
+      setLive((prev) => ({
+        ...prev,
+        [selected]: {
+          ...prev[selected],
+          queued: [...(prev[selected].queued ?? []), text],
+        },
+      }));
+      return;
+    }
     // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
     const canResume = !!row && !!row.session_id && row.status !== "running";
     // 记住这次的工作目录，下次启动作为默认
@@ -188,6 +274,17 @@ export default function App() {
     },
     [live, historyEvents],
   );
+
+  // 常用模型（按历史使用频次排序，抄 VK ExecutorRecentModels）
+  const recentModels = (() => {
+    const counts = new Map<string, number>();
+    for (const t of history) {
+      if (t.model && t.harness === harness) {
+        counts.set(t.model, (counts.get(t.model) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m);
+  })();
 
   const selectedRow = selected ? history.find((t) => t.id === selected) : undefined;
   const selectedLive = selected ? live[selected] : undefined;
@@ -442,8 +539,40 @@ export default function App() {
           </div>
         )}
 
-        {/* 底部输入卡：始终可见；任务运行中禁用并显示打字指示 */}
+        {/* 底部输入卡：始终可见。运行中发送 = 入队（结束后自动续发） */}
         <div className="px-6 pb-5 pt-2">
+          {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
+            <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
+              <span className="text-stone-400">已排队（结束后自动续发）：</span>
+              {selectedLive.queued.map((q, i) => (
+                <span
+                  key={i}
+                  className="flex items-center gap-1 rounded-full border border-stone-200 px-2 py-0.5 text-stone-500"
+                >
+                  <span className="max-w-48 truncate">{q}</span>
+                  <button
+                    onClick={() =>
+                      setLive((prev) => {
+                        const t = prev[selected];
+                        if (!t) return prev;
+                        return {
+                          ...prev,
+                          [selected]: {
+                            ...t,
+                            queued: t.queued?.filter((_, j) => j !== i),
+                          },
+                        };
+                      })
+                    }
+                    className="text-stone-400 hover:text-red-500"
+                    title="移除"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <Composer
             cwd={cwd}
             onCwdChange={setCwd}
@@ -461,8 +590,15 @@ export default function App() {
             permission={permission}
             onPermissionChange={setPermission}
             onSend={handleSend}
-            disabled={selectedRunning}
-            placeholder={selectedCanResume ? "续接此会话…" : "随心输入"}
+            running={selectedRunning}
+            recentModels={recentModels}
+            placeholder={
+              selectedRunning
+                ? "运行中——发送将排队，任务结束后自动续发"
+                : selectedCanResume
+                  ? "续接此会话…"
+                  : "随心输入"
+            }
           />
         </div>
 

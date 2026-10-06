@@ -20,7 +20,8 @@ export function Composer({
   permission,
   onPermissionChange,
   onSend,
-  disabled,
+  running,
+  recentModels = [],
   placeholder,
 }: {
   cwd: string;
@@ -34,14 +35,17 @@ export function Composer({
   permission: string;
   onPermissionChange: (v: string) => void;
   onSend: (text: string) => void;
-  disabled?: boolean;
+  /** 任务运行中：发送将入队而非直接派发 */
+  running?: boolean;
+  /** 历史常用模型（按频次），动态列表按此置顶排序 */
+  recentModels?: string[];
   placeholder?: string;
 }) {
   const [text, setText] = useState("");
   const [focused, setFocused] = useState(false);
 
   const send = () => {
-    if (disabled || !text.trim()) return;
+    if (!text.trim()) return;
     onSend(text);
     setText("");
   };
@@ -139,7 +143,6 @@ export function Composer({
         onBlur={() => setFocused(false)}
         rows={3}
         placeholder={placeholder ?? "随心输入"}
-        disabled={disabled}
         className="w-full resize-none bg-transparent px-4 pt-3 text-sm text-stone-800 outline-none placeholder:text-stone-400 disabled:opacity-50"
       />
 
@@ -186,12 +189,19 @@ export function Composer({
             options={[
               { value: "", label: "默认模型" },
               ...(discovered.length
-                ? discovered.map((m) => ({
-                    value: m,
-                    label: m,
-                    // opencode 的 free 模型（如 -free 后缀）标注免费徽章
-                    tag: /free/i.test(m) ? "免费" : undefined,
-                  }))
+                ? discovered
+                    .map((m) => ({
+                      value: m,
+                      label: m,
+                      // opencode 的 free 模型（如 -free 后缀）标注免费徽章
+                      tag: /free/i.test(m) ? "免费" : undefined,
+                    }))
+                    // 常用置顶（按历史使用频次）
+                    .sort(
+                      (a, b) =>
+                        (recentModels.indexOf(b.value) + 1 || 999) -
+                        (recentModels.indexOf(a.value) + 1 || 999),
+                    )
                 : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
             ]}
             searchable
@@ -229,7 +239,7 @@ export function Composer({
 
         <span className="flex-1" />
 
-        {disabled && (
+        {running && (
           <span className="typing-dots mr-1 flex items-center" aria-label="运行中">
             <span />
             <span />
@@ -239,9 +249,9 @@ export function Composer({
 
         <button
           onClick={send}
-          disabled={disabled || !text.trim()}
+          disabled={!text.trim()}
           className="hover-lift flex h-9 w-9 items-center justify-center rounded-full text-white disabled:opacity-30"
-          style={{ backgroundColor: text.trim() && !disabled ? accent : "#a8a29e" }}
+          style={{ backgroundColor: text.trim() ? accent : "#a8a29e" }}
           title="发送（Enter）"
         >
           <IconSend size={16} />

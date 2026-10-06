@@ -40,7 +40,7 @@ pub async fn spawn(
     cwd: &str,
     prompt: &str,
     resume_session_id: Option<&str>,
-) -> Result<tokio::process::Child, String> {
+) -> Result<command_group::AsyncGroupChild, String> {
     let (program, mut prefix) = resolve_program(harness.program()).await?;
     let args = harness.build_args(mode.as_deref(), model.as_deref(), prompt, resume_session_id);
     prefix.extend(args);
@@ -61,7 +61,11 @@ pub async fn spawn(
         command.creation_flags(0x0800_0000);
     }
 
-    command.spawn().map_err(|e| format!("启动失败：{e}"))
+    // 进程组启动：终止时整树杀（cmd → node → CLI 不留孤儿）
+    use command_group::AsyncCommandGroup;
+    command
+        .group_spawn()
+        .map_err(|e| format!("启动失败：{e}"))
 }
 
 /// 读取一个输出流，逐行解析为事件：入库 + 推送前端。

@@ -102,4 +102,6 @@ export type LiveTask = {
   running: boolean;
   exitCode: number | null;
   sessionId?: string;
+  /** 运行中排队的后续消息（任务结束自动续发） */
+  queued?: string[];
 };

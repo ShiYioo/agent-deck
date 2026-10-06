@@ -27,9 +27,11 @@ fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
 }
 
 /// 运行中/刚结束的任务：保留子进程句柄用于取消。
+/// command-group 的进程组子进程：start_kill 会终止整棵进程树
+/// （cmd /C → node → CLI），杜绝 Windows 上的孤儿进程烧额度。
 pub struct RunningTask {
     pub label: String,
-    pub child: Option<tokio::process::Child>,
+    pub child: Option<command_group::AsyncGroupChild>,
 }
 
 /// 全局任务表。runner 持有 Arc 克隆以便在流结束后回写退出码。
@@ -143,8 +145,8 @@ async fn start_task(
     .map_err(|e| e.to_string())?;
 
     let mut child = child;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = child.inner().stdout.take();
+    let stderr = child.inner().stderr.take();
 
     registry
         .0
@@ -513,6 +515,7 @@ fn get_default_cwd(store: State<'_, Store>) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // 数据库放在系统应用数据目录（%APPDATA%/com.shiyoo.agentdeck/）
             let dir = app.path().app_data_dir().expect("no app data dir");
