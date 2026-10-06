@@ -33,6 +33,7 @@ export default function App() {
   const [harness, setHarness] = useState("zcode");
   const [mode, setMode] = useState("yolo");
   const [model, setModel] = useState("");
+  const [permission, setPermission] = useState("auto");
   const [cwd, setCwd] = useState("");
 
   // 运行态与历史
@@ -146,8 +147,9 @@ export default function App() {
         harness: canResume ? row.harness : harness,
         cwd: useCwd,
         prompt: text,
-        mode: canResume ? row.mode : mode,
+        mode: canResume ? row.mode : mode === "default" ? null : mode,
         model: canResume ? row.model : model.trim() || null,
+        permission: canResume ? null : permission,
         resumeSessionId: canResume ? row.session_id : null,
       });
       setLive((prev) => ({
@@ -365,11 +367,15 @@ export default function App() {
             onHarnessChange={(h) => {
               setHarness(h);
               setModel(""); // 切 harness 时模型目录不同，重置
+              // 权限目录随 harness 变化，重置为各家默认
+              setMode(h === "zcode" ? "yolo" : h === "codex" ? "full" : "default");
             }}
             mode={mode}
             onModeChange={setMode}
             model={model}
             onModelChange={setModel}
+            permission={permission}
+            onPermissionChange={setPermission}
             onSend={handleSend}
             disabled={selectedRunning}
             placeholder={selectedCanResume ? "续接此会话…" : "随心输入"}

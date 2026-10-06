@@ -18,6 +18,7 @@ export async function startTask(params: {
   prompt: string;
   mode: string | null;
   model: string | null;
+  permission: string | null;
   resumeSessionId: string | null;
 }): Promise<string> {
   if (!inTauri) browserStub("派任务");

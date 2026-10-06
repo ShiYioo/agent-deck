@@ -17,6 +17,8 @@ export function Composer({
   onModeChange,
   model,
   onModelChange,
+  permission,
+  onPermissionChange,
   onSend,
   disabled,
   placeholder,
@@ -29,6 +31,8 @@ export function Composer({
   onModeChange: (v: string) => void;
   model: string;
   onModelChange: (v: string) => void;
+  permission: string;
+  onPermissionChange: (v: string) => void;
   onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
@@ -43,6 +47,25 @@ export function Composer({
   };
 
   const accent = HARNESS_ACCENT[harness] ?? "var(--text-3)";
+
+  /** 各 harness 的权限模式目录（mode 字段按 harness 有不同取值） */
+  const MODE_CATALOG: Record<string, { value: string; label: string }[]> = {
+    zcode: [
+      { value: "yolo", label: "全自动" },
+      { value: "build", label: "编辑前确认" },
+      { value: "edit", label: "edit" },
+      { value: "plan", label: "只读规划" },
+    ],
+    codex: [
+      { value: "full", label: "全自动（无沙箱）" },
+      { value: "write", label: "沙箱内写入" },
+      { value: "readonly", label: "只读" },
+    ],
+    opencode: [
+      { value: "default", label: "全部权限（build）" },
+      { value: "plan", label: "只读规划（plan）" },
+    ],
+  };
 
   /** 各 harness 的模型目录（"" = 走 CLI 账号默认模型） */
   const MODEL_CATALOG: Record<string, { value: string; label: string }[]> = {
@@ -148,17 +171,26 @@ export function Composer({
           />
         )}
 
-        {harness === "zcode" && (
+        {/* 权限模式：zcode/codex/opencode 各自目录 */}
+        {MODE_CATALOG[harness] && (
           <Dropdown
             value={mode}
             onChange={onModeChange}
-            options={[
-              { value: "yolo", label: "全自动" },
-              { value: "build", label: "编辑前确认" },
-              { value: "edit", label: "edit" },
-              { value: "plan", label: "只读规划" },
-            ]}
+            options={MODE_CATALOG[harness]}
             title="权限模式"
+          />
+        )}
+
+        {/* deck 运行时：工具审批开关（approved = 执行前经 UI 审批） */}
+        {harness === "deck" && (
+          <Dropdown
+            value={permission}
+            onChange={onPermissionChange}
+            options={[
+              { value: "auto", label: "工具免审批" },
+              { value: "approved", label: "工具需审批" },
+            ]}
+            title="工具审批"
           />
         )}
 

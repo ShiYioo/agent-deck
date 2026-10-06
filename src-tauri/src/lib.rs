@@ -63,6 +63,7 @@ async fn start_task(
     prompt: String,
     mode: Option<String>,
     model: Option<String>,
+    permission: Option<String>,
     resume_session_id: Option<String>,
     api_key: Option<String>,
 ) -> Result<TaskStartInfo, String> {
@@ -86,7 +87,13 @@ async fn start_task(
             .into(),
             cwd,
             api_key,
-            mode: "auto".into(),
+            // approved = 工具执行前经 UI 审批（P2 权限门）
+            mode: if permission.as_deref() == Some("approved") {
+                "approved"
+            } else {
+                "auto"
+            }
+            .into(),
         };
         let sidecar = sidecar_path(&app);
         let reg = pi_registry.inner().clone();

@@ -77,6 +77,14 @@ impl Harness {
             Self::Codex => {
                 let mut args = vec!["exec".to_string(), "--json".into()];
                 args.push("--skip-git-repo-check".into());
+                // 权限模式映射（headless 下无交互审批，靠沙箱旗标）：
+                // full = 真·全自动（无沙箱）；write = 沙箱内写入；readonly = 只读
+                match mode {
+                    Some("full") => args.push("--dangerously-bypass-approvals-and-sandbox".into()),
+                    Some("write") => args.push("--full-auto".into()),
+                    Some("readonly") => args.extend(["--sandbox".into(), "read-only".into()]),
+                    _ => {}
+                }
                 if let Some(sid) = resume {
                     // `codex exec resume <SESSION_ID> [PROMPT]`；--json 属于 exec 层
                     args.push("resume".into());
@@ -91,7 +99,12 @@ impl Harness {
             }
             Self::Opencode => {
                 // `opencode run -m provider/model -s <session> [message]`
+                // 权限模式：plan = 只读规划 agent；默认 build
                 let mut args = vec!["run".to_string(), "--format".into(), "json".into()];
+                if mode == Some("plan") {
+                    args.push("--agent".into());
+                    args.push("plan".into());
+                }
                 if let Some(m) = model {
                     args.push("-m".into());
                     args.push(m.to_string());
@@ -232,6 +245,27 @@ mod tests {
         let args = Harness::Codex.build_args(None, Some("gpt-5.1"), "继续", Some("abc123"));
         assert!(args.windows(2).any(|w| w == ["resume", "abc123"]));
         assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.1"]));
+    }
+
+    #[test]
+    fn codex_permission_modes() {
+        let args = Harness::Codex.build_args(Some("full"), None, "p", None);
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+
+        let args = Harness::Codex.build_args(Some("write"), None, "p", None);
+        assert!(args.contains(&"--full-auto".into()));
+
+        let args = Harness::Codex.build_args(Some("readonly"), None, "p", None);
+        assert!(args.windows(2).any(|w| w == ["--sandbox", "read-only"]));
+    }
+
+    #[test]
+    fn opencode_plan_agent() {
+        let args = Harness::Opencode.build_args(Some("plan"), None, "p", None);
+        assert!(args.windows(2).any(|w| w == ["--agent", "plan"]));
+
+        let args = Harness::Opencode.build_args(Some("full"), None, "p", None);
+        assert!(!args.contains(&"--agent".to_string()));
     }
 
     #[test]
