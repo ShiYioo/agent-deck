@@ -4,8 +4,17 @@ import { IconBrandMark, IconPlus, IconClock, IconGear } from "./icons";
 export function Rail({ onNew }: { onNew: () => void }) {
   return (
     <nav className="flex h-full w-14 shrink-0 flex-col items-center border-r border-stone-200/70 bg-stone-50 py-4">
-      <div className="hover-lift mb-6 flex h-9 w-9 items-center justify-center rounded-xl bg-stone-900 text-white">
-        <IconBrandMark size={18} />
+      {/* 品牌砖：墨色渐变 + 内侧高光 + 双色品牌符 */}
+      <div
+        className="hover-lift mb-6 flex h-10 w-10 items-center justify-center rounded-[14px] text-white"
+        style={{
+          background: "linear-gradient(135deg, #44403c 0%, #1c1917 55%, #0c0a09 100%)",
+          boxShadow:
+            "0 2px 10px rgba(28,25,23,0.3), inset 0 1px 0 rgba(255,255,255,0.14), inset 0 -1px 0 rgba(0,0,0,0.4)",
+        }}
+        title="AgentDeck"
+      >
+        <IconBrandMark size={20} centerColor="#34d399" />
       </div>
       <button
         onClick={onNew}
