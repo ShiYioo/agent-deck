@@ -86,6 +86,19 @@ export async function buildSmartHandoffPrompt(taskId: string): Promise<string> {
   return await invoke<string>("build_smart_handoff_prompt", { taskId });
 }
 
+export type ModelPoolEntry = {
+  target: string;
+  configured: boolean;
+  source: string | null;
+  masked: string | null;
+};
+
+/** 模型池解析结果（自动扫描本机凭据，透明展示） */
+export async function getModelPool(): Promise<ModelPoolEntry[]> {
+  if (!inTauri) return [];
+  return await invoke<ModelPoolEntry[]>("get_model_pool", {});
+}
+
 /** 扫描本机可复用凭据（opencode auth.json / 环境变量） */
 export async function discoverCredentials(): Promise<
   { target: string; source: string; key: string }[]

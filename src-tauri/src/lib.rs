@@ -74,13 +74,9 @@ async fn start_task(
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
         store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref(), None)?;
-        // 双池 key/url 从设置读取（模型自治链在 sidecar 内自动降级）
-        let api_key_glm = store
-            .get_setting("deck_api_key_glm")?
-            .or_else(|| std::env::var("ZAI_API_KEY").ok());
-        let api_key_gpt = store
-            .get_setting("deck_api_key_gpt")?
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        // 双池 key 自动解析：设置覆盖 > 本机凭据（opencode/环境变量）
+        let api_key_glm = resolve_key_for(&store, "glm").map(|(k, _)| k);
+        let api_key_gpt = resolve_key_for(&store, "gpt").map(|(k, _)| k);
         let base_url_glm = store.get_setting("deck_base_url_glm")?;
         let base_url_gpt = store.get_setting("deck_base_url_gpt")?;
         let params = pi_session::PiRunParams {
@@ -447,8 +443,7 @@ pub struct DiscoveredCredential {
 /// 前端 → Rust：扫描本机可复用的明文凭据。
 /// ZCode 的 credentials.json 是机器绑定加密存储（enc: 前缀）读不了；
 /// opencode 的 auth.json 是明文，ZCode 登录用户的 coding-plan key 就在里面。
-#[tauri::command]
-fn discover_credentials() -> Vec<DiscoveredCredential> {
+fn discover_credentials_inner() -> Vec<DiscoveredCredential> {
     let mut out: Vec<DiscoveredCredential> = Vec::new();
     let mut push = |target: &str, source: &str, key: &str| {
         if !key.trim().is_empty()
@@ -496,16 +491,89 @@ fn discover_credentials() -> Vec<DiscoveredCredential> {
     out
 }
 
-/// 前端 → Rust：默认工作目录。优先设置里的 default_cwd，否则用户家目录。
+#[tauri::command]
+fn discover_credentials() -> Vec<DiscoveredCredential> {
+    discover_credentials_inner()
+}
+
+/// 解析某目标的可用 key：设置覆盖 > 本机发现（opencode/环境变量）。
+/// 返回 (key, 来源)。对用户透明——手输只是覆盖项。
+fn resolve_key_for(store: &Store, target: &str) -> Option<(String, String)> {
+    let override_key = match target {
+        "glm" => store.get_setting("deck_api_key_glm"),
+        "gpt" => store.get_setting("deck_api_key_gpt"),
+        _ => Ok(None),
+    }
+    .ok()
+    .flatten()
+    .filter(|k| !k.trim().is_empty());
+    if let Some(k) = override_key {
+        return Some((k, "手动配置".into()));
+    }
+    discover_credentials_inner()
+        .into_iter()
+        .find(|c| c.target == target)
+        .map(|c| (c.key, c.source))
+}
+
+fn mask_key(k: &str) -> String {
+    if k.chars().count() <= 8 {
+        "•••".into()
+    } else {
+        let chars: Vec<char> = k.chars().collect();
+        format!("{}…{}", chars[..4].iter().collect::<String>(), chars[chars.len() - 4..].iter().collect::<String>())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelPoolEntry {
+    pub target: String,
+    pub configured: bool,
+    pub source: Option<String>,
+    pub masked: Option<String>,
+}
+
+/// 前端 → Rust：模型池解析结果（透明展示，无需手填）。
+#[tauri::command]
+fn get_model_pool(store: State<'_, Store>) -> Vec<ModelPoolEntry> {
+    ["glm", "gpt"]
+        .iter()
+        .map(|target| match resolve_key_for(&store, target) {
+            Some((key, source)) => ModelPoolEntry {
+                target: target.to_string(),
+                configured: true,
+                source: Some(source),
+                masked: Some(mask_key(&key)),
+            },
+            None => ModelPoolEntry {
+                target: target.to_string(),
+                configured: false,
+                source: None,
+                masked: None,
+            },
+        })
+        .collect()
+}
+
+/// 前端 → Rust：默认工作目录。优先最近一次使用的目录，
+/// 否则 AgentDeck 自己的工作区（~/AgentDeck，自动创建）——对用户透明。
 #[tauri::command]
 fn get_default_cwd(store: State<'_, Store>) -> String {
+    // 最近一次使用的目录优先（派任务时自动记住，composer 可见）；
+    // 否则透明使用 AgentDeck 自己的工作区 ~/AgentDeck（自动创建）
     store
         .get_setting("default_cwd")
         .ok()
         .flatten()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().to_string()))
-        .unwrap_or_else(|| ".".into())
+        .unwrap_or_else(|| {
+            let own = dirs::home_dir()
+                .map(|h| h.join("AgentDeck"))
+                .expect("no home dir");
+            let _ = std::fs::create_dir_all(&own);
+            own.to_string_lossy().to_string()
+        })
 }
 
 pub fn run() {
@@ -536,6 +604,7 @@ pub fn run() {
             get_default_cwd,
             discover_models,
             discover_credentials,
+            get_model_pool,
             build_smart_handoff_prompt,
             diff_watch::diff_watch_start,
             diff_watch::diff_watch_stop
