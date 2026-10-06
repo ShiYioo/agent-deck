@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-t
 which = "7"
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "6"
 
 [profile.dev]
 incremental = true

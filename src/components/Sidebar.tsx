@@ -1,5 +1,6 @@
 import type { TaskRow } from "../types";
 import { IconBell, IconSearch, IconFolder, IconXCircle } from "./icons";
+import { BridgeToggle } from "./BridgeToggle";
 
 /** 取路径末段作为项目名（与 Codex 的项目分组一致） */
 export function projectName(cwd: string): string {
@@ -91,6 +92,8 @@ export function Sidebar({
           );
         })}
       </div>
+
+      <BridgeToggle />
     </aside>
   );
 }
