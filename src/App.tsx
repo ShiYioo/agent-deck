@@ -21,6 +21,7 @@ import {
 import type { AgentEvent, ApprovalRequest, LiveTask, TaskRow } from "./types";
 import { piEventToAgentEvent } from "./types";
 import { Sidebar, projectName, HARNESS_ACCENT } from "./components/Sidebar";
+import { HarnessIcon } from "./components/HarnessIcon";
 import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
@@ -413,10 +414,7 @@ export default function App() {
               >
                 <IconBack size={15} />
               </button>
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: HARNESS_ACCENT[selectedHarness] }}
-              />
+              <HarnessIcon harness={selectedHarness} size={16} rounded />
               <span
                 className="font-mono text-xs"
                 style={{ color: HARNESS_ACCENT[selectedHarness] }}
@@ -495,10 +493,7 @@ export default function App() {
                         className="flex items-center gap-1.5 rounded-full border px-3 py-1 transition-colors hover:bg-stone-100 disabled:opacity-50"
                         style={{ borderColor: HARNESS_ACCENT[h], color: HARNESS_ACCENT[h] }}
                       >
-                        <span
-                          className="h-1.5 w-1.5 rounded-full"
-                          style={{ backgroundColor: HARNESS_ACCENT[h] }}
-                        />
+                        <HarnessIcon harness={h} size={12} />
                         用 {h === "deck" ? "AgentDeck Agent" : h} 接力
                       </button>
                     ))}
@@ -622,7 +617,15 @@ export default function App() {
           />
         </div>
 
-        {diff && <DiffModal text={diff.text} onClose={() => setDiff(null)} />}
+        {diff && selectedRow && (
+          <DiffModal
+            text={diff.text}
+            harness={selectedRow.harness}
+            model={selectedRow.model}
+            mode={selectedRow.mode}
+            onClose={() => setDiff(null)}
+          />
+        )}
         {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       </main>
     </div>

@@ -1,6 +1,7 @@
 import { memo } from "react";
 import type { TaskRow } from "../types";
 import { IconBell, IconSearch, IconFolder, IconXCircle } from "./icons";
+import { HarnessIcon } from "./HarnessIcon";
 
 /** 取路径末段作为项目名（与 Codex 的项目分组一致） */
 export function projectName(cwd: string): string {
@@ -80,6 +81,7 @@ export const Sidebar = memo(function Sidebar({
                         : "text-stone-600 hover:bg-stone-200/50"
                     }`}
                   >
+                    <HarnessIcon harness={t.harness} size={13} />
                     <span className="truncate">{t.prompt}</span>
                     {t.status === "running" && (
                       <span className="pulse-dot ml-auto h-2 w-2 shrink-0 rounded-full" />

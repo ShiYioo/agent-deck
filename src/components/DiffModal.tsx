@@ -1,9 +1,26 @@
 import { useMemo } from "react";
 
 import { IconClose } from "./icons";
+import { HarnessIcon } from "./HarnessIcon";
 
-/** 轻量 diff 渲染：按 +/-/@@ 行着色，不引入 Monaco 重依赖 */
-export function DiffModal({ text, onClose }: { text: string; onClose: () => void }) {
+/** 轻量 diff 渲染：按 +/-/@@ 行着色，不引入 Monaco 重依赖。
+ *  头部标注改动归属（哪个 harness 的哪个模型改的）。 */
+export function DiffModal({
+  text,
+  onClose,
+  harness,
+  model,
+  mode,
+}: {
+  text: string;
+  onClose: () => void;
+  harness?: string;
+  model?: string | null;
+  mode?: string | null;
+}) {
+  // deck 运行时的模型选择存在 mode 字段（glm/gpt）
+  const modelLabel =
+    model ?? (harness === "deck" && mode ? mode.toUpperCase() : null);
   const lines = useMemo(() => text.split("\n"), [text]);
 
   return (
@@ -16,7 +33,21 @@ export function DiffModal({ text, onClose }: { text: string; onClose: () => void
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-stone-100 px-4 py-2">
-          <span className="text-sm font-medium">Git Diff</span>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <span>Git Diff</span>
+            {harness && (
+              <span className="flex items-center gap-1.5 rounded-full bg-stone-100 px-2.5 py-0.5 text-xs font-normal text-stone-600">
+                <HarnessIcon harness={harness} size={13} rounded />
+                {harness}
+                {modelLabel && (
+                  <span className="font-mono text-[10px] text-stone-400">
+                    · {modelLabel}
+                  </span>
+                )}
+                <span className="text-stone-300">改动</span>
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
             className="hover-lift rounded p-1 text-stone-400 hover:bg-stone-100 hover:text-stone-700"

@@ -266,3 +266,4 @@ export function IconInfo({ size = 14, className }: IconProps) {
     </svg>
   );
 }
+
