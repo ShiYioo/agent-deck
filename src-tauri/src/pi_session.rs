@@ -181,11 +181,12 @@ pub async fn run_pi_task(
                         {
                             let _ = store2.set_session_id(&task_id2, id);
                         }
-                        continue;
                     }
 
                     // 失败收尾：deck_error 后 sidecar 不再产出，关 stdin 让它退出
+                    let mut failure = false;
                     if event_type == "deck_error" {
+                        failure = true;
                         let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
                     }
 
@@ -208,7 +209,7 @@ pub async fn run_pi_task(
                                 "existing": existing,
                             });
                             let _ = tx2.send(serde_json::to_string(&cmd).unwrap());
-                            continue; // 等 memorize_result，先不收尾
+                            // 注意：不 continue——run_end 仍要入库+转发给前端
                         }
                     }
 
@@ -227,7 +228,6 @@ pub async fn run_pi_task(
                             }
                         }
                         let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
-                        continue;
                     }
 
                     // 事件原样入库（已是 JSON），转发时包上 taskId
@@ -237,6 +237,9 @@ pub async fn run_pi_task(
                             obj.insert("taskId".into(), serde_json::json!(task_id2));
                         }
                         let _ = app2.emit("pi-event", value);
+                        if failure {
+                            break; // 失败已通知且 close 已发，不等流自然结束
+                        }
                     }
                 }
             }
@@ -280,6 +283,17 @@ pub async fn run_pi_task(
             .to_string(),
         );
     }
+
+    // 与 CLI 执行器同款收尾：状态落库 + task-exit 事件给前端
+    let status_str = match code {
+        0 => "done",
+        _ => "failed",
+    };
+    store.finish_task(&task_id, status_str, Some(code as i64));
+    let _ = app.emit(
+        "task-exit",
+        serde_json::json!({ "taskId": task_id, "code": code }),
+    );
     Ok(code)
 }
 
