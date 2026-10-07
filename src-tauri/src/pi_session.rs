@@ -140,9 +140,23 @@ pub async fn run_pi_task(
         let mut reader = BufReader::new(stdout);
         let mut buf = Vec::new();
         let mut memorize_sent = false;
+        // memorize 抽取阶段的超时deadline（LLM 卡住时兜底收尾）
+        let mut memorize_deadline: Option<tokio::time::Instant> = None;
         loop {
             buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
+            // 抽取等待期：180s 内没有下一行事件则强制收尾
+            let read = if let Some(deadline) = memorize_deadline {
+                match tokio::time::timeout_at(deadline, reader.read_until(b'\n', &mut buf)).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
+                        break;
+                    }
+                }
+            } else {
+                reader.read_until(b'\n', &mut buf).await
+            };
+            match read {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf);
@@ -158,9 +172,28 @@ pub async fn run_pi_task(
                         .unwrap_or("")
                         .to_string();
 
+                    // 会话 ID 入库（支撑续接语义与归属展示）
+                    if event_type == "deck_session_id" {
+                        if let Some(id) = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("id"))
+                            .and_then(|i| i.as_str())
+                        {
+                            let _ = store2.set_session_id(&task_id2, id);
+                        }
+                        continue;
+                    }
+
+                    // 失败收尾：deck_error 后 sidecar 不再产出，关 stdin 让它退出
+                    if event_type == "deck_error" {
+                        let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
+                    }
+
                     // 成功结束 → 触发记忆抽取（经 stdin 通道发 memorize）
                     if event_type == "deck_run_end" && !memorize_sent {
                         memorize_sent = true;
+                        memorize_deadline =
+                            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(180));
                         let convo = crate::handoff::render_conversation(
                             &store2
                                 .get_events(&task_id2, 0, i64::MAX)
@@ -181,6 +214,7 @@ pub async fn run_pi_task(
 
                     // 抽取结果 → 入库 + 发 close 收尾
                     if event_type == "deck_memorize_result" {
+                        memorize_deadline = None;
                         if let Some(arr) = parsed
                             .as_ref()
                             .and_then(|v| v.get("memories"))

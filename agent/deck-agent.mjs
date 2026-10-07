@@ -173,6 +173,11 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
     noTools: undefined,
   });
   currentModel = want;
+  // 上报会话 ID（持久化到任务记录，支撑续接语义）
+  try {
+    const sid = session.sessionId ?? session.id;
+    if (sid) emit({ type: "deck_session_id", id: String(sid) });
+  } catch {}
   // 上下文治理（pi 内置，显式开启）：auto-compaction 压缩增长的历史，
   // auto-retry 对过载/限流做指数退避（上下文溢出走 compaction 不重试）
   try {
