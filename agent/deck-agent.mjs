@@ -50,6 +50,7 @@ const UNIVERSAL_PROMPT = [
   "3) 小步修改 + 即时验证：每次改动后运行编译/测试/脚本自证；验证不过就修，不许留红。",
   "4) 诚实汇报：失败如实报告并附错误原文；绝不伪造成功。",
   "5) 中文沟通，结论先行，关键路径与命令原样给出。",
+  "6) 善用自持能力：查资料用 webfetch；多步任务用 todo_write 维护进度；额度紧张时用 list_models/switch_model 自主管理模型。",
 ].join("\n");
 
 function emit(event) {
@@ -95,8 +96,16 @@ function buildTools(mode) {
     }
   }
   if (tools.length === 0) tools = [...createCodingTools()];
-  // 委派工具：互调是 deck 运行时的一等能力；switch_model：模型自治
-  tools = [...tools, ...DELEGATE_TOOLS, SWITCH_MODEL_TOOL];
+  // 委派工具：互调是 deck 运行时的一等能力；switch_model：模型自治；
+  // webfetch/todo_write/list_models：向 ZCode(45 契约)/OpenCode 看齐的自持能力
+  tools = [
+    ...tools,
+    ...DELEGATE_TOOLS,
+    SWITCH_MODEL_TOOL,
+    WEBFETCH_TOOL,
+    TODO_TOOL,
+    LIST_MODELS_TOOL,
+  ];
   // 权限门：approved 模式下全部工具（含委派）执行前经 UI 审批
   return mode === "approved" ? tools.map(wrapWithGate) : tools;
 }
@@ -229,6 +238,128 @@ function extractFinalText(raw) {
   }
   return text;
 }
+
+// ── 自持能力：网络抓取 / todo 进度 / 模型池自省（向 ZCode/OpenCode 看齐） ──
+
+let sessionTodos = []; // 会话内 todo 状态（switch_model/重建会话不跨保留）
+
+const WEBFETCH_TOOL = {
+  name: "webfetch",
+  description:
+    "抓取一个网页/接口的正文文本（自动剥离 HTML 标签，截断到 8000 字符）。用于查文档、读接口返回。不支持需要登录的页面。",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "完整 URL（http/https）" },
+    },
+    required: ["url"],
+  },
+  execute: async (_id, args) => {
+    const url = String(args?.url ?? "");
+    if (!/^https?:\/\//.test(url)) {
+      return {
+        content: [{ type: "text", text: "URL 必须以 http(s):// 开头" }],
+        isError: true,
+      };
+    }
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        headers: { "user-agent": "AgentDeck/0.1 (+webfetch)" },
+        redirect: "follow",
+      });
+      clearTimeout(timer);
+      const raw = await res.text();
+      if (!res.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `HTTP ${res.status} ${res.statusText}\n${raw.slice(0, 500)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      const isHtml = /<\/?[a-z][\s>]/i.test(raw.slice(0, 1000));
+      const text = isHtml
+        ? raw
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/&nbsp;/g, " ")
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/\s+/g, " ")
+            .trim()
+        : raw;
+      const cut = text.length > 8000 ? `${text.slice(0, 8000)}\n…(截断，原文 ${text.length} 字符)` : text;
+      return { content: [{ type: "text", text: cut || "（空内容）" }] };
+    } catch (e) {
+      const reason = e?.name === "AbortError" ? "超时（15 秒）" : String(e?.message ?? e);
+      return { content: [{ type: "text", text: `抓取失败：${reason}` }], isError: true };
+    }
+  },
+};
+
+const TODO_TOOL = {
+  name: "todo_write",
+  description:
+    "维护当前任务的待办清单（整体替换式）。超过 3 步的任务应当先写计划，完成后随时更新状态。清单会展示给用户。",
+  parameters: {
+    type: "object",
+    properties: {
+      todos: {
+        type: "array",
+        description: "完整清单（每次整体替换）",
+        items: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+          },
+          required: ["content", "status"],
+        },
+      },
+    },
+    required: ["todos"],
+  },
+  execute: async (_id, args) => {
+    const list = Array.isArray(args?.todos) ? args.todos : [];
+    sessionTodos = list;
+    // 推给 UI（未来可渲染成任务清单组件）
+    emit({ type: "deck_todo_updated", todos: sessionTodos });
+    const mark = (s) =>
+      s === "completed" ? "[x]" : s === "in_progress" ? "[~]" : "[ ]";
+    const text = list.length
+      ? list.map((t) => `${mark(t.status)} ${t.content}`).join("\n")
+      : "（清单已清空）";
+    return { content: [{ type: "text", text }] };
+  },
+};
+
+const LIST_MODELS_TOOL = {
+  name: "list_models",
+  description:
+    "查看你当前的模型池：有哪些已启用的模型配置、现在用的是哪个。配合 switch_model 使用。",
+  parameters: { type: "object", properties: {} },
+  execute: async () => {
+    const lines = modelProfiles.map(
+      (p) =>
+        `${p.provider === currentModel ? "→" : " "} ${p.provider}${
+          p.label ? `（${p.label}）` : ""
+        }${p.baseUrl ? ` @ ${p.baseUrl}` : ""}`,
+    );
+    return {
+      content: [
+        { type: "text", text: lines.length ? lines.join("\n") : "模型池为空" },
+      ],
+    };
+  },
+};
 
 const DELEGATE_TOOLS = [
   {
