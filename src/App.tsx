@@ -225,12 +225,17 @@ export default function App() {
     async (rawText: string) => {
       setActionError(null);
 
-      // @ 路由：@deck/@zcode/@codex/@opencode 唤醒对应智能体
-      const at = /^@(deck|zcode|codex|opencode)\s+/i.exec(rawText.trim());
+      // @ 路由：@harness 或 @harness:model 唤醒对应智能体（模型粒度指定大脑）
+      const at = /^@(deck|zcode|codex|opencode)(?::([^\s]+))?\s+/i.exec(
+        rawText.trim(),
+      );
       let text = rawText.trim();
       let atTarget: string | null = null;
+      let atModel: string | null = null;
       if (at) {
         atTarget = at[1].toLowerCase();
+        // zcode CLI 无模型旗标，@zcode:xxx 的模型部分被忽略（走账号默认）
+        atModel = at[2] && atTarget !== "zcode" ? at[2] : null;
         text = text.slice(at[0].length);
       }
       if (!text.trim()) {
@@ -260,6 +265,7 @@ export default function App() {
       // @ 路由的任务是全新派发（不续接旧会话）
       const routeFresh = atTarget !== null;
       const useHarness = routeFresh ? (atTarget as string) : harness;
+      const routeModel = routeFresh ? atModel : model.trim() || null;
       // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
       const canResume =
         !routeFresh &&
@@ -287,7 +293,7 @@ export default function App() {
                 : mode === "default"
                   ? null
                   : mode,
-          model: canResume ? row.model : model.trim() || null,
+          model: canResume ? row.model : routeModel,
           permission: canResume ? null : permission,
           resumeSessionId: canResume ? row.session_id : null,
         });
@@ -694,7 +700,7 @@ export default function App() {
                 ? "运行中——发送将排队；@其他智能体 可并行唤醒"
                 : selectedCanResume
                   ? "续接此会话…"
-                  : "随心输入 · @zcode/@codex/@deck/@opencode 可指定执行者"
+                  : "随心输入 · @harness 或 @harness:模型 指定谁来干（如 @codex:gpt-5.1-codex）"
             }
           />
         </div>
