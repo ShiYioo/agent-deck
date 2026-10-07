@@ -125,17 +125,52 @@ pub fn merge(main_dir: &Path, branch: &str) -> Result<String, String> {
 pub fn remove(main_dir: &Path, task_id: &str, delete_branch: bool) -> Result<(), String> {
     let dir = dir_for(main_dir, task_id);
     if dir.exists() {
-        // 任务可能留下未提交产物，强制移除
-        run_git_in(
+        // 任务可能留下未提交产物，强制移除；用户已手删目录时 git 报错，
+        // 此时 prune 清登记后再物理删除（若有残留）
+        if run_git_in(
             main_dir,
             &["worktree", "remove", "--force", &dir.to_string_lossy()],
-        )?;
+        )
+        .is_err()
+        {
+            let _ = run_git_in(main_dir, &["worktree", "prune"]);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+            }
+        }
     }
+    // .git/worktrees/<name> 元数据残留清理（抄 VK force_cleanup_worktree_metadata）
+    cleanup_worktree_metadata(main_dir, &dir);
     if delete_branch {
         let branch = branch_for(task_id);
         let _ = run_git_in(main_dir, &["branch", "-D", &branch]);
     }
     Ok(())
+}
+
+/// 清理 .git/worktrees/<name> 残留元数据（用户手删目录后 git worktree list 仍显示）
+fn cleanup_worktree_metadata(main_dir: &Path, worktree_dir: &Path) {
+    let Ok(repo_root) = run_git_in(main_dir, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let wt_meta = PathBuf::from(repo_root.trim()).join("worktrees");
+    if !wt_meta.is_dir() {
+        return;
+    }
+    let wt_norm = worktree_dir.to_string_lossy().to_lowercase();
+    if let Ok(entries) = std::fs::read_dir(&wt_meta) {
+        for entry in entries.flatten() {
+            let gitdir_file = entry.path().join("gitdir");
+            if let Ok(content) = std::fs::read_to_string(&gitdir_file) {
+                let reg = PathBuf::from(content.trim())
+                    .to_string_lossy()
+                    .to_lowercase();
+                if reg.starts_with(&wt_norm) || wt_norm.starts_with(&reg) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
 }
 
 /// 启动时批量清理 git 元数据（用户手动删目录后的残留登记）。
