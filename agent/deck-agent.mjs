@@ -41,17 +41,46 @@ let firstRun = true;
 // 模型自治：启用的配置档案（随 run/summarize 指令下发，按顺序降级）
 let modelProfiles = [];
 
-/** 通用级运行规范（会话首轮注入，全局纪律只说一次） */
-const UNIVERSAL_PROMPT = [
-  "【运行规范 · AgentDeck】",
-  "你是在用户本机工作的编码智能体，直接操作真实文件系统。纪律：",
-  "1) 先理解再动手：改动前先读相关文件；不确定就 ls/grep 查证，不猜接口。",
-  "2) 计划先行：超过 3 步的任务先给出极简计划，再逐步执行。",
-  "3) 小步修改 + 即时验证：每次改动后运行编译/测试/脚本自证；验证不过就修，不许留红。",
-  "4) 诚实汇报：失败如实报告并附错误原文；绝不伪造成功。",
-  "5) 中文沟通，结论先行，关键路径与命令原样给出。",
-  "6) 善用自持能力：查资料用 webfetch；多步任务用 todo_write 维护进度；额度紧张时用 list_models/switch_model 自主管理模型。",
-].join("\n");
+/**
+ * 通用级运行规范（会话首轮注入）——分区式（抄 ZCode context/sections 架构）：
+ * 身份+安全 → 运行纪律 → 输出规范 → 环境注入（cwd/平台/日期，按会话实际值生成）。
+ */
+function buildUniversalPrompt(cwd) {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+  const identity = [
+    "你是 AgentDeck 自有运行时的编码智能体，在用户本机直接操作真实文件系统。",
+    "协助用户完成软件工程任务：授权的安全测试、防御性分析与教学场景均可协助；拒绝破坏性技术、DoS、供应链投毒或恶意逃避检测的请求。",
+  ].join("\n");
+
+  const discipline = [
+    "运行纪律：",
+    "1) 先理解再动手：改动前先读相关文件；不确定就 ls/grep 查证，不猜接口。",
+    "2) 计划先行：超过 3 步的任务先用 todo_write 给出计划，再逐步执行并更新状态。",
+    "3) 小步修改 + 即时验证：每次改动后运行编译/测试/脚本自证；验证不过就修，不许留红。",
+    "4) 诚实汇报：失败如实报告并附错误原文；绝不伪造成功。",
+    "5) 善用自持能力：查资料用 webfetch；额度紧张时用 list_models/switch_model 自主管理模型。",
+  ].join("\n");
+
+  const output = [
+    "输出规范：",
+    "- 中文沟通，结论先行。",
+    "- 引用代码位置用 文件路径:行号 格式（可点击）。",
+    "- 关键路径与命令原样给出，不省略。",
+  ].join("\n");
+
+  const env = [
+    "<env>",
+    `工作目录：${cwd || currentCwd || "(未定)"}`,
+    `平台：${process.platform}`,
+    `今日日期：${date}`,
+    "</env>",
+  ].join("\n");
+
+  return [identity, discipline, output, env].join("\n\n");
+}
 
 function emit(event) {
   process.stdout.write(JSON.stringify(event) + "\n");
@@ -483,7 +512,7 @@ async function handle(msg) {
           deckEvent("run_start", { model: p.provider });
           // 通用级运行规范：仅会话首轮注入（纪律只说一次）
           const promptText = firstRun
-            ? UNIVERSAL_PROMPT + "\n\n==== 任务 ====\n" + msg.prompt
+            ? buildUniversalPrompt(msg.cwd) + "\n\n==== 任务 ====\n" + msg.prompt
             : msg.prompt;
           await s.prompt(promptText);
           firstRun = false;
