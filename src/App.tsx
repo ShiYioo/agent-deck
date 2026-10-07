@@ -189,6 +189,14 @@ export default function App() {
         if (payload.type === "deck_approval_decided") {
           setApproval(null);
         }
+        if (payload.type === "deck_todo_updated" && Array.isArray(payload.todos)) {
+          const todos = payload.todos as { content: string; status: string }[];
+          setLive((prev) => {
+            const task = prev[taskId];
+            if (!task) return prev;
+            return { ...prev, [taskId]: { ...task, todos } };
+          });
+        }
         const mapped = piEventToAgentEvent(payload as never);
         setLive((prev) => {
           const task = prev[taskId];
@@ -514,6 +522,17 @@ export default function App() {
               <span className="truncate text-stone-500">
                 {selectedRow?.cwd ?? selectedLive?.cwd}
               </span>
+              {selectedLive?.todos && selectedLive.todos.length > 0 && (
+                <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+                  ☐ {selectedLive.todos.filter((t) => t.status === "completed").length}
+                  /{selectedLive.todos.length}
+                  {selectedLive.todos.find((t) => t.status === "in_progress") && (
+                    <span className="ml-1.5 text-stone-400">
+                      {selectedLive.todos.find((t) => t.status === "in_progress")?.content.slice(0, 24)}
+                    </span>
+                  )}
+                </span>
+              )}
               <span className="flex-1" />
               {selectedRunning && (
                 <button

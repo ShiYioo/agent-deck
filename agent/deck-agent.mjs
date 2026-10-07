@@ -162,6 +162,12 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
     noTools: undefined,
   });
   currentModel = want;
+  // 上下文治理（pi 内置，显式开启）：auto-compaction 压缩增长的历史，
+  // auto-retry 对过载/限流做指数退避（上下文溢出走 compaction 不重试）
+  try {
+    session.setAutoCompactionEnabled?.(true);
+    session.setAutoRetryEnabled?.(true);
+  } catch {}
   session.subscribe((event) => {
     // pi 结构化事件原样透传（含 message_* / tool_execution_* / agent_*）
     emit(event);

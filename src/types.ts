@@ -104,4 +104,6 @@ export type LiveTask = {
   sessionId?: string;
   /** 运行中排队的后续消息（任务结束自动续发） */
   queued?: string[];
+  /** deck 运行时的 todo 清单（todo_write 工具维护） */
+  todos?: { content: string; status: string }[];
 };
