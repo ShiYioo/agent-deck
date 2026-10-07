@@ -84,11 +84,14 @@ async fn start_task(
                 base_url: p.base_url,
             })
             .collect();
+        let use_cwd_deck = cwd.clone();
+        let task_memories = store.list_memories(&cwd, 20).unwrap_or_default();
         let params = pi_session::PiRunParams {
             prompt,
             model: "auto".into(),
-            cwd,
+            cwd: use_cwd_deck,
             profiles,
+            memories: task_memories,
             // approved = 工具执行前经 UI 审批（P2 权限门）
             mode: if permission.as_deref() == Some("approved") {
                 "approved"

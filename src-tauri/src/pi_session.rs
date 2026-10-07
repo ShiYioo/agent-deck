@@ -27,6 +27,9 @@ pub struct PiRunParams {
     /// 启用的模型配置档案（按顺序构成自治降级链）
     #[serde(default)]
     pub profiles: Vec<ModelProfileParam>,
+    /// 项目记忆（同 cwd 历史要点，注入运行规范）
+    #[serde(default)]
+    pub memories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +99,7 @@ pub async fn run_pi_task(
 
     // 指令通道：注册到 registry，供 cancel/approve/reject 命令使用
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let tx2 = tx.clone(); // out_task 用于触发记忆抽取
     registry.insert(task_id.clone(), tx);
 
     // stdin 写入任务：先发 run 指令，再转发后续 channel 指令
@@ -105,6 +109,7 @@ pub async fn run_pi_task(
         "model": params.model,
         "cwd": params.cwd,
         "profiles": params.profiles,
+        "memories": params.memories,
         "mode": params.mode,
     });
     stdin
@@ -119,19 +124,22 @@ pub async fn run_pi_task(
             if s.write_all(line.as_bytes()).await.is_err() || s.write_all(b"\n").await.is_err() {
                 break;
             }
-            if line.contains("\"cmd\":\"abort\"") {
-                break; // abort 后关闭 stdin，sidecar 收尾
+            if line.contains("\"cmd\":\"abort\"") || line.contains("__CLOSE__") {
+                break; // abort / 记忆抽取完成：关闭 stdin，sidecar 收尾
             }
         }
     });
 
-    // stdout：逐行 JSON 事件 → 前端 + 入库
+    // stdout：逐行 JSON 事件 → 前端 + 入库；
+    // 成功结束（deck_run_end）后触发记忆抽取，抽取完成发 close 收尾
     let app2 = app.clone();
     let task_id2 = task_id.clone();
     let store2 = store.clone_handle();
+    let cwd2 = params.cwd.clone();
     let out_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         let mut buf = Vec::new();
+        let mut memorize_sent = false;
         loop {
             buf.clear();
             match reader.read_until(b'\n', &mut buf).await {
@@ -142,6 +150,52 @@ pub async fn run_pi_task(
                     if trimmed.is_empty() {
                         continue;
                     }
+                    let parsed = serde_json::from_str::<serde_json::Value>(trimmed).ok();
+                    let event_type = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("type"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // 成功结束 → 触发记忆抽取（经 stdin 通道发 memorize）
+                    if event_type == "deck_run_end" && !memorize_sent {
+                        memorize_sent = true;
+                        let convo = crate::handoff::render_conversation(
+                            &store2
+                                .get_events(&task_id2, 0, i64::MAX)
+                                .unwrap_or_default(),
+                        );
+                        if !convo.trim().is_empty() {
+                            let existing = store2.list_memories(&cwd2, 50).unwrap_or_default();
+                            let cmd = serde_json::json!({
+                                "cmd": "memorize",
+                                "text": convo,
+                                "cwd": cwd2,
+                                "existing": existing,
+                            });
+                            let _ = tx2.send(serde_json::to_string(&cmd).unwrap());
+                            continue; // 等 memorize_result，先不收尾
+                        }
+                    }
+
+                    // 抽取结果 → 入库 + 发 close 收尾
+                    if event_type == "deck_memorize_result" {
+                        if let Some(arr) = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("memories"))
+                            .and_then(|m| m.as_array())
+                        {
+                            for m in arr {
+                                if let Some(text) = m.as_str() {
+                                    let _ = store2.add_memory(&cwd2, text);
+                                }
+                            }
+                        }
+                        let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
+                        continue;
+                    }
+
                     // 事件原样入库（已是 JSON），转发时包上 taskId
                     let _ = store2.append_event(&task_id2, trimmed);
                     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {

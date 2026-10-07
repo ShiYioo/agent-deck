@@ -40,12 +40,13 @@ let firstRun = true;
 
 // 模型自治：启用的配置档案（随 run/summarize 指令下发，按顺序降级）
 let modelProfiles = [];
+let lastAssistantText = ""; // 最近一条助手文本（memorize 抽取用）
 
 /**
  * 通用级运行规范（会话首轮注入）——分区式（抄 ZCode context/sections 架构）：
  * 身份+安全 → 运行纪律 → 输出规范 → 环境注入（cwd/平台/日期，按会话实际值生成）。
  */
-function buildUniversalPrompt(cwd) {
+function buildUniversalPrompt(cwd, memories = []) {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
@@ -79,7 +80,17 @@ function buildUniversalPrompt(cwd) {
     "</env>",
   ].join("\n");
 
-  return [identity, discipline, output, env].join("\n\n");
+  const memory =
+    memories.length > 0
+      ? [
+          "已知记忆（本项目历史要点，供参考，不要重复询问）：",
+          ...memories.map((m) => "- " + m),
+        ].join("\n")
+      : null;
+
+  return [identity, discipline, output, env, memory]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function emit(event) {
@@ -171,6 +182,14 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
   session.subscribe((event) => {
     // pi 结构化事件原样透传（含 message_* / tool_execution_* / agent_*）
     emit(event);
+    // 记录最近一条助手文本（memorize 抽取用）
+    if (event.type === "message_end" && event.message?.role === "assistant") {
+      const text = (event.message.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("");
+      if (text.trim()) lastAssistantText = text;
+    }
   });
   return session;
 }
@@ -518,7 +537,7 @@ async function handle(msg) {
           deckEvent("run_start", { model: p.provider });
           // 通用级运行规范：仅会话首轮注入（纪律只说一次）
           const promptText = firstRun
-            ? buildUniversalPrompt(msg.cwd) + "\n\n==== 任务 ====\n" + msg.prompt
+            ? buildUniversalPrompt(msg.cwd, msg.memories) + "\n\n==== 任务 ====\n" + msg.prompt
             : msg.prompt;
           await s.prompt(promptText);
           firstRun = false;
@@ -584,6 +603,51 @@ async function handle(msg) {
       } catch (err) {
         deckEvent("summarize_error", { message: String(err?.message ?? err) });
       }
+      break;
+    }
+    case "memorize": {
+      // 记忆抽取（抄 ZCode memory/extraction）：从会话记录提取持久记忆
+      try {
+        let existing = "";
+        if (Array.isArray(msg.existing) && msg.existing.length > 0) {
+          existing =
+            "\n\n## 已有记忆清单（更新已有项而非重复创建）\n" +
+            msg.existing.map((m) => "- " + m).join("\n");
+        }
+        deckEvent("memorize_start");
+        const p =
+          modelProfiles.find((x) => x.provider === "glm") ?? modelProfiles[0];
+        if (!p) throw new Error("模型池为空");
+        const s = await ensureSessionForProfile(p, {
+          cwd: msg.cwd || process.cwd(),
+          mode: "auto",
+        });
+        await s.prompt(
+          "你现在是记忆抽取子代理。分析下面的会话记录，提取值得跨任务持久保存的记忆：" +
+            "项目约定、用户偏好、关键决策、环境坑位。\n" +
+            "不要保存：一次性任务细节、可从代码直接看出的内容、寒暄。\n" +
+            "已有记忆需更新时，输出更新后的完整条目。\n" +
+            "如果没有任何值得保存的，输出 []。\n" +
+            "只输出一个 JSON 字符串数组（每条为自包含的中文记忆），不要其他内容。\n\n" +
+            "===== 会话记录 =====\n" +
+            String(msg.text ?? "") +
+            existing,
+        );
+        const m = lastAssistantText.match(/\[[\s\S]*?\]/);
+        let memories = [];
+        if (m) {
+          try {
+            memories = JSON.parse(m[0]).filter((x) => typeof x === "string");
+          } catch {}
+        }
+        deckEvent("memorize_result", { memories });
+      } catch (err) {
+        deckEvent("memorize_error", { message: String(err?.message ?? err) });
+      }
+      break;
+    }
+    case "close": {
+      process.exit(0);
       break;
     }
     case "approve": {

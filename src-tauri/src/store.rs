@@ -94,6 +94,12 @@ impl Store {
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS memories (
+                 id         TEXT PRIMARY KEY,
+                 cwd        TEXT NOT NULL,
+                 content    TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS model_profiles (
                  id         TEXT PRIMARY KEY,
                  provider   TEXT NOT NULL,
@@ -284,6 +290,41 @@ impl Store {
         Ok(rows)
     }
 
+    // ── 项目记忆（deck 任务完成后自动抽取，同项目召回） ──────
+
+    pub fn add_memory(&self, cwd: &str, content: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let id = format!(
+            "mem-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        conn.execute(
+            "INSERT INTO memories (id, cwd, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, cwd, content, Self::now_millis()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_memories(&self, cwd: &str, limit: i64) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM memories WHERE cwd = ?1
+                 ORDER BY created_at DESC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![cwd, limit], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
     pub fn get_model_profile(&self, id: &str) -> Result<Option<ModelProfile>, String> {
         self.list_model_profiles(false)
             .map(|all| all.into_iter().find(|p| p.id == id))
@@ -419,6 +460,21 @@ mod tests {
         let page2 = store.get_events("t1", 3, 3).unwrap();
         assert_eq!(page1, vec!["e0", "e1", "e2"]);
         assert_eq!(page2, vec!["e3", "e4"]);
+    }
+
+    #[test]
+    fn memories_scoped_by_cwd_and_limited() {
+        let store = Store::in_memory().unwrap();
+        store.add_memory(r"E:\proj", "用 vitest 做测试").unwrap();
+        store.add_memory(r"E:\proj", "数据库是 SQLite").unwrap();
+        store.add_memory(r"E:\other", "别的项目记忆").unwrap();
+
+        let got = store.list_memories(r"E:\proj", 10).unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|m| !m.contains("别的项目")));
+
+        let limited = store.list_memories(r"E:\proj", 1).unwrap();
+        assert_eq!(limited.len(), 1);
     }
 
     #[test]
