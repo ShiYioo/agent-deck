@@ -9,6 +9,8 @@ import {
 import {
   buildSmartHandoffPrompt,
   cancelTask,
+  discardTaskWorktree,
+  mergeTaskWorktree,
   getDefaultCwd,
   getTaskDiff,
   getTaskEvents,
@@ -574,6 +576,40 @@ export default function App() {
                     <IconDiff size={13} />
                     {selectedRunning ? "实时 Diff" : "查看 Diff"}
                   </button>
+                )}
+                {canShowDiff && selectedRow?.base_branch && (
+                  <>
+                    <button
+                      onClick={async () => {
+                        if (!selected) return;
+                        setActionError(null);
+                        try {
+                          await mergeTaskWorktree(selected);
+                          refreshHistory();
+                        } catch (e) {
+                          setActionError(String(e));
+                        }
+                      }}
+                      className="rounded-full bg-emerald-600 px-3 py-1 font-medium text-white transition-colors hover:bg-emerald-500"
+                    >
+                      合并到主分支
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!selected) return;
+                        setActionError(null);
+                        try {
+                          await discardTaskWorktree(selected);
+                          refreshHistory();
+                        } catch (e) {
+                          setActionError(String(e));
+                        }
+                      }}
+                      className="rounded-full border border-stone-200 px-3 py-1 text-stone-600 transition-colors hover:bg-stone-100"
+                    >
+                      放弃 worktree
+                    </button>
+                  </>
                 )}
                 {!selectedRunning && selectedCanResume && (
                   <span className="text-stone-400">在下方输入可续接此会话</span>

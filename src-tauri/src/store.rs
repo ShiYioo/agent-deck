@@ -31,6 +31,8 @@ pub struct TaskRow {
     pub mode: Option<String>,
     pub model: Option<String>,
     pub session_id: Option<String>,
+    pub base_branch: Option<String>,
+    pub worktree_dir: Option<String>,
     /// running | done | failed | cancelled
     pub status: String,
     pub exit_code: Option<i64>,
@@ -111,8 +113,11 @@ impl Store {
              );",
         )
         .map_err(|e| e.to_string())?;
-        // 既有数据库补 model 列（重复执行报 duplicate column，忽略即可）
+        // 既有数据库补列（重复执行报 duplicate column，忽略即可）
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_branch TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_commit TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_dir TEXT", []);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -181,7 +186,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, base_branch, worktree_dir, session_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
@@ -195,11 +200,13 @@ impl Store {
                     prompt: row.get(3)?,
                     mode: row.get(4)?,
                     model: row.get(5)?,
-                    session_id: row.get(6)?,
-                    status: row.get(7)?,
-                    exit_code: row.get(8)?,
-                    created_at: row.get(9)?,
-                    finished_at: row.get(10)?,
+                    base_branch: row.get(6)?,
+                    worktree_dir: row.get(7)?,
+                    session_id: row.get(8)?,
+                    status: row.get(9)?,
+                    exit_code: row.get(10)?,
+                    created_at: row.get(11)?,
+                    finished_at: row.get(12)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -212,7 +219,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, base_branch, worktree_dir, session_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks WHERE id = ?1",
             )
@@ -225,11 +232,13 @@ impl Store {
                 prompt: row.get(3)?,
                 mode: row.get(4)?,
                 model: row.get(5)?,
-                session_id: row.get(6)?,
-                status: row.get(7)?,
-                exit_code: row.get(8)?,
-                created_at: row.get(9)?,
-                finished_at: row.get(10)?,
+                base_branch: row.get(6)?,
+                worktree_dir: row.get(7)?,
+                session_id: row.get(8)?,
+                status: row.get(9)?,
+                exit_code: row.get(10)?,
+                created_at: row.get(11)?,
+                finished_at: row.get(12)?,
             })
         })
         .optional()
@@ -288,6 +297,24 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         Ok(rows)
+    }
+
+    // ── worktree 登记（任务分支/base/directory） ────────────────
+
+    pub fn set_task_worktree(
+        &self,
+        task_id: &str,
+        branch: &str,
+        base_commit: &str,
+        dir: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "UPDATE tasks SET session_id = session_id, base_branch = ?2, base_commit = ?3, worktree_dir = ?4 WHERE id = ?1",
+            params![task_id, branch, base_commit, dir],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     // ── 项目记忆（deck 任务完成后自动抽取，同项目召回） ──────
@@ -438,6 +465,8 @@ mod tests {
         let row = store.get_task("t1").unwrap().unwrap();
         assert_eq!(row.session_id.as_deref(), Some("sess_9"));
         assert_eq!(row.model.as_deref(), Some("glm-4.7"));
+        assert_eq!(row.base_branch.as_deref(), None);
+        assert_eq!(row.worktree_dir.as_deref(), None);
         assert_eq!(row.status, "done");
         assert_eq!(row.exit_code, Some(0));
 

@@ -110,6 +110,18 @@ export async function deleteModelProfile(id: string): Promise<void> {
   await invoke("delete_model_profile", { id });
 }
 
+/** 把任务 worktree 分支合并回主目录并清理 */
+export async function mergeTaskWorktree(taskId: string): Promise<string> {
+  if (!inTauri) browserStub("合并 worktree");
+  return await invoke<string>("merge_task_worktree", { taskId });
+}
+
+/** 放弃任务的 worktree（不合并） */
+export async function discardTaskWorktree(taskId: string): Promise<void> {
+  if (!inTauri) browserStub("放弃 worktree");
+  await invoke("discard_task_worktree", { taskId });
+}
+
 export async function getDefaultCwd(): Promise<string> {
   if (!inTauri) return "";
   return await invoke<string>("get_default_cwd");

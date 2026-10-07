@@ -4,13 +4,16 @@ mod handoff;
 mod pi_session;
 mod runner;
 mod store;
+mod worktree;
 
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, State};
+use worktree::WorktreePaths;
 
 use crate::executors::Harness;
 use crate::store::{ModelProfile, Store, TaskRow};
@@ -118,10 +121,42 @@ async fn start_task(
     let harness = Harness::parse(&harness)?;
     let task_id = runner::new_task_id(harness);
 
+    // git 仓库内派发的任务：自动 worktree 隔离（改动圈在任务分支里）
+    let mut worktree: Option<WorktreePaths> = None;
+    if harness.name() != "deck"
+        && worktree::is_git_repo(Path::new(&cwd))
+        && store
+            .get_setting("worktree_isolation")
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some("off")
+    {
+        match worktree::create(Path::new(&cwd), &task_id) {
+            Ok(paths) => worktree = Some(paths),
+            Err(e) => {
+                return Err(format!("worktree 创建失败：{e}（可在设置关闭隔离）"));
+            }
+        }
+    }
+
+    let task_cwd = worktree
+        .as_ref()
+        .map(|w| w.dir.to_string_lossy().to_string())
+        .unwrap_or_else(|| cwd.clone());
+    if let Some(w) = &worktree {
+        store.set_task_worktree(
+            &task_id,
+            &w.branch,
+            &w.base_commit,
+            &w.dir.to_string_lossy(),
+        )?;
+    }
+
     store.create_task(
         &task_id,
         harness.name(),
-        &cwd,
+        &task_cwd,
         &prompt,
         mode.as_deref(),
         model.as_deref(),
@@ -131,12 +166,18 @@ async fn start_task(
         harness,
         &mode,
         &model,
-        &cwd,
+        &task_cwd,
         &prompt,
         resume_session_id.as_deref(),
     )
     .await
-    .inspect_err(|_| store.finish_task(&task_id, "failed", None))
+    .inspect_err(|_| {
+        store.finish_task(&task_id, "failed", None);
+        if let Some(w) = &worktree {
+            let _ = worktree::remove(Path::new(&cwd), &task_id, true);
+            eprintln!("worktree cleaned after spawn failure: {}", w.dir.display());
+        }
+    })
     .map_err(|e| e.to_string())?;
 
     let mut child = child;
@@ -214,8 +255,13 @@ fn get_task_diff(store: State<'_, Store>, task_id: String) -> Result<String, Str
         .get_task(&task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
 
+    // worktree 任务：diff 对 base_branch（纯任务改动）；普通任务：对 HEAD
+    let diff_args: Vec<&str> = match row.base_branch.as_deref() {
+        Some(b) => vec!["--no-pager", "diff", "--no-color", "--unified=3", b],
+        None => vec!["--no-pager", "diff", "--no-color", "--unified=3", "HEAD"],
+    };
     let output = std::process::Command::new("git")
-        .args(["--no-pager", "diff", "--no-color", "--unified=3", "HEAD"])
+        .args(&diff_args)
         .current_dir(&row.cwd)
         .stdin(Stdio::null())
         .output()
@@ -551,6 +597,44 @@ fn delete_model_profile(store: State<'_, Store>, id: String) -> Result<(), Strin
     store.delete_model_profile(&id)
 }
 
+// ── worktree 合并/放弃（任务完成后） ─────────────────────
+
+/// 前端 → Rust：把任务分支合并回主目录，然后清理 worktree 与分支。
+#[tauri::command]
+fn merge_task_worktree(store: State<'_, Store>, task_id: String) -> Result<String, String> {
+    let row = store
+        .get_task(&task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let branch = row
+        .base_branch
+        .ok_or_else(|| "该任务没有关联的 worktree".to_string())?;
+    let main_dir = Path::new(&row.cwd)
+        .ancestors()
+        .find(|p| worktree::is_git_repo(p))
+        .ok_or_else(|| "主目录不是 git 仓库".to_string())?
+        .to_path_buf();
+    let out = worktree::merge(&main_dir, &branch)?;
+    worktree::remove(&main_dir, &task_id, true)?;
+    store.set_task_worktree(&task_id, "", "", "")?;
+    Ok(out)
+}
+
+/// 前端 → Rust：放弃任务的 worktree（不合并）。
+#[tauri::command]
+fn discard_task_worktree(store: State<'_, Store>, task_id: String) -> Result<(), String> {
+    let row = store
+        .get_task(&task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let main_dir = Path::new(&row.cwd)
+        .ancestors()
+        .find(|p| worktree::is_git_repo(p))
+        .ok_or_else(|| "主目录不是 git 仓库".to_string())?
+        .to_path_buf();
+    worktree::remove(&main_dir, &task_id, true)?;
+    store.set_task_worktree(&task_id, "", "", "")?;
+    Ok(())
+}
+
 /// 前端 → Rust：默认工作目录。优先最近一次使用的目录，
 /// 否则 AgentDeck 自己的工作区（~/AgentDeck，自动创建）——对用户透明。
 #[tauri::command]
@@ -580,6 +664,10 @@ pub fn run() {
             let dir = app.path().app_data_dir().expect("no app data dir");
             std::fs::create_dir_all(&dir).expect("failed to create data dir");
             let store = Store::open(&dir.join("agent-deck.db")).expect("failed to open store");
+            // 清理 git worktree 残留登记（用户手动删目录后的元数据）
+            if let Some(root) = store.get_setting("default_cwd").ok().flatten() {
+                worktree::prune_stale(Path::new(&root));
+            }
             app.manage(store);
             Ok(())
         })
@@ -597,6 +685,8 @@ pub fn run() {
             get_setting,
             set_setting,
             get_default_cwd,
+            merge_task_worktree,
+            discard_task_worktree,
             discover_models,
             build_smart_handoff_prompt,
             diff_watch::diff_watch_start,

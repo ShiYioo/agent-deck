@@ -86,6 +86,8 @@ export type TaskRow = {
   mode: string | null;
   model: string | null;
   session_id: string | null;
+  base_branch: string | null;
+  worktree_dir: string | null;
   status: "running" | "done" | "failed" | "cancelled";
   exit_code: number | null;
   created_at: number;
