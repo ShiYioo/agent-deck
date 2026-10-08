@@ -13,6 +13,7 @@ import {
   listProjects as listProjectsApi,
   mergeTaskWorktree,
   getDefaultCwd,
+  getSetting,
   getTaskDiff,
   getTaskEvents,
   invokePiCommand,
@@ -30,7 +31,7 @@ import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
 import { DiffModal } from "./components/DiffModal";
-import { SettingsModal } from "./components/SettingsModal";
+import { SettingsPage } from "./components/SettingsPage";
 import { CreateProjectModal } from "./components/CreateProjectModal";
 import {
   IconBrandMark,
@@ -81,6 +82,10 @@ export default function App() {
   /** 窗口失焦时的系统通知（抄 VK 的 NotificationService） */
   const notify = useCallback(async (title: string, body: string) => {
     if (document.hasFocus()) return;
+    try {
+      const enabled = await getSetting("notifications_enabled");
+      if (enabled === "off") return;
+    } catch {}
     try {
       let granted = await isPermissionGranted();
       if (!granted) granted = (await requestPermission()) === "granted";
@@ -853,7 +858,7 @@ export default function App() {
             onClose={() => setDiff(null)}
           />
         )}
-        {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+        {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
       </main>
     </div>
   );
