@@ -51,6 +51,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   });
   const [status, setStatus] = useState<string | null>(null);
 
+  // Esc 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const load = useCallback(() => {
     listModelProfiles().then(setProfiles).catch(() => {});
     getDefaultCwd().then(setDefaultCwd).catch(() => {});

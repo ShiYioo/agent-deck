@@ -557,6 +557,44 @@ export default function App() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 px-6 pt-2 text-xs">
+                {!selectedRunning && selectedRow?.status === "failed" && (
+                  <button
+                    onClick={() => {
+                      const r = selectedRow;
+                      setActionError(null);
+                      startTask({
+                        harness: r.harness,
+                        cwd: r.cwd,
+                        prompt: r.prompt,
+                        mode: r.mode,
+                        model: r.model,
+                        permission: null,
+                        resumeSessionId: r.session_id,
+                      })
+                        .then((taskId) => {
+                          setLive((prev) => ({
+                            ...prev,
+                            [taskId]: {
+                              harness: r.harness,
+                              cwd: r.cwd,
+                              prompt: r.prompt,
+                              mode: r.mode,
+                              events: [],
+                              running: true,
+                              exitCode: null,
+                              sessionId: r.session_id ?? undefined,
+                            },
+                          }));
+                          setSelected(taskId);
+                          setTimeout(refreshHistory, 200);
+                        })
+                        .catch((e) => setActionError(String(e)));
+                    }}
+                    className="rounded-full border border-stone-200 px-3 py-1 text-stone-600 transition-colors hover:bg-stone-100"
+                  >
+                    ↻ 重试
+                  </button>
+                )}
                 {hasAuthError && !selectedRunning && (
                   <button
                     onClick={() =>
@@ -779,6 +817,29 @@ export default function App() {
 /** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
 const MAX_RENDER = 500;
 
+/** 事件 → 可复制纯文本（消息/工具/错误摘要） */
+function eventsToText(events: { event: AgentEvent }[]): string {
+  return events
+    .map(({ event: e }) => {
+      switch (e.type) {
+        case "user_message":
+          return `[用户] ${e.text}`;
+        case "assistant_message":
+          return `[助手] ${e.text}`;
+        case "tool_use":
+          return `[工具] ${e.tool}: ${e.detail}`;
+        case "tool_result":
+          return `[结果] ${e.detail}`;
+        case "error":
+          return `[错误] ${e.message}`;
+        default:
+          return null;
+      }
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 /** 会话日志面板：历史回放时错落入场，实时流式时逐条滑入；rAF 节流自动滚底 */
 function LogPanel({
   events,
@@ -806,16 +867,30 @@ function LogPanel({
   const visible = overflow > 0 ? events.slice(overflow) : events;
   void overflow;
 
+  const copyAll = () => {
+    const text = eventsToText(events);
+    navigator.clipboard?.writeText(text).catch(() => {});
+  };
+
   return (
-    <div
-      ref={logRef}
-      className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 py-4 font-mono text-xs leading-relaxed"
-    >
-      {overflow > 0 && (
-        <div className="py-1 text-center text-[10px] text-stone-400">
-          前 {overflow} 条已折叠（完整记录在数据库中）
-        </div>
-      )}
+    <div className="min-h-0 flex-1 flex flex-col">
+      <div className="flex items-center justify-between px-6 pt-2 text-[10px] text-stone-400">
+        <span>
+          {overflow > 0
+            ? `前 ${overflow} 条已折叠（完整记录在数据库中）`
+            : `共 ${events.length} 条`}
+        </span>
+        <button
+          onClick={copyAll}
+          className="rounded px-2 py-0.5 transition-colors hover:bg-stone-100 hover:text-stone-600"
+        >
+          复制日志
+        </button>
+      </div>
+      <div
+        ref={logRef}
+        className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 pb-4 font-mono text-xs leading-relaxed"
+      >
       {events.length === 0 && (
         <div className="py-10 text-center text-stone-400">
           {running ? (
@@ -836,6 +911,7 @@ function LogPanel({
           stagger={staggerInitial ? i : 0}
         />
       ))}
+      </div>
     </div>
   );
 }

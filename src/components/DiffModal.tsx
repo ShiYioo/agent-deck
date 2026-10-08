@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { IconClose } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
@@ -38,6 +38,15 @@ export function DiffModal({
   // deck 运行时的模型选择存在 mode 字段（glm/gpt）
   const modelLabel =
     model ?? (harness === "deck" && mode ? mode.toUpperCase() : null);
+  // Esc 关闭（标准弹层键盘预期）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const lines = useMemo(() => text.split("\n"), [text]);
   const stats = useMemo(() => diffStats(text), [text]);
 
