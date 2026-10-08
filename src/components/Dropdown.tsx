@@ -20,6 +20,7 @@ export function Dropdown({
   disabled,
   title,
   searchable = false,
+  ghost = false,
   groupBy,
 }: {
   value: string;
@@ -30,6 +31,8 @@ export function Dropdown({
   title?: string;
   /** 显示搜索框（长列表建议开启） */
   searchable?: boolean;
+  /** ghost 触发器：无边框、灰字（未选择时的安静占位） */
+  ghost?: boolean;
   /** 分组函数：返回该选项的组名（如 provider 名），按出现顺序分组 */
   groupBy?: (value: string, label: string) => string;
 }) {
@@ -88,10 +91,12 @@ export function Dropdown({
         title={title}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
           open
-            ? "border-stone-300 bg-stone-50 text-stone-800"
-            : "border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:bg-stone-50"
+            ? "bg-stone-100 text-stone-800"
+            : ghost
+              ? "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+              : "border border-stone-200 bg-white text-stone-600 hover:bg-stone-50"
         } disabled:pointer-events-none disabled:opacity-50`}
       >
         {dotColor && (

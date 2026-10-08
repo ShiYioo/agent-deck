@@ -220,8 +220,9 @@ export const Composer = memo(function Composer({
             const p = projects.find((x) => x.id === id);
             if (p) onCwdChange(p.dir);
           }}
+          ghost={!selectedProjectId}
           options={[
-            { value: "", label: "不挂项目" },
+            { value: "", label: "选择项目" },
             ...projects.map((x) => ({ value: x.id, label: x.name })),
           ]}
           title="更改此聊天的项目"
