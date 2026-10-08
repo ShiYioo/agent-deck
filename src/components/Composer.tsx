@@ -44,35 +44,85 @@ export const Composer = memo(function Composer({
 }) {
   const [text, setText] = useState("");
   const [focused, setFocused] = useState(false);
-  // @ 提及补全：光标前 @xxx 模式即弹出（mention.query 为 @ 后已输入部分）
-  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  // @ 提及补全（两段式）：输入 @ 选智能体 → 自动补 ":" 进入模型段选具体模型
+  const [mention, setMention] = useState<
+    | { kind: "agent"; start: number; query: string }
+    | { kind: "model"; start: number; agent: string; query: string }
+    | null
+  >(null);
   const [mentionIdx, setMentionIdx] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const MENTION_AGENTS = [
-    { name: "deck", label: "AgentDeck Agent", desc: "自有运行时" },
+    { name: "deck", label: "AgentDeck Agent", desc: "自有运行时 · 可接 :glm/:gpt" },
     { name: "zcode", label: "ZCode · GLM", desc: "模型走账号默认" },
     { name: "codex", label: "Codex · GPT", desc: "可接 :模型名" },
     { name: "opencode", label: "OpenCode", desc: "可接 :provider/model" },
   ];
 
+  const modelOptionsFor = (agent: string): string[] => {
+    if (agent === "deck") return ["glm", "gpt"];
+    if (agent === "zcode") return []; // zcode 无模型旗标
+    const discoveredModels = modelOptionsBy[agent] ?? [];
+    if (discoveredModels.length) return discoveredModels;
+    return (MODEL_CATALOG[agent] ?? []).map((o) => o.value).filter(Boolean);
+  };
+
   const refreshMention = (el: HTMLTextAreaElement) => {
     const pos = el.selectionStart ?? 0;
     const before = el.value.slice(0, pos);
-    const m = /@([a-z0-9:_-]*)$/i.exec(before);
-    if (m) {
-      setMention({ start: pos - m[0].length, query: m[1] });
-      setMentionIdx(0);
+    const m = /@([a-z0-9_-]*)(?::([^@\s]*))?$/i.exec(before);
+    if (!m) {
+      setMention(null);
+      return;
+    }
+    const agent = m[1].toLowerCase();
+    if (m[2] !== undefined) {
+      // ":后缀" 阶段：必须是已知智能体才有模型列表
+      if (!MENTION_AGENTS.some((a) => a.name === agent)) {
+        setMention(null);
+        return;
+      }
+      setMention({
+        kind: "model",
+        start: pos - m[0].length,
+        agent,
+        query: m[2],
+      });
+    } else if (agent === "") {
+      // 刚输入 @：agent 阶段，列出全部
+      setMention({ kind: "agent", start: pos - m[0].length, query: "" });
+    } else if (MENTION_AGENTS.some((a) => a.name === agent)) {
+      setMention({ kind: "agent", start: pos - m[0].length, query: agent });
     } else {
       setMention(null);
     }
+    setMentionIdx(0);
   };
 
-  const applyMention = (name: string) => {
+  const applyAgent = (name: string) => {
     const el = textareaRef.current;
-    if (!el || !mention) return;
+    if (!el || !mention || mention.kind !== "agent") return;
     const pos = el.selectionStart ?? el.value.length;
-    const insert = `@${name} `;
+    // zcode 无模型旗标：直接空格收尾；其余补 ":" 进入模型段
+    const insert = name === "zcode" ? `@${name} ` : `@${name}:`;
+    const next = el.value.slice(0, mention.start) + insert + el.value.slice(pos);
+    setText(next);
+    setMention(null);
+    requestAnimationFrame(() => {
+      el.focus();
+      const caret = mention.start + insert.length;
+      el.setSelectionRange(caret, caret);
+      // 手动触发一次补全刷新（模型段自动打开）
+      refreshMention(el);
+    });
+  };
+
+  const applyModel = (model: string) => {
+    const el = textareaRef.current;
+    if (!el || !mention || mention.kind !== "model") return;
+    const pos = el.selectionStart ?? el.value.length;
+    const insert = model ? `:${model} ` : " ";
     const next = el.value.slice(0, mention.start) + insert + el.value.slice(pos);
     setText(next);
     setMention(null);
@@ -94,6 +144,16 @@ export const Composer = memo(function Composer({
   // 动态发现真实模型列表（codex 读 desktop 状态文件、opencode 调 CLI）；
   // 失败或为空则回退静态目录
   const [discovered, setDiscovered] = useState<string[]>([]);
+  const [modelOptionsBy, setModelOptionsBy] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    for (const h of ["codex", "opencode"]) {
+      discoverModels(h)
+        .then((list) =>
+          setModelOptionsBy((prev) => ({ ...prev, [h]: list })),
+        )
+        .catch(() => {});
+    }
+  }, []);
   useEffect(() => {
     if (!MODEL_CATALOG[harness]) {
       setDiscovered([]);
@@ -170,33 +230,60 @@ export const Composer = memo(function Composer({
       </div>
 
       <div className="relative">
-        {/* @ 智能体补全：输入 @ 时向上弹出的提及菜单 */}
+        {/* @ 智能体补全（两段式）：@ 选智能体 → : 选模型 */}
         {mention && (
           <div className="absolute bottom-full left-4 right-4 z-20 mb-1 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]">
             <div className="border-b border-stone-100 px-3 py-1.5 text-[10px] text-stone-400">
-              唤醒智能体 · @codex:模型名 可指定模型
+              {mention.kind === "model"
+                ? `${mention.agent} 的模型（回车应用，Esc 取消）`
+                : "唤醒智能体 · 选后可接 :模型 精确指定"}
             </div>
-            {MENTION_AGENTS.filter(
+            {mention.kind === "agent" &&
+              MENTION_AGENTS.filter(
                 (a) =>
                   a.name.includes(mention.query.toLowerCase()) ||
                   a.label.toLowerCase().includes(mention.query.toLowerCase()),
               )
-              .map((a, i) => (
-                <button
-                  key={a.name}
-                  onClick={() => applyMention(a.name)}
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
-                    i === mentionIdx
-                      ? "bg-stone-100 text-stone-900"
-                      : "text-stone-600 hover:bg-stone-50"
-                  }`}
-                >
-                  <HarnessIcon harness={a.name} size={13} rounded />
-                  <span className="font-medium">@{a.name}</span>
-                  <span className="text-stone-400">{a.label}</span>
-                  <span className="ml-auto text-[10px] text-stone-400">{a.desc}</span>
-                </button>
-              ))}
+                .map((a, i) => (
+                  <button
+                    key={a.name}
+                    onClick={() => applyAgent(a.name)}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                      i === mentionIdx
+                        ? "bg-stone-100 text-stone-900"
+                        : "text-stone-600 hover:bg-stone-50"
+                    }`}
+                  >
+                    <HarnessIcon harness={a.name} size={13} rounded />
+                    <span className="font-medium">@{a.name}</span>
+                    <span className="text-stone-400">{a.label}</span>
+                    <span className="ml-auto text-[10px] text-stone-400">{a.desc}</span>
+                  </button>
+                ))}
+            {mention.kind === "model" && (
+              <>
+                {modelOptionsFor(mention.agent).length === 0 && (
+                  <div className="px-3 py-2 text-xs text-stone-400">
+                    {mention.agent === "zcode"
+                      ? "ZCode 走账号默认模型，无需指定"
+                      : "暂无模型列表"}
+                  </div>
+                )}
+                {modelOptionsFor(mention.agent).map((m, i) => (
+                  <button
+                    key={m}
+                    onClick={() => applyModel(m)}
+                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-xs transition-colors ${
+                      i === mentionIdx
+                        ? "bg-stone-100 text-stone-900"
+                        : "text-stone-600 hover:bg-stone-50"
+                    }`}
+                  >
+                    {m || "（默认模型）"}
+                  </button>
+                ))}
+              </>
+            )}
           </div>
         )}
         <textarea
@@ -208,27 +295,36 @@ export const Composer = memo(function Composer({
           }}
           onKeyDown={(e) => {
             if (mention) {
+              const stageOptions =
+                mention.kind === "agent"
+                  ? MENTION_AGENTS
+                  : modelOptionsFor(mention.agent).map((m) => ({ name: m, label: m }));
+              const visible = mention.kind === "model"
+                ? stageOptions.filter((o) =>
+                    o.name
+                      .toLowerCase()
+                      .includes(mention.query.toLowerCase()),
+                  )
+                : stageOptions;
               if (e.key === "ArrowDown" || e.key === "Tab") {
                 e.preventDefault();
-                setMentionIdx((i) => (i + 1) % MENTION_AGENTS.length);
+                setMentionIdx((i) => (i + 1) % Math.max(visible.length, 1));
                 return;
               }
               if (e.key === "ArrowUp") {
                 e.preventDefault();
                 setMentionIdx(
-                  (i) => (i - 1 + MENTION_AGENTS.length) % MENTION_AGENTS.length,
+                  (i) => (i - 1 + visible.length) % Math.max(visible.length, 1),
                 );
                 return;
               }
               if (e.key === "Enter") {
                 e.preventDefault();
-                const hit = MENTION_AGENTS.filter(
-                  (a) =>
-                    a.name.includes(mention.query.toLowerCase()) ||
-                    a.label.toLowerCase().includes(mention.query.toLowerCase()),
-                );
-                const pick = hit[mentionIdx % Math.max(hit.length, 1)] ?? hit[0];
-                if (pick) applyMention(pick.name);
+                const pick = visible[mentionIdx % Math.max(visible.length, 1)];
+                if (pick) {
+                  if (mention.kind === "agent") applyAgent(pick.name);
+                  else applyModel(pick.name);
+                }
                 return;
               }
               if (e.key === "Escape") {
