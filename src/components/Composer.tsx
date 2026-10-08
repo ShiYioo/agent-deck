@@ -1,9 +1,10 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { HARNESS_ACCENT } from "./Sidebar";
 import { discoverModels, inTauri } from "../api";
 import { IconFolder, IconSend, IconPlus } from "./icons";
+import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
 
 /** 底部输入卡：目录 chip + 多行输入 + harness/模式下拉 + 圆形发送键。
@@ -43,6 +44,44 @@ export const Composer = memo(function Composer({
 }) {
   const [text, setText] = useState("");
   const [focused, setFocused] = useState(false);
+  // @ 提及补全：光标前 @xxx 模式即弹出（mention.query 为 @ 后已输入部分）
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const MENTION_AGENTS = [
+    { name: "deck", label: "AgentDeck Agent", desc: "自有运行时" },
+    { name: "zcode", label: "ZCode · GLM", desc: "模型走账号默认" },
+    { name: "codex", label: "Codex · GPT", desc: "可接 :模型名" },
+    { name: "opencode", label: "OpenCode", desc: "可接 :provider/model" },
+  ];
+
+  const refreshMention = (el: HTMLTextAreaElement) => {
+    const pos = el.selectionStart ?? 0;
+    const before = el.value.slice(0, pos);
+    const m = /@([a-z0-9:_-]*)$/i.exec(before);
+    if (m) {
+      setMention({ start: pos - m[0].length, query: m[1] });
+      setMentionIdx(0);
+    } else {
+      setMention(null);
+    }
+  };
+
+  const applyMention = (name: string) => {
+    const el = textareaRef.current;
+    if (!el || !mention) return;
+    const pos = el.selectionStart ?? el.value.length;
+    const insert = `@${name} `;
+    const next = el.value.slice(0, mention.start) + insert + el.value.slice(pos);
+    setText(next);
+    setMention(null);
+    requestAnimationFrame(() => {
+      el.focus();
+      const caret = mention.start + insert.length;
+      el.setSelectionRange(caret, caret);
+    });
+  };
 
   const send = () => {
     if (!text.trim()) return;
@@ -130,21 +169,86 @@ export const Composer = memo(function Composer({
         />
       </div>
 
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            send();
-          }
-        }}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        rows={3}
-        placeholder={placeholder ?? "随心输入"}
-        className="w-full resize-none bg-transparent px-4 pt-3 text-sm text-stone-800 outline-none placeholder:text-stone-400 disabled:opacity-50"
-      />
+      <div className="relative">
+        {/* @ 智能体补全：输入 @ 时向上弹出的提及菜单 */}
+        {mention && (
+          <div className="absolute bottom-full left-4 right-4 z-20 mb-1 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]">
+            <div className="border-b border-stone-100 px-3 py-1.5 text-[10px] text-stone-400">
+              唤醒智能体 · @codex:模型名 可指定模型
+            </div>
+            {MENTION_AGENTS.filter(
+                (a) =>
+                  a.name.includes(mention.query.toLowerCase()) ||
+                  a.label.toLowerCase().includes(mention.query.toLowerCase()),
+              )
+              .map((a, i) => (
+                <button
+                  key={a.name}
+                  onClick={() => applyMention(a.name)}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                    i === mentionIdx
+                      ? "bg-stone-100 text-stone-900"
+                      : "text-stone-600 hover:bg-stone-50"
+                  }`}
+                >
+                  <HarnessIcon harness={a.name} size={13} rounded />
+                  <span className="font-medium">@{a.name}</span>
+                  <span className="text-stone-400">{a.label}</span>
+                  <span className="ml-auto text-[10px] text-stone-400">{a.desc}</span>
+                </button>
+              ))}
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            refreshMention(e.target);
+          }}
+          onKeyDown={(e) => {
+            if (mention) {
+              if (e.key === "ArrowDown" || e.key === "Tab") {
+                e.preventDefault();
+                setMentionIdx((i) => (i + 1) % MENTION_AGENTS.length);
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setMentionIdx(
+                  (i) => (i - 1 + MENTION_AGENTS.length) % MENTION_AGENTS.length,
+                );
+                return;
+              }
+              if (e.key === "Enter") {
+                e.preventDefault();
+                const hit = MENTION_AGENTS.filter(
+                  (a) =>
+                    a.name.includes(mention.query.toLowerCase()) ||
+                    a.label.toLowerCase().includes(mention.query.toLowerCase()),
+                );
+                const pick = hit[mentionIdx % Math.max(hit.length, 1)] ?? hit[0];
+                if (pick) applyMention(pick.name);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          rows={3}
+          placeholder={placeholder ?? "随心输入"}
+          className="w-full resize-none bg-transparent px-4 pt-3 text-sm text-stone-800 outline-none placeholder:text-stone-400 disabled:opacity-50"
+        />
+      </div>
 
       <div className="flex items-center gap-1.5 px-3 pb-3">
         <button
