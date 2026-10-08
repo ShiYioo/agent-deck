@@ -1,5 +1,6 @@
 import { memo } from "react";
 import type { AgentEvent } from "../types";
+import { AssistantText } from "./AssistantText";
 import {
   IconPrompt,
   IconSparkle,
@@ -42,8 +43,8 @@ export const EventLine = memo(function EventLine({
       );
     case "assistant_message":
       return (
-        <div className="ev-in whitespace-pre-wrap text-stone-900" style={style}>
-          {event.text}
+        <div className="ev-in text-stone-900" style={style}>
+          <AssistantText text={event.text} />
         </div>
       );
     case "thinking":

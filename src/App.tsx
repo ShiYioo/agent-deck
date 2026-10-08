@@ -417,6 +417,22 @@ export default function App() {
   }, [diffTaskId, selectedRunning]);
 
 
+  // Esc 终止运行中的任务（Codex 桌面端习惯；输入框/弹层聚焦时除外）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
+      if (diff || settingsOpen || approval) return; // 弹层/审批有自己的 Esc 语义
+      if (!selectedRunning || !selected) return;
+      e.preventDefault();
+      cancelTask(selected).catch(() => {});
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selectedRunning, selected, diff, settingsOpen, approval]);
+
+
   const canShowDiff = !!selectedRow;
 
   // 会话接力：会话记录压缩为交接简报 → 派给目标 harness（同一工作目录）
@@ -852,16 +868,32 @@ function LogPanel({
   const prevCount = useRef(0);
   const scrollPending = useRef(false);
   const staggerInitial = prevCount.current === 0 && events.length > 0;
+  // 跟随滚动：用户上翻查看历史时暂停自动滚底（Codex 桌面端习惯）
+  const [follow, setFollow] = useState(true);
+
+  const scrollToBottom = (smooth = false) => {
+    const el = logRef.current;
+    if (!el) return;
+    setFollow(true);
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  };
+
+  const handleScroll = () => {
+    const el = logRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setFollow(dist < 60);
+  };
 
   useEffect(() => {
-    if (scrollPending.current) return;
+    if (!follow || scrollPending.current) return;
     scrollPending.current = true;
     requestAnimationFrame(() => {
       scrollPending.current = false;
       logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
     });
     prevCount.current = events.length;
-  }, [events.length]);
+  }, [events.length, follow]);
 
   const overflow = events.length - MAX_RENDER;
   const visible = overflow > 0 ? events.slice(overflow) : events;
@@ -873,7 +905,7 @@ function LogPanel({
   };
 
   return (
-    <div className="min-h-0 flex-1 flex flex-col">
+    <div className="relative min-h-0 flex-1 flex flex-col">
       <div className="flex items-center justify-between px-6 pt-2 text-[10px] text-stone-400">
         <span>
           {overflow > 0
@@ -889,6 +921,7 @@ function LogPanel({
       </div>
       <div
         ref={logRef}
+        onScroll={handleScroll}
         className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 pb-4 font-mono text-xs leading-relaxed"
       >
       {events.length === 0 && (
@@ -912,6 +945,14 @@ function LogPanel({
         />
       ))}
       </div>
+      {!follow && (
+        <button
+          onClick={() => scrollToBottom(true)}
+          className="anim-pop absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-stone-900 px-3.5 py-1.5 text-xs font-medium text-white shadow-lg hover:bg-stone-700"
+        >
+          ↓ 回到最新
+        </button>
+      )}
     </div>
   );
 }
