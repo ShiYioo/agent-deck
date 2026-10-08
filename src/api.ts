@@ -20,6 +20,7 @@ export async function startTask(params: {
   model: string | null;
   permission: string | null;
   resumeSessionId: string | null;
+  projectId?: string | null;
 }): Promise<string> {
   if (!inTauri) browserStub("派任务");
   const { task_id } = await invoke<{ task_id: string }>("start_task", params);
@@ -120,6 +121,24 @@ export async function mergeTaskWorktree(taskId: string): Promise<string> {
 export async function discardTaskWorktree(taskId: string): Promise<void> {
   if (!inTauri) browserStub("放弃 worktree");
   await invoke("discard_task_worktree", { taskId });
+}
+
+export async function listProjects(): Promise<
+  { id: string; name: string; dir: string; created_at: number }[]
+> {
+  if (!inTauri) return [];
+  return await invoke("list_projects", {});
+}
+
+export async function createProject(
+  name: string,
+  dir: string,
+): Promise<void> {
+  await invoke("create_project", { name, dir });
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  await invoke("delete_project", { id });
 }
 
 export async function getDefaultCwd(): Promise<string> {

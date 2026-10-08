@@ -78,6 +78,13 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
 }
 
 /** 与 Rust 侧 store::TaskRow 对应（snake_case 透传） */
+export type ProjectRow = {
+  id: string;
+  name: string;
+  dir: string;
+  created_at: number;
+};
+
 export type TaskRow = {
   id: string;
   harness: string;
@@ -85,6 +92,7 @@ export type TaskRow = {
   prompt: string;
   mode: string | null;
   model: string | null;
+  project_id: string | null;
   session_id: string | null;
   base_branch: string | null;
   worktree_dir: string | null;

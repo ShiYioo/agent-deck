@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use worktree::WorktreePaths;
 
 use crate::executors::Harness;
-use crate::store::{ModelProfile, Store, TaskRow};
+use crate::store::{ModelProfile, ProjectRow, Store, TaskRow};
 
 /// deck-agent.mjs 的位置：优先资源目录（打包后），回退仓库源码（开发模式）。
 fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
@@ -76,7 +76,16 @@ async fn start_task(
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
-        store.create_task(&task_id, "deck", &cwd, &prompt, mode.as_deref(), None)?;
+        let deck_project = store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id);
+        store.create_task(
+            &task_id,
+            "deck",
+            &cwd,
+            &prompt,
+            mode.as_deref(),
+            None,
+            deck_project.as_deref(),
+        )?;
         // 模型池：启用的配置档案按创建顺序构成自治链（sidecar 内自动降级）
         let profiles: Vec<pi_session::ModelProfileParam> = store
             .list_model_profiles(true)?
@@ -153,6 +162,11 @@ async fn start_task(
         )?;
     }
 
+    let cli_project = store
+        .find_project_by_dir(&task_cwd)
+        .ok()
+        .flatten()
+        .map(|p| p.id);
     store.create_task(
         &task_id,
         harness.name(),
@@ -160,6 +174,7 @@ async fn start_task(
         &prompt,
         mode.as_deref(),
         model.as_deref(),
+        cli_project.as_deref(),
     )?;
 
     let child = runner::spawn(
@@ -597,6 +612,39 @@ fn delete_model_profile(store: State<'_, Store>, id: String) -> Result<(), Strin
     store.delete_model_profile(&id)
 }
 
+// ── 项目实体（Codex 式一等公民） ──────────────────────────
+
+/// 前端 → Rust：创建项目（名称 + 源文件夹）。
+#[tauri::command]
+fn create_project(
+    store: State<'_, Store>,
+    name: String,
+    dir: String,
+) -> Result<ProjectRow, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let id = format!("prj-{nanos}");
+    store.create_project(&id, &name, &dir)?;
+    let all = store.list_projects()?;
+    all.into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "创建后未找到".into())
+}
+
+/// 前端 → Rust：项目列表。
+#[tauri::command]
+fn list_projects(store: State<'_, Store>) -> Result<Vec<ProjectRow>, String> {
+    store.list_projects()
+}
+
+/// 前端 → Rust：删除项目（任务保留但解除挂靠）。
+#[tauri::command]
+fn delete_project(store: State<'_, Store>, id: String) -> Result<(), String> {
+    store.delete_project(&id)
+}
+
 // ── worktree 合并/放弃（任务完成后） ─────────────────────
 
 /// 前端 → Rust：把任务分支合并回主目录，然后清理 worktree 与分支。
@@ -687,6 +735,9 @@ pub fn run() {
             get_default_cwd,
             merge_task_worktree,
             discard_task_worktree,
+            create_project,
+            list_projects,
+            delete_project,
             discover_models,
             build_smart_handoff_prompt,
             diff_watch::diff_watch_start,

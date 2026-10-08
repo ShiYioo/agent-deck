@@ -10,6 +10,7 @@ import {
   buildSmartHandoffPrompt,
   cancelTask,
   discardTaskWorktree,
+  listProjects as listProjectsApi,
   mergeTaskWorktree,
   getDefaultCwd,
   getTaskDiff,
@@ -21,7 +22,7 @@ import {
   setSetting,
   startTask,
 } from "./api";
-import type { AgentEvent, ApprovalRequest, LiveTask, TaskRow } from "./types";
+import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { piEventToAgentEvent } from "./types";
 import { Sidebar, projectName, HARNESS_ACCENT } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
@@ -30,6 +31,7 @@ import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
 import { DiffModal } from "./components/DiffModal";
 import { SettingsModal } from "./components/SettingsModal";
+import { CreateProjectModal } from "./components/CreateProjectModal";
 import {
   IconBrandMark,
   IconBack,
@@ -62,10 +64,13 @@ export default function App() {
   // 待审批的工具调用（deck 运行时 approved 模式）
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [busyHandoff, setBusyHandoff] = useState(false);
 
   const refreshHistory = useCallback(() => {
     listTasks().then(setHistory).catch(() => {});
+    listProjectsApi().then(setProjects).catch(() => {});
   }, []);
 
   // 事件监听里读取最新 live 用的镜像
@@ -306,6 +311,10 @@ export default function App() {
           model: canResume ? row.model : routeModel,
           permission: canResume ? null : permission,
           resumeSessionId: canResume ? row.session_id : null,
+          projectId:
+            projects.find(
+              (p) => p.dir.split("\\").join("/") === (useCwd || "").split("\\").join("/"),
+            )?.id ?? null,
         });
         setLive((prev) => ({
           ...prev,
@@ -492,6 +501,16 @@ export default function App() {
   return (
     <div className="flex h-full">
       <Rail onNew={() => setSelected(null)} onSettings={() => setSettingsOpen(true)} />
+      {createProjectOpen && (
+        <CreateProjectModal
+          onClose={() => setCreateProjectOpen(false)}
+          onCreated={(dir) => {
+            setCreateProjectOpen(false);
+            setCwd(dir); // 新项目即当前上下文
+            refreshHistory();
+          }}
+        />
+      )}
       <Sidebar tasks={history} selectedId={selected} onSelect={handleSelect} />
 
       <main className="flex min-w-0 flex-1 flex-col">

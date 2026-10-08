@@ -11,6 +11,15 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub dir: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelProfile {
     pub id: String,
     pub provider: String,
@@ -30,6 +39,7 @@ pub struct TaskRow {
     pub prompt: String,
     pub mode: Option<String>,
     pub model: Option<String>,
+    pub project_id: Option<String>,
     pub session_id: Option<String>,
     pub base_branch: Option<String>,
     pub worktree_dir: Option<String>,
@@ -102,6 +112,12 @@ impl Store {
                  content    TEXT NOT NULL,
                  created_at INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS projects (
+                 id         TEXT PRIMARY KEY,
+                 name       TEXT NOT NULL,
+                 dir        TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS model_profiles (
                  id         TEXT PRIMARY KEY,
                  provider   TEXT NOT NULL,
@@ -118,6 +134,7 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_branch TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_commit TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_dir TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -130,6 +147,7 @@ impl Store {
             .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_task(
         &self,
         id: &str,
@@ -138,12 +156,22 @@ impl Store {
         prompt: &str,
         mode: Option<&str>,
         model: Option<&str>,
+        project_id: Option<&str>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute(
-            "INSERT INTO tasks (id, harness, cwd, prompt, mode, model, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, harness, cwd, prompt, mode, model, Self::now_millis()],
+            "INSERT INTO tasks (id, harness, cwd, prompt, mode, model, project_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                harness,
+                cwd,
+                prompt,
+                mode,
+                model,
+                project_id,
+                Self::now_millis()
+            ],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -186,7 +214,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, base_branch, worktree_dir, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
@@ -200,13 +228,14 @@ impl Store {
                     prompt: row.get(3)?,
                     mode: row.get(4)?,
                     model: row.get(5)?,
-                    base_branch: row.get(6)?,
-                    worktree_dir: row.get(7)?,
-                    session_id: row.get(8)?,
-                    status: row.get(9)?,
-                    exit_code: row.get(10)?,
-                    created_at: row.get(11)?,
-                    finished_at: row.get(12)?,
+                    project_id: row.get(6)?,
+                    base_branch: row.get(7)?,
+                    worktree_dir: row.get(8)?,
+                    session_id: row.get(9)?,
+                    status: row.get(10)?,
+                    exit_code: row.get(11)?,
+                    created_at: row.get(12)?,
+                    finished_at: row.get(13)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -219,7 +248,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, base_branch, worktree_dir, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks WHERE id = ?1",
             )
@@ -232,13 +261,14 @@ impl Store {
                 prompt: row.get(3)?,
                 mode: row.get(4)?,
                 model: row.get(5)?,
-                base_branch: row.get(6)?,
-                worktree_dir: row.get(7)?,
-                session_id: row.get(8)?,
-                status: row.get(9)?,
-                exit_code: row.get(10)?,
-                created_at: row.get(11)?,
-                finished_at: row.get(12)?,
+                project_id: row.get(6)?,
+                base_branch: row.get(7)?,
+                worktree_dir: row.get(8)?,
+                session_id: row.get(9)?,
+                status: row.get(10)?,
+                exit_code: row.get(11)?,
+                created_at: row.get(12)?,
+                finished_at: row.get(13)?,
             })
         })
         .optional()
@@ -315,6 +345,56 @@ impl Store {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // ── 项目实体（Codex 式：名称 + 源文件夹，任务挂靠） ─────────
+
+    pub fn create_project(&self, id: &str, name: &str, dir: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "INSERT INTO projects (id, name, dir, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, name, dir, Self::now_millis()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<ProjectRow>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, dir, created_at FROM projects ORDER BY created_at DESC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ProjectRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    dir: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    pub fn delete_project(&self, id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "UPDATE tasks SET project_id = NULL WHERE project_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn find_project_by_dir(&self, dir: &str) -> Result<Option<ProjectRow>, String> {
+        let norm = |s: &str| s.replace("\\", "/");
+        let all = self.list_projects()?;
+        Ok(all.into_iter().find(|p| norm(&p.dir) == norm(dir)))
     }
 
     // ── 项目记忆（deck 任务完成后自动抽取，同项目召回） ──────
@@ -452,6 +532,7 @@ mod tests {
                 "修 bug",
                 Some("yolo"),
                 Some("glm-4.7"),
+                None,
             )
             .unwrap();
 
