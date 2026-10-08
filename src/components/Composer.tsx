@@ -20,6 +20,9 @@ export const Composer = memo(function Composer({
   onModelChange,
   permission,
   onPermissionChange,
+  projects,
+  selectedProjectId,
+  onProjectSelect,
   onSend,
   running,
   recentModels = [],
@@ -35,6 +38,9 @@ export const Composer = memo(function Composer({
   onModelChange: (v: string) => void;
   permission: string;
   onPermissionChange: (v: string) => void;
+  projects: { id: string; name: string; dir: string }[];
+  selectedProjectId: string | null;
+  onProjectSelect: (id: string | null, dir: string) => void;
   onSend: (text: string) => void;
   /** 任务运行中：发送将入队而非直接派发 */
   running?: boolean;
@@ -205,8 +211,21 @@ export const Composer = memo(function Composer({
 
   return (
     <div className="composer-card mx-auto w-full max-w-3xl rounded-2xl border border-stone-200 bg-white shadow-[var(--shadow-1)] focus-within:border-stone-300">
-      {/* 目录 chip：点击文件夹图标弹出系统选择器，也可直接手输 */}
+      {/* 项目选择：从已建项目一键切换（同步工作目录） */}
       <div className="flex items-center gap-2 px-4 pt-3">
+        <Dropdown
+          value={selectedProjectId ?? ""}
+          onChange={(id) => {
+            onProjectSelect(id || null, "");
+            const p = projects.find((x) => x.id === id);
+            if (p) onCwdChange(p.dir);
+          }}
+          options={[
+            { value: "", label: "不挂项目" },
+            ...projects.map((x) => ({ value: x.id, label: x.name })),
+          ]}
+          title="更改此聊天的项目"
+        />
         <button
           onClick={async () => {
             if (!inTauri) {

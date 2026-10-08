@@ -65,6 +65,7 @@ export default function App() {
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [busyHandoff, setBusyHandoff] = useState(false);
 
@@ -312,9 +313,11 @@ export default function App() {
           permission: canResume ? null : permission,
           resumeSessionId: canResume ? row.session_id : null,
           projectId:
+            selectedProjectId ??
             projects.find(
               (p) => p.dir.split("\\").join("/") === (useCwd || "").split("\\").join("/"),
-            )?.id ?? null,
+            )?.id ??
+            null,
         });
         setLive((prev) => ({
           ...prev,
@@ -807,6 +810,13 @@ export default function App() {
           <Composer
             cwd={cwd}
             onCwdChange={setCwd}
+            projects={projects}
+            selectedProjectId={selectedProjectId}
+            onProjectSelect={(id) => {
+              setSelectedProjectId(id);
+              const p = projects.find((x) => x.id === id);
+              if (p) setCwd(p.dir);
+            }}
             harness={harness}
             onHarnessChange={(h) => {
               setHarness(h);
