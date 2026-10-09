@@ -6,26 +6,19 @@ import { IconBrandMark } from "./icons";
 /** 自绘标题栏：拖拽区 + 最小化/最大化/关闭（原生装饰已关闭） */
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
+  // 纯浏览器预览：无窗口系统，窗控点击为 no-op（标题栏本身照常渲染）
   const win = inTauri ? getCurrentWindow() : null;
 
   useEffect(() => {
     if (!win) return;
-    let unlisten: (() => void) | undefined;
-    win.onResized(({ payload: _size }) => {
-      // 尺寸变化时同步最大化态（宽高等于屏幕工作区即视为最大化）
-      getCurrentWindow()
-        .isMaximized()
-        .then(setMaximized)
-        .catch(() => {});
+    const promise = win.onResized(() => {
+      win.isMaximized().then(setMaximized).catch(() => {});
     });
-    getCurrentWindow()
-      .isMaximized()
-      .then(setMaximized)
-      .catch(() => {});
-    return () => unlisten?.();
+    win.isMaximized().then(setMaximized).catch(() => {});
+    return () => {
+      promise.then((unlisten) => unlisten()).catch(() => {});
+    };
   }, [win]);
-
-  if (!inTauri || !win) return null; // 纯浏览器预览：无窗口系统
 
   return (
     <header
@@ -43,7 +36,7 @@ export function TitleBar() {
       {/* 窗控按钮（Windows 习惯：右对齐，窄描边图形） */}
       <div className="flex items-center">
         <button
-          onClick={() => win.minimize()}
+          onClick={() => win?.minimize()}
           title="最小化"
           className="flex h-10 w-11 items-center justify-center text-stone-300 transition-colors hover:bg-stone-800"
         >
@@ -52,7 +45,7 @@ export function TitleBar() {
           </svg>
         </button>
         <button
-          onClick={() => win.toggleMaximize()}
+          onClick={() => win?.toggleMaximize()}
           title={maximized ? "还原" : "最大化"}
           className="flex h-10 w-11 items-center justify-center text-stone-300 transition-colors hover:bg-stone-800"
         >
@@ -67,7 +60,7 @@ export function TitleBar() {
           )}
         </button>
         <button
-          onClick={() => win.close()}
+          onClick={() => win?.close()}
           title="关闭"
           className="flex h-10 w-11 items-center justify-center text-stone-300 transition-colors hover:bg-red-600 hover:text-white"
         >
