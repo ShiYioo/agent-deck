@@ -18,7 +18,7 @@ import type { ModelProfile } from "../api";
 
 type Section = "general" | "models";
 
-const PROVIDER_LABEL: Record<string, string> = { glm: "GLM", gpt: "GPT" };
+const PROVIDER_LABEL: Record<string, string> = { glm: "GLM", gpt: "GPT", custom: "自定义" };
 
 function maskKey(k: string) {
   if (k.length <= 8) return "•••";
@@ -101,10 +101,16 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState({ provider: "glm", label: "", api_key: "", base_url: "" });
+  const [form, setForm] = useState({
+    provider: "custom",
+    label: "",
+    api_key: "",
+    base_url: "",
+    model: "",
+  });
   const [status, setStatus] = useState<string | null>(null);
 
-  const emptyForm = { provider: "glm", label: "", api_key: "", base_url: "" };
+  const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", model: "" };
 
   const loadProfiles = useCallback(() => {
     listModelProfiles().then(setProfiles).catch(() => {});
@@ -154,6 +160,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       label: p.label ?? "",
       api_key: p.api_key,
       base_url: p.base_url ?? "",
+      model: p.model ?? "",
     });
     setAdding(false);
     setEditingId(p.id);
@@ -175,6 +182,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       label: form.label.trim() || null,
       api_key: form.api_key.trim(),
       base_url: form.base_url.trim() || null,
+      model: form.model.trim() || null,
     };
     try {
       if (editingId) {
@@ -333,22 +341,18 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                       正在编辑：{PROVIDER_LABEL[form.provider] ?? form.provider}
                     </div>
                   )}
-                  <div className="flex gap-2">
-                    <select
-                      value={form.provider}
-                      onChange={(e) => setForm({ ...form, provider: e.target.value })}
-                      className="rounded-lg border border-stone-200 px-2 py-1.5 text-xs"
-                    >
-                      <option value="glm">GLM</option>
-                      <option value="gpt">GPT</option>
-                    </select>
-                    <input
-                      value={form.label}
-                      onChange={(e) => setForm({ ...form, label: e.target.value })}
-                      placeholder="备注名（可选）"
-                      className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-xs outline-none focus:border-stone-400"
-                    />
-                  </div>
+                  <input
+                    value={form.label}
+                    onChange={(e) => setForm({ ...form, label: e.target.value })}
+                    placeholder="名称（可选，如「中转 · DeepSeek」）"
+                    className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
+                  />
+                  <input
+                    value={form.base_url}
+                    onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                    placeholder="Base URL（如 https://api.deepseek.com/v1）"
+                    className="w-full rounded-lg border border-stone-200 px-3 py-2 font-mono text-xs outline-none focus:border-stone-400"
+                  />
                   <input
                     type="password"
                     value={form.api_key}
@@ -357,9 +361,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
                   />
                   <input
-                    value={form.base_url}
-                    onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                    placeholder="Base URL（可选）"
+                    value={form.model}
+                    onChange={(e) => setForm({ ...form, model: e.target.value })}
+                    placeholder="模型 ID（如 deepseek-chat，留空用通道默认）"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 font-mono text-xs outline-none focus:border-stone-400"
                   />
                   <div className="flex gap-2">

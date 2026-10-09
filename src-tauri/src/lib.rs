@@ -94,6 +94,7 @@ async fn start_task(
                 provider: p.provider,
                 key: p.api_key,
                 base_url: p.base_url,
+                model: p.model,
             })
             .collect();
         let use_cwd_deck = cwd.clone();
@@ -342,24 +343,24 @@ async fn build_smart_handoff_prompt(
         String::from("（该任务无对话记录。请直接执行下方的原始任务。）")
     } else {
         // 压缩模型与 key：优先 GLM，退 GPT（来自设置面板）
-        let profiles = store.list_model_profiles(true)?;
-        let profile = profiles
-            .iter()
-            .find(|p| p.provider == "glm")
-            .or(profiles.first())
-            .ok_or("未配置任何启用的模型档案——请到设置面板添加并启用")?;
+        let profiles: Vec<pi_session::ModelProfileParam> = store
+            .list_model_profiles(true)?
+            .into_iter()
+            .map(|p| pi_session::ModelProfileParam {
+                provider: p.provider,
+                key: p.api_key,
+                base_url: p.base_url,
+                model: p.model,
+            })
+            .collect();
+        if profiles.is_empty() {
+            return Err("未配置任何启用的模型档案——请到设置面板添加并启用".into());
+        }
 
         let sidecar = sidecar_path(&app);
         match tokio::time::timeout(
             std::time::Duration::from_secs(90),
-            pi_session::pi_summarize_text(
-                &sidecar,
-                &profile.provider,
-                &profile.api_key,
-                profile.base_url.as_deref(),
-                &row.cwd,
-                &convo,
-            ),
+            pi_session::pi_summarize_text(&sidecar, &profiles, &row.cwd, &convo),
         )
         .await
         {
@@ -563,6 +564,7 @@ fn list_model_profiles(store: State<'_, Store>) -> Result<Vec<ModelProfile>, Str
             Some(&format!("自动导入 · {}", c.source)),
             &c.key,
             None,
+            None,
             true,
         )?;
     }
@@ -577,6 +579,7 @@ fn add_model_profile(
     label: Option<String>,
     api_key: String,
     base_url: Option<String>,
+    model: Option<String>,
 ) -> Result<ModelProfile, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -589,6 +592,7 @@ fn add_model_profile(
         label.as_deref(),
         &api_key,
         base_url.as_deref(),
+        model.as_deref(),
         true,
     )?;
     store
@@ -605,6 +609,7 @@ fn update_model_profile(
     label: Option<String>,
     api_key: String,
     base_url: Option<String>,
+    model: Option<String>,
 ) -> Result<ModelProfile, String> {
     store.update_model_profile(
         &id,
@@ -612,6 +617,7 @@ fn update_model_profile(
         label.as_deref(),
         &api_key,
         base_url.as_deref(),
+        model.as_deref(),
     )?;
     store
         .get_model_profile(&id)?

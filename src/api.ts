@@ -82,6 +82,7 @@ export type ModelProfile = {
   label: string | null;
   api_key: string;
   base_url: string | null;
+  model: string | null;
   enabled: boolean;
   created_at: number;
 };
@@ -96,6 +97,7 @@ export async function addModelProfile(params: {
   label: string | null;
   api_key: string;
   base_url: string | null;
+  model: string | null;
 }): Promise<void> {
   await invoke("add_model_profile", params);
 }
@@ -106,6 +108,7 @@ export async function updateModelProfile(params: {
   label: string | null;
   api_key: string;
   base_url: string | null;
+  model: string | null;
 }): Promise<ModelProfile> {
   return await invoke<ModelProfile>("update_model_profile", params);
 }

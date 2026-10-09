@@ -35,11 +35,14 @@ pub struct PiRunParams {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ModelProfileParam {
-    /// glm | gpt
+    /// 通道：glm = zai 系；其余（含 custom）= OpenAI 兼容
     pub provider: String,
     pub key: String,
     #[serde(default)]
     pub base_url: Option<String>,
+    /// 模型 ID（OpenAI 兼容中转必需；空 = 通道默认）
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// 每个 task_id 一个发送端：往 sidecar stdin 写指令。
@@ -320,9 +323,7 @@ pub fn send_command(
 /// spawn 独立 sidecar 进程，等待 summarize_result 事件；失败返回 Err 由调用方回退。
 pub async fn pi_summarize_text(
     sidecar_js: &std::path::Path,
-    model: &str,
-    api_key: &str,
-    base_url: Option<&str>,
+    profiles: &[ModelProfileParam],
     cwd: &str,
     text: &str,
 ) -> Result<String, String> {
@@ -354,9 +355,7 @@ pub async fn pi_summarize_text(
     let cmd = serde_json::json!({
         "cmd": "summarize",
         "text": text,
-        "model": model,
-        "apiKey": api_key,
-        "baseUrl": base_url,
+        "profiles": profiles,
         "cwd": cwd,
     });
     stdin

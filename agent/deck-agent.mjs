@@ -106,7 +106,7 @@ function resolveFromProfile(p) {
   const glm = p.provider === "glm";
   return {
     provider: glm ? "zai" : "openai",
-    id: glm ? "glm-4.7" : "gpt-5.1",
+    id: p.model || (glm ? "glm-4.7" : "gpt-5.1"),
     apiKey: p.key,
     baseUrl:
       p.baseUrl ||
