@@ -100,6 +100,16 @@ export async function addModelProfile(params: {
   await invoke("add_model_profile", params);
 }
 
+export async function updateModelProfile(params: {
+  id: string;
+  provider: string;
+  label: string | null;
+  api_key: string;
+  base_url: string | null;
+}): Promise<ModelProfile> {
+  return await invoke<ModelProfile>("update_model_profile", params);
+}
+
 export async function setModelProfileEnabled(
   id: string,
   enabled: boolean,

@@ -596,6 +596,28 @@ fn add_model_profile(
         .ok_or_else(|| "创建后未找到档案".into())
 }
 
+/// 前端 → Rust：编辑模型配置档案（整体覆盖，enabled 不动）。
+#[tauri::command]
+fn update_model_profile(
+    store: State<'_, Store>,
+    id: String,
+    provider: String,
+    label: Option<String>,
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<ModelProfile, String> {
+    store.update_model_profile(
+        &id,
+        &provider,
+        label.as_deref(),
+        &api_key,
+        base_url.as_deref(),
+    )?;
+    store
+        .get_model_profile(&id)?
+        .ok_or_else(|| "更新后未找到档案".into())
+}
+
 /// 前端 → Rust：启停配置档案。
 #[tauri::command]
 fn set_model_profile_enabled(
@@ -744,6 +766,7 @@ pub fn run() {
             diff_watch::diff_watch_stop,
             list_model_profiles,
             add_model_profile,
+            update_model_profile,
             set_model_profile_enabled,
             delete_model_profile
         ])

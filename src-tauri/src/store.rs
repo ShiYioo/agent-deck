@@ -475,6 +475,30 @@ impl Store {
         Ok(())
     }
 
+    /// 编辑档案：provider/label/api_key/base_url 整体覆盖（enabled 不动，由开关单独管）。
+    pub fn update_model_profile(
+        &self,
+        id: &str,
+        provider: &str,
+        label: Option<&str>,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let changed = conn
+            .execute(
+                "UPDATE model_profiles
+                 SET provider = ?2, label = ?3, api_key = ?4, base_url = ?5
+                 WHERE id = ?1",
+                params![id, provider, label, api_key, base_url],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("档案不存在：{id}"));
+        }
+        Ok(())
+    }
+
     pub fn delete_model_profile(&self, id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute("DELETE FROM model_profiles WHERE id = ?1", params![id])
@@ -607,6 +631,31 @@ mod tests {
 
         store.delete_model_profile("p1").unwrap();
         assert_eq!(store.list_model_profiles(false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_model_profile_overwrites_and_keeps_enabled() {
+        let store = Store::in_memory().unwrap();
+        store
+            .add_model_profile("p1", "glm", Some("旧名"), "old-key", None, true)
+            .unwrap();
+        store.set_model_profile_enabled("p1", false).unwrap();
+
+        store
+            .update_model_profile("p1", "gpt", Some("新名"), "new-key", Some("https://api.x"))
+            .unwrap();
+        let p = store.get_model_profile("p1").unwrap().unwrap();
+        assert_eq!(p.provider, "gpt");
+        assert_eq!(p.label.as_deref(), Some("新名"));
+        assert_eq!(p.api_key, "new-key");
+        assert_eq!(p.base_url.as_deref(), Some("https://api.x"));
+        assert!(!p.enabled, "编辑不应改动启用状态");
+
+        assert!(
+            store
+                .update_model_profile("ghost", "glm", None, "k", None)
+                .is_err()
+        );
     }
 
     #[test]

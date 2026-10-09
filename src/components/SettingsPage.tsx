@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { X, Plus, ArrowLeft } from "lucide-react";
+import { X, Plus, ArrowLeft, Pencil } from "lucide-react";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 
@@ -12,6 +12,7 @@ import {
   listModelProfiles,
   setModelProfileEnabled,
   setSetting,
+  updateModelProfile,
 } from "../api";
 import type { ModelProfile } from "../api";
 
@@ -99,8 +100,11 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   // 模型池
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ provider: "glm", label: "", api_key: "", base_url: "" });
   const [status, setStatus] = useState<string | null>(null);
+
+  const emptyForm = { provider: "glm", label: "", api_key: "", base_url: "" };
 
   const loadProfiles = useCallback(() => {
     listModelProfiles().then(setProfiles).catch(() => {});
@@ -138,22 +142,50 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     flash(v ? "通知已开启" : "通知已关闭");
   };
 
-  const addProfile = async () => {
+  const openAdd = () => {
+    setForm(emptyForm);
+    setEditingId(null);
+    setAdding(true);
+  };
+
+  const openEdit = (p: ModelProfile) => {
+    setForm({
+      provider: p.provider,
+      label: p.label ?? "",
+      api_key: p.api_key,
+      base_url: p.base_url ?? "",
+    });
+    setAdding(false);
+    setEditingId(p.id);
+  };
+
+  const closeForm = () => {
+    setAdding(false);
+    setEditingId(null);
+    setForm(emptyForm);
+  };
+
+  const saveProfile = async () => {
     if (!form.api_key.trim()) {
       flash("API Key 不能为空");
       return;
     }
+    const payload = {
+      provider: form.provider,
+      label: form.label.trim() || null,
+      api_key: form.api_key.trim(),
+      base_url: form.base_url.trim() || null,
+    };
     try {
-      await addModelProfile({
-        provider: form.provider,
-        label: form.label.trim() || null,
-        api_key: form.api_key.trim(),
-        base_url: form.base_url.trim() || null,
-      });
-      setForm({ provider: "glm", label: "", api_key: "", base_url: "" });
-      setAdding(false);
+      if (editingId) {
+        await updateModelProfile({ id: editingId, ...payload });
+        flash("已保存");
+      } else {
+        await addModelProfile(payload);
+        flash("已添加并启用");
+      }
+      closeForm();
       loadProfiles();
-      flash("已添加并启用");
     } catch (e) {
       flash(String(e));
     }
@@ -266,6 +298,14 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                         }}
                       />
                       <button
+                        onClick={() => openEdit(p)}
+                        className="text-stone-300 transition-colors hover:text-stone-700"
+                        title="编辑"
+                        aria-label={`编辑 ${p.label ?? p.provider}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
                         onClick={() => {
                           deleteModelProfile(p.id).then(loadProfiles).catch(() => {});
                         }}
@@ -279,15 +319,20 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
 
-              {!adding ? (
+              {!adding && editingId === null ? (
                 <button
-                  onClick={() => setAdding(true)}
+                  onClick={openAdd}
                   className="mt-3 w-full rounded-xl border border-dashed border-stone-300 py-2.5 text-xs text-stone-500 transition-colors hover:bg-stone-50"
                 >
                   <span className="flex items-center justify-center gap-2"><Plus size={14} />添加模型配置</span>
                 </button>
               ) : (
                 <div className="mt-3 space-y-2 rounded-xl border border-stone-200 bg-stone-50/70 p-4">
+                  {editingId && (
+                    <div className="text-xs font-medium text-stone-500">
+                      正在编辑：{PROVIDER_LABEL[form.provider] ?? form.provider}
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <select
                       value={form.provider}
@@ -319,13 +364,13 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   />
                   <div className="flex gap-2">
                     <button
-                      onClick={addProfile}
+                      onClick={saveProfile}
                       className="flex-1 rounded-lg bg-stone-900 py-2 text-xs font-medium text-white hover:bg-stone-700"
                     >
-                      添加并启用
+                      {editingId ? "保存修改" : "添加并启用"}
                     </button>
                     <button
-                      onClick={() => setAdding(false)}
+                      onClick={closeForm}
                       className="rounded-lg border border-stone-200 px-3 py-2 text-xs text-stone-600 hover:bg-stone-100"
                     >
                       取消
