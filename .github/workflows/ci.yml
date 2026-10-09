@@ -31,6 +31,11 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # tauri.conf.json 的 bundle.resources 引用 sidecar 产物，
+      # 缺了它 cargo 的 tauri-build 会校验失败
+      - name: Bundle sidecar
+        run: pnpm bundle:sidecar
+
       - name: Rust format check
         working-directory: src-tauri
         run: cargo fmt --check
