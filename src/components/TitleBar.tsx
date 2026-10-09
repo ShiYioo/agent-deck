@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { inTauri } from "../api";
 import { IconBrandMark } from "./icons";
@@ -6,8 +6,15 @@ import { IconBrandMark } from "./icons";
 /** 自绘标题栏：拖拽区 + 最小化/最大化/关闭（原生装饰已关闭） */
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
-  // 纯浏览器预览：无窗口系统，窗控点击为 no-op（标题栏本身照常渲染）
-  const win = inTauri ? getCurrentWindow() : null;
+  // 窗口句柄：浏览器预览或 IPC 环境不完整（如 e2e mock）时为 null，窗控点击为 no-op
+  const win = useMemo(() => {
+    if (!inTauri) return null;
+    try {
+      return getCurrentWindow();
+    } catch {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     if (!win) return;

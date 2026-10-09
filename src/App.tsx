@@ -34,6 +34,7 @@ import { EventLine } from "./components/EventLine";
 import { DiffModal } from "./components/DiffModal";
 import { SettingsPage } from "./components/SettingsPage";
 import { CreateProjectModal } from "./components/CreateProjectModal";
+import { TitleBar } from "./components/TitleBar";
 import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
 import { useFrameQueue } from "./hooks/useFrameQueue";
 import { useAutoScroll } from "./hooks/useAutoScroll";
@@ -586,7 +587,9 @@ export default function App() {
   selectedRowRef.current = selectedRow;
 
   return (
-    <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
+    <div className="app-viewport">
+      <TitleBar />
+      <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
       <AnimatePresence initial={false}>
         {sidebarOpen && <MotionLayer key="sidebar-scrim" className="sidebar-scrim-holder">
           <button className="sidebar-scrim" aria-label="关闭侧栏" onClick={closeSidebar} />
@@ -938,6 +941,7 @@ export default function App() {
         {settingsOpen && <SettingsPage key="settings" onClose={closeSettings} />}
         </AnimatePresence>
       </main>
+      </div>
     </div>
   );
 }

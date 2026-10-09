@@ -69,88 +69,6 @@ pub(crate) fn render_conversation(events: &[String]) -> String {
     lines.join("\n")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::Store;
-
-    fn seed_task(store: &Store, id: &str) {
-        store
-            .create_task(
-                id,
-                "zcode",
-                "E:\\demo",
-                "把日期工具补上单测",
-                Some("yolo"),
-                None,
-            )
-            .unwrap();
-        for event in [
-            r#"{"type":"assistant_message","text":"我先看了 utils/date.ts，计划用 vitest 补三个用例"}"#,
-            r#"{"type":"tool_use","tool":"Bash","detail":"vitest init"}"#,
-            r#"{"type":"tool_result","ok":true,"detail":"created vitest.config.ts"}"#,
-            r#"{"type":"error","message":"quota exceeded"}"#,
-        ] {
-            store.append_event(id, event).unwrap();
-        }
-    }
-
-    #[test]
-    fn ai_handoff_assembly_contains_all_sections() {
-        let prompt = assemble_ai_handoff(
-            "zcode",
-            "（模型 glm-4.7）",
-            "重构支付模块",
-            "## 任务
-重构支付模块
-## 已完成
-- 改了 payment.rs",
-            "【助手】改完 payment.rs，还没跑测试",
-        );
-        assert!(prompt.contains("重构支付模块"));
-        assert!(prompt.contains("AI 交接简报"));
-        assert!(prompt.contains("payment.rs"));
-        assert!(prompt.contains("git status"));
-        assert!(prompt.contains("不要重做"));
-    }
-
-    #[test]
-    fn convo_tail_keeps_suffix() {
-        let convo = "a
-"
-        .repeat(100)
-            + "最后的现场";
-        let tail = convo_tail(&convo, 20);
-        assert!(tail.ends_with("最后的现场"));
-        assert!(tail.chars().count() <= 21);
-    }
-
-    #[test]
-    fn render_conversation_captures_dialogue_and_tools() {
-        let store = Store::in_memory().unwrap();
-        store
-            .create_task("t3", "zcode", ".", "长任务", None, None)
-            .unwrap();
-        let long = "x".repeat(3000);
-        for i in 0..15 {
-            store
-                .append_event(
-                    "t3",
-                    &serde_json::json!({ "type": "assistant_message", "text": format!("{long} #{i}") })
-                        .to_string(),
-                )
-                .unwrap();
-        }
-        let events = store.get_events("t3", 0, i64::MAX).unwrap();
-        let convo = render_conversation(&events);
-        assert!(convo.contains("#0"), "早期消息应保留");
-        assert!(convo.contains("#14"), "最新消息应保留");
-        assert!(convo.contains("【助手】"));
-        // 尾部锚应保留最新现场
-        assert!(convo_tail(&convo, 3000).ends_with("#14"));
-    }
-}
-
 // ── AI 交接（pi 运行时压缩） ────────────────────────────────
 
 /// AI 交接 prompt 组装：原始任务 + AI 简报 + 会话尾部原文 + 接手指令。
@@ -193,4 +111,65 @@ pub fn convo_tail(convo: &str, keep_chars: usize) -> String {
         tail = tail[pos + 1..].to_string();
     }
     tail
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+
+    #[test]
+    fn ai_handoff_assembly_contains_all_sections() {
+        let prompt = assemble_ai_handoff(
+            "zcode",
+            "（模型 glm-4.7）",
+            "重构支付模块",
+            "## 任务
+重构支付模块
+## 已完成
+- 改了 payment.rs",
+            "【助手】改完 payment.rs，还没跑测试",
+        );
+        assert!(prompt.contains("重构支付模块"));
+        assert!(prompt.contains("AI 交接简报"));
+        assert!(prompt.contains("payment.rs"));
+        assert!(prompt.contains("git status"));
+        assert!(prompt.contains("不要重做"));
+    }
+
+    #[test]
+    fn convo_tail_keeps_suffix() {
+        let convo = "a
+"
+        .repeat(100)
+            + "最后的现场";
+        let tail = convo_tail(&convo, 20);
+        assert!(tail.ends_with("最后的现场"));
+        assert!(tail.chars().count() <= 21);
+    }
+
+    #[test]
+    fn render_conversation_captures_dialogue_and_tools() {
+        let store = Store::in_memory().unwrap();
+        store
+            .create_task("t3", "zcode", ".", "长任务", None, None, None)
+            .unwrap();
+        let long = "x".repeat(3000);
+        for i in 0..15 {
+            store
+                .append_event(
+                    "t3",
+                    &serde_json::json!({ "type": "assistant_message", "text": format!("{long} #{i}") })
+                        .to_string(),
+                )
+                .unwrap();
+        }
+        let events = store.get_events("t3", 0, i64::MAX).unwrap();
+        let convo = render_conversation(&events);
+        assert!(convo.contains("#0"), "早期消息应保留");
+        assert!(convo.contains("#14"), "最新消息应保留");
+        assert!(convo.contains("【助手】"));
+        // 尾部锚应保留最新现场
+        assert!(convo_tail(&convo, 3000).ends_with("#14"));
+    }
 }
