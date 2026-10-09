@@ -16,7 +16,20 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use worktree::WorktreePaths;
 
 use crate::executors::Harness;
-use crate::store::{ModelProfile, ProjectRow, Store, TaskRow};
+use crate::store::{ModelProfile, ProfileModelRow, ProjectRow, Store, TaskRow};
+
+/// 档案 → sidecar 模型目录参数（读子表；失败视为空目录，不阻塞派发）
+fn profile_models_param(store: &Store, profile_id: &str) -> Vec<pi_session::ProfileModelParam> {
+    store
+        .list_profile_models(profile_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| pi_session::ProfileModelParam {
+            id: m.model,
+            context_window: m.context_window,
+        })
+        .collect()
+}
 
 /// deck-agent.mjs 的位置：优先资源目录（打包后），回退仓库源码（开发模式）。
 fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
@@ -95,6 +108,8 @@ async fn start_task(
                 key: p.api_key,
                 base_url: p.base_url,
                 model: p.model,
+                protocol: p.protocol,
+                models: profile_models_param(&store, &p.id),
             })
             .collect();
         let use_cwd_deck = cwd.clone();
@@ -351,6 +366,8 @@ async fn build_smart_handoff_prompt(
                 key: p.api_key,
                 base_url: p.base_url,
                 model: p.model,
+                protocol: p.protocol,
+                models: profile_models_param(&store, &p.id),
             })
             .collect();
         if profiles.is_empty() {
@@ -481,98 +498,17 @@ fn discover_opencode_models() -> Vec<String> {
     out
 }
 
-/// 本机发现的可复用凭据（避免用户重复配 key）
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct DiscoveredCredential {
-    /// glm | gpt
-    pub target: String,
-    /// 来源描述（如 "opencode（zhipuai-coding-plan）"）
-    pub source: String,
-    pub key: String,
-}
-
-/// 前端 → Rust：扫描本机可复用的明文凭据。
-/// ZCode 的 credentials.json 是机器绑定加密存储（enc: 前缀）读不了；
-/// opencode 的 auth.json 是明文，ZCode 登录用户的 coding-plan key 就在里面。
-fn discover_credentials_inner() -> Vec<DiscoveredCredential> {
-    let mut out: Vec<DiscoveredCredential> = Vec::new();
-    let mut push = |target: &str, source: &str, key: &str| {
-        if !key.trim().is_empty()
-            && !key.starts_with("enc:")
-            && !out.iter().any(|c| c.target == target)
-        {
-            out.push(DiscoveredCredential {
-                target: target.to_string(),
-                source: source.to_string(),
-                key: key.trim().to_string(),
-            });
-        }
-    };
-
-    if let Some(home) = dirs::home_dir() {
-        let path = home
-            .join(".local")
-            .join("share")
-            .join("opencode")
-            .join("auth.json");
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
-            && let Some(map) = v.as_object()
-        {
-            for (provider, entry) in map {
-                let key = entry
-                    .get("key")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or_default();
-                let lower = provider.to_lowercase();
-                if lower.contains("zhipuai") || lower.contains("zai") {
-                    push("glm", &format!("opencode（{provider}）"), key);
-                } else if lower.contains("openai") {
-                    push("gpt", &format!("opencode（{provider}）"), key);
-                }
-            }
-        }
-    }
-    if let Ok(k) = std::env::var("ZAI_API_KEY") {
-        push("glm", "环境变量 ZAI_API_KEY", &k);
-    }
-    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        push("gpt", "环境变量 OPENAI_API_KEY", &k);
-    }
-    out
-}
-
 // ── 模型配置档案（多供应商，用户启停） ─────────────────────
 
-/// 前端 → Rust：模型配置档案列表（空表时自动从本机凭据种子导入）。
+/// 前端 → Rust：模型配置档案列表（只读表，不做任何自动导入）。
 #[tauri::command]
 fn list_model_profiles(store: State<'_, Store>) -> Result<Vec<ModelProfile>, String> {
-    let profiles = store.list_model_profiles(false)?;
-    if !profiles.is_empty() {
-        return Ok(profiles);
-    }
-    // 自动种子：本机可发现的凭据 → 启用档案（opencode 登录的 key 等）
-    let base = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    for (i, c) in discover_credentials_inner().into_iter().enumerate() {
-        store.add_model_profile(
-            &format!("mp-{}-{i}", base),
-            &c.target,
-            Some(&format!("自动导入 · {}", c.source)),
-            &c.key,
-            None,
-            None,
-            true,
-        )?;
-    }
     store.list_model_profiles(false)
 }
 
 /// 前端 → Rust：新增模型配置档案。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn add_model_profile(
     store: State<'_, Store>,
     provider: String,
@@ -580,6 +516,7 @@ fn add_model_profile(
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
+    protocol: Option<String>,
 ) -> Result<ModelProfile, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -593,6 +530,7 @@ fn add_model_profile(
         &api_key,
         base_url.as_deref(),
         model.as_deref(),
+        protocol.as_deref(),
         true,
     )?;
     store
@@ -602,6 +540,7 @@ fn add_model_profile(
 
 /// 前端 → Rust：编辑模型配置档案（整体覆盖，enabled 不动）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn update_model_profile(
     store: State<'_, Store>,
     id: String,
@@ -610,6 +549,7 @@ fn update_model_profile(
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
+    protocol: Option<String>,
 ) -> Result<ModelProfile, String> {
     store.update_model_profile(
         &id,
@@ -618,6 +558,7 @@ fn update_model_profile(
         &api_key,
         base_url.as_deref(),
         model.as_deref(),
+        protocol.as_deref(),
     )?;
     store
         .get_model_profile(&id)?
@@ -634,10 +575,98 @@ fn set_model_profile_enabled(
     store.set_model_profile_enabled(&id, enabled)
 }
 
-/// 前端 → Rust：删除配置档案。
+/// 前端 → Rust：删除配置档案（级联清掉模型列表）。
 #[tauri::command]
 fn delete_model_profile(store: State<'_, Store>, id: String) -> Result<(), String> {
     store.delete_model_profile(&id)
+}
+
+/// 前端 → Rust：某供应商档案下的模型列表。
+#[tauri::command]
+fn list_profile_models(
+    store: State<'_, Store>,
+    profile_id: String,
+) -> Result<Vec<ProfileModelRow>, String> {
+    store.list_profile_models(&profile_id)
+}
+
+/// 前端 → Rust：向供应商档案添加一个模型（可选声明上下文窗口）。
+#[tauri::command]
+fn add_profile_model(
+    store: State<'_, Store>,
+    profile_id: String,
+    model: String,
+    context_window: Option<i64>,
+) -> Result<ProfileModelRow, String> {
+    if model.trim().is_empty() {
+        return Err("模型名称不能为空".into());
+    }
+    store.add_profile_model(&profile_id, model.trim(), context_window)
+}
+
+/// 前端 → Rust：删除模型列表中的一行。
+#[tauri::command]
+fn delete_profile_model(store: State<'_, Store>, id: String) -> Result<(), String> {
+    store.delete_profile_model(&id)
+}
+
+/// 前端 → Rust：清空供应商档案的模型列表。
+#[tauri::command]
+fn clear_profile_models(store: State<'_, Store>, profile_id: String) -> Result<(), String> {
+    store.clear_profile_models(&profile_id)
+}
+
+/// 前端 → Rust：从上游拉取模型列表（OpenAI 兼容 GET {base}/models）。
+#[tauri::command]
+async fn fetch_upstream_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    let base = base_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("请先填写并保存 Base URL".into());
+    }
+    let url = format!("{base}/models");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(api_key.trim())
+        .send()
+        .await
+        .map_err(|e| format!("请求失败：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("上游返回 {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败：{e}"))?;
+    // 兼容三种形态：{data:[{id}]} / {models:[{id}|str]} / [str]
+    let mut ids: Vec<String> = Vec::new();
+    let entries = v
+        .get("data")
+        .and_then(|x| x.as_array())
+        .or_else(|| v.get("models").and_then(|x| x.as_array()))
+        .or_else(|| v.as_array());
+    if let Some(list) = entries {
+        for item in list {
+            let id = item
+                .get("id")
+                .and_then(|x| x.as_str())
+                .or_else(|| item.as_str())
+                .unwrap_or_default();
+            if !id.trim().is_empty() {
+                ids.push(id.trim().to_string());
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Err("上游没有返回任何模型".into());
+    }
+    ids.sort();
+    ids.dedup();
+    ids.truncate(300);
+    Ok(ids)
 }
 
 // ── 项目实体（Codex 式一等公民） ──────────────────────────
@@ -774,7 +803,12 @@ pub fn run() {
             add_model_profile,
             update_model_profile,
             set_model_profile_enabled,
-            delete_model_profile
+            delete_model_profile,
+            list_profile_models,
+            add_profile_model,
+            delete_profile_model,
+            clear_profile_models,
+            fetch_upstream_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

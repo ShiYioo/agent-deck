@@ -83,7 +83,18 @@ export type ModelProfile = {
   api_key: string;
   base_url: string | null;
   model: string | null;
+  /** 上游协议：chat（默认，Chat Completions）| responses（Responses API） */
+  protocol: string | null;
   enabled: boolean;
+  created_at: number;
+};
+
+/** 供应商档案下的模型列表条目（context_window 单位 token，空 = 通道默认） */
+export type ProfileModel = {
+  id: string;
+  profile_id: string;
+  model: string;
+  context_window: number | null;
   created_at: number;
 };
 
@@ -98,6 +109,7 @@ export async function addModelProfile(params: {
   api_key: string;
   base_url: string | null;
   model: string | null;
+  protocol: string | null;
 }): Promise<void> {
   await invoke("add_model_profile", params);
 }
@@ -109,8 +121,41 @@ export async function updateModelProfile(params: {
   api_key: string;
   base_url: string | null;
   model: string | null;
+  protocol: string | null;
 }): Promise<ModelProfile> {
   return await invoke<ModelProfile>("update_model_profile", params);
+}
+
+export async function listProfileModels(profileId: string): Promise<ProfileModel[]> {
+  return await invoke<ProfileModel[]>("list_profile_models", { profileId });
+}
+
+export async function addProfileModel(
+  profileId: string,
+  model: string,
+  contextWindow: number | null,
+): Promise<ProfileModel> {
+  return await invoke<ProfileModel>("add_profile_model", {
+    profileId,
+    model,
+    contextWindow,
+  });
+}
+
+export async function deleteProfileModel(id: string): Promise<void> {
+  await invoke("delete_profile_model", { id });
+}
+
+export async function clearProfileModels(profileId: string): Promise<void> {
+  await invoke("clear_profile_models", { profileId });
+}
+
+/** 从上游（OpenAI 兼容 GET {base}/models）拉取可用模型 ID 列表 */
+export async function fetchUpstreamModels(
+  baseUrl: string,
+  apiKey: string,
+): Promise<string[]> {
+  return await invoke<string[]>("fetch_upstream_models", { baseUrl, apiKey });
 }
 
 export async function setModelProfileEnabled(

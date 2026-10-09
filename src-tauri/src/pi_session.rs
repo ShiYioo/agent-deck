@@ -40,9 +40,23 @@ pub struct ModelProfileParam {
     pub key: String,
     #[serde(default)]
     pub base_url: Option<String>,
-    /// 模型 ID（OpenAI 兼容中转必需；空 = 通道默认）
+    /// 默认模型 ID（OpenAI 兼容中转必需；空 = 通道默认）
     #[serde(default)]
     pub model: Option<String>,
+    /// 上游协议：chat（默认，Chat Completions）| responses（Responses API）
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// 该供应商的模型目录（配合切换/上报；空 = 只有默认模型）
+    #[serde(default)]
+    pub models: Vec<ProfileModelParam>,
+}
+
+/// 模型目录条目：ID + 声明的上下文窗口（pi 以此判断自动压缩时机）
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileModelParam {
+    pub id: String,
+    #[serde(default)]
+    pub context_window: Option<i64>,
 }
 
 /// 每个 task_id 一个发送端：往 sidecar stdin 写指令。

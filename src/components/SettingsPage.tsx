@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { X, Plus, ArrowLeft, Pencil } from "lucide-react";
+import { X, Plus, ArrowLeft, Pencil, ChevronDown, ChevronRight, RefreshCw, Trash2 } from "lucide-react";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 
 import {
   addModelProfile,
+  addProfileModel,
+  clearProfileModels,
   deleteModelProfile,
+  deleteProfileModel,
+  fetchUpstreamModels,
   getDefaultCwd,
   getSetting,
   listModelProfiles,
+  listProfileModels,
   setModelProfileEnabled,
   setSetting,
   updateModelProfile,
 } from "../api";
-import type { ModelProfile } from "../api";
+import type { ModelProfile, ProfileModel } from "../api";
 
 type Section = "general" | "models";
 
@@ -23,6 +28,23 @@ const PROVIDER_LABEL: Record<string, string> = { glm: "GLM", gpt: "GPT", custom:
 function maskKey(k: string) {
   if (k.length <= 8) return "•••";
   return `${k.slice(0, 4)}…${k.slice(-4)}`;
+}
+
+/** "1M"/"200K"/"128000" → token 数；空串 = null（通道默认）；非法 = NaN */
+function parseContextWindow(s: string): number | null {
+  const t = s.trim().toUpperCase();
+  if (!t) return null;
+  const m = t.match(/^(\d+(?:\.\d+)?)\s*([KM])?$/);
+  if (!m) return Number.NaN;
+  const n = Number.parseFloat(m[1]);
+  return Math.round(n * (m[2] === "K" ? 1e3 : m[2] === "M" ? 1e6 : 1));
+}
+
+function formatContextWindow(n: number | null): string {
+  if (!n) return "";
+  if (n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  if (n % 1_000 === 0) return `${n / 1_000}K`;
+  return String(n);
 }
 
 /** 设置行：标签+描述居左，控件居右 */
@@ -107,10 +129,17 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     api_key: "",
     base_url: "",
     model: "",
+    protocol: "chat",
   });
   const [status, setStatus] = useState<string | null>(null);
+  // 模型列表管理：展开的供应商 + 其模型目录 + 添加行输入
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [modelLists, setModelLists] = useState<Record<string, ProfileModel[]>>({});
+  const [newModelName, setNewModelName] = useState("");
+  const [newModelWindow, setNewModelWindow] = useState("");
+  const [fetchingModels, setFetchingModels] = useState(false);
 
-  const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", model: "" };
+  const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", model: "", protocol: "chat" };
 
   const loadProfiles = useCallback(() => {
     listModelProfiles().then(setProfiles).catch(() => {});
@@ -161,6 +190,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       api_key: p.api_key,
       base_url: p.base_url ?? "",
       model: p.model ?? "",
+      protocol: p.protocol ?? "chat",
     });
     setAdding(false);
     setEditingId(p.id);
@@ -183,6 +213,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       api_key: form.api_key.trim(),
       base_url: form.base_url.trim() || null,
       model: form.model.trim() || null,
+      protocol: form.protocol,
     };
     try {
       if (editingId) {
@@ -194,6 +225,69 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       }
       closeForm();
       loadProfiles();
+    } catch (e) {
+      flash(String(e));
+    }
+  };
+
+  // ── 模型列表管理 ──
+  const toggleModels = (p: ModelProfile) => {
+    if (expandedId === p.id) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(p.id);
+    listProfileModels(p.id).then((rows) => setModelLists((m) => ({ ...m, [p.id]: rows }))).catch(() => {});
+  };
+
+  const reloadModels = (profileId: string) => {
+    listProfileModels(profileId).then((rows) => setModelLists((m) => ({ ...m, [profileId]: rows }))).catch(() => {});
+  };
+
+  const addModelRow = async (p: ModelProfile) => {
+    const name = newModelName.trim();
+    if (!name) {
+      flash("模型名称不能为空");
+      return;
+    }
+    const win = parseContextWindow(newModelWindow);
+    if (Number.isNaN(win)) {
+      flash("上下文窗口格式：1M / 200K / 纯数字 token");
+      return;
+    }
+    try {
+      await addProfileModel(p.id, name, win);
+      setNewModelName("");
+      setNewModelWindow("");
+      reloadModels(p.id);
+    } catch (e) {
+      flash(String(e));
+    }
+  };
+
+  const fetchModelsFromUpstream = async (p: ModelProfile) => {
+    if (!p.base_url || !p.api_key) {
+      flash("先保存 Base URL 和 API Key 再从上游获取");
+      return;
+    }
+    setFetchingModels(true);
+    try {
+      const ids = await fetchUpstreamModels(p.base_url, p.api_key);
+      await clearProfileModels(p.id);
+      for (const id of ids) await addProfileModel(p.id, id, null);
+      reloadModels(p.id);
+      flash(`已从上游获取 ${ids.length} 个模型`);
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const clearModels = async (p: ModelProfile) => {
+    try {
+      await clearProfileModels(p.id);
+      reloadModels(p.id);
     } catch (e) {
       flash(String(e));
     }
@@ -290,8 +384,8 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   </div>
                 )}
                 {profiles.map((p) => (
+                  <div key={p.id} className="border-b border-stone-100 last:border-b-0">
                   <Row
-                    key={p.id}
                     label={`${PROVIDER_LABEL[p.provider] ?? p.provider}${p.label ? ` · ${p.label}` : ""}`}
                     desc={`${maskKey(p.api_key)}${p.base_url ? ` · ${p.base_url}` : ""}`}
                   >
@@ -305,6 +399,15 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                             .catch(() => {});
                         }}
                       />
+                      <button
+                        onClick={() => toggleModels(p)}
+                        className="text-stone-300 transition-colors hover:text-stone-700"
+                        title="模型列表"
+                        aria-label={`模型列表 ${p.label ?? p.provider}`}
+                        aria-expanded={expandedId === p.id}
+                      >
+                        {expandedId === p.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      </button>
                       <button
                         onClick={() => openEdit(p)}
                         className="text-stone-300 transition-colors hover:text-stone-700"
@@ -324,6 +427,82 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                       </button>
                     </div>
                   </Row>
+
+                  {expandedId === p.id && (
+                    <div className="pb-4">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-xs font-semibold text-stone-500">模型列表</span>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => fetchModelsFromUpstream(p)}
+                            disabled={fetchingModels}
+                            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+                            title="从上游 GET /models 拉取"
+                          >
+                            <RefreshCw size={12} className={fetchingModels ? "animate-spin" : ""} />
+                            从上游获取
+                          </button>
+                          <button
+                            onClick={() => clearModels(p)}
+                            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100"
+                          >
+                            <Trash2 size={12} />
+                            清空
+                          </button>
+                        </div>
+                      </div>
+
+                      {(modelLists[p.id] ?? []).length === 0 && (
+                        <div className="py-2 text-xs text-stone-400">
+                          暂无模型——手动添加，或从上游获取
+                        </div>
+                      )}
+                      {(modelLists[p.id] ?? []).map((m) => (
+                        <div key={m.id} className="flex items-center gap-2 py-1">
+                          <span className="min-w-0 flex-1 truncate font-mono text-xs text-stone-700">
+                            {m.model}
+                          </span>
+                          <span className="shrink-0 font-mono text-xs text-stone-400">
+                            {formatContextWindow(m.context_window) || "默认"}
+                          </span>
+                          <button
+                            onClick={() => {
+                              deleteProfileModel(m.id).then(() => reloadModels(p.id)).catch(() => {});
+                            }}
+                            className="shrink-0 text-stone-300 transition-colors hover:text-red-500"
+                            title="删除模型"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ))}
+
+                      <div className="mt-2 flex gap-2">
+                        <input
+                          value={newModelName}
+                          onChange={(e) => setNewModelName(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+                          placeholder="模型名称（如 deepseek-chat）"
+                          className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+                        />
+                        <input
+                          value={newModelWindow}
+                          onChange={(e) => setNewModelWindow(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+                          placeholder="上下文窗口"
+                          className="w-28 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+                        />
+                        <button
+                          onClick={() => addModelRow(p)}
+                          className="flex shrink-0 items-center gap-1 rounded-lg bg-stone-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
+                        >
+                          <Plus size={12} />
+                          添加
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  </div>
                 ))}
               </div>
 
@@ -360,6 +539,27 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     placeholder="API Key"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
                   />
+                  <div>
+                    <div className="mb-1 text-xs font-medium text-stone-500">上游协议</div>
+                    <div className="flex gap-2">
+                      {[
+                        { key: "chat", label: "Chat Completions" },
+                        { key: "responses", label: "Responses API" },
+                      ].map((opt) => (
+                        <button
+                          key={opt.key}
+                          onClick={() => setForm({ ...form, protocol: opt.key })}
+                          className={`flex-1 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                            (form.protocol ?? "chat") === opt.key
+                              ? "border-stone-800 bg-stone-900 font-medium text-white"
+                              : "border-stone-200 text-stone-600 hover:bg-stone-100"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <input
                     value={form.model}
                     onChange={(e) => setForm({ ...form, model: e.target.value })}

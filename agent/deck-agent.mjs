@@ -101,18 +101,49 @@ function deckEvent(type, extra = {}) {
   emit({ type: `deck_${type}`, ...extra });
 }
 
-/** pi-ai 的 Model 对象最小面：provider/id/apiKey/baseURL */
-function resolveFromProfile(p) {
+/**
+ * 构建完整 pi-ai Model 对象。
+ * - glm 通道保持原样（字段由 pi 的 zai 注册表解析）
+ * - OpenAI 兼容通道显式声明 api（Chat Completions / Responses API）、
+ *   contextWindow（pi 以此判断自动压缩时机）与 maxTokens
+ * p.models 是设置面板维护的模型目录：[{id, contextWindow}]
+ */
+function buildModelObject(p, m) {
   const glm = p.provider === "glm";
-  return {
+  const id = m?.id || p.model || (glm ? "glm-4.7" : "gpt-5.1");
+  const base = {
     provider: glm ? "zai" : "openai",
-    id: p.model || (glm ? "glm-4.7" : "gpt-5.1"),
+    id,
+    name: id,
     apiKey: p.key,
     baseUrl:
       p.baseUrl ||
       (glm ? process.env.ZAI_BASE_URL : process.env.OPENAI_BASE_URL) ||
       (glm ? "https://api.z.ai/api/coding/paas/v4" : "https://api.openai.com/v1"),
   };
+  if (glm) return base;
+  return {
+    ...base,
+    api: p.protocol === "responses" ? "openai-responses" : "openai-completions",
+    type: "chat",
+    reasoning: false,
+    contextWindow: m?.contextWindow || 128000,
+    maxTokens: 8192,
+  };
+}
+
+/** 档案 → 模型目录行（无目录时回退到默认模型单行） */
+function profileModelRows(p) {
+  const rows = Array.isArray(p.models)
+    ? p.models.filter((m) => m && m.id).map((m) => ({ id: m.id, contextWindow: m.context_window || m.contextWindow }))
+    : [];
+  if (rows.length === 0 && p.model) rows.push({ id: p.model, contextWindow: null });
+  return rows;
+}
+
+function defaultModelRow(p) {
+  const rows = profileModelRows(p);
+  return rows.find((r) => r.id === p.model) ?? rows[0] ?? null;
 }
 
 /** deck 自持工具集（抄 OpenCode 工具形态）：读/写/改/命令/搜索/定位/列表 */
@@ -151,11 +182,12 @@ function buildTools(mode) {
 }
 
 async function ensureSessionForProfile(p, { cwd, mode }) {
-  const resolved = resolveFromProfile(p);
+  const rows = profileModelRows(p);
+  const resolved = buildModelObject(p, defaultModelRow(p));
   if (!resolved.apiKey) {
     throw new Error(`配置 ${p.provider} 缺少 API Key`);
   }
-  const want = JSON.stringify([p.provider, p.key, p.baseUrl, cwd, mode]);
+  const want = JSON.stringify([p.provider, p.key, p.baseUrl, p.protocol, rows, cwd, mode]);
   if (session && currentModel === want) return session;
 
   if (session) {
@@ -169,6 +201,8 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
   session = await createAgentSession({
     cwd: currentCwd,
     model: resolved,
+    // 模型目录：该供应商下配置的全部模型（切换/循环的基础）
+    scopedModels: rows.map((m) => ({ model: buildModelObject(p, m) })),
     customTools: buildTools(mode),
     noTools: undefined,
   });
@@ -406,12 +440,16 @@ const LIST_MODELS_TOOL = {
     "查看你当前的模型池：有哪些已启用的模型配置、现在用的是哪个。配合 switch_model 使用。",
   parameters: { type: "object", properties: {} },
   execute: async () => {
-    const lines = modelProfiles.map(
-      (p) =>
-        `${p.provider === currentModel ? "→" : " "} ${p.provider}${
-          p.label ? `（${p.label}）` : ""
-        }${p.baseUrl ? ` @ ${p.baseUrl}` : ""}`,
-    );
+    const lines = modelProfiles.map((p) => {
+      const mark = p.provider === currentModel ? "→" : " ";
+      const head = `${mark} ${p.provider}${p.label ? `（${p.label}）` : ""}${
+        p.baseUrl ? ` @ ${p.baseUrl}` : ""
+      }`;
+      const rows = profileModelRows(p);
+      const catalog = rows.length ? `
+    模型: ${rows.map((m) => m.id).join(", ")}` : "";
+      return head + catalog;
+    });
     return {
       content: [
         { type: "text", text: lines.length ? lines.join("\n") : "模型池为空" },
@@ -504,7 +542,7 @@ const SWITCH_MODEL_TOOL = {
     }
     try {
       if (!session) throw new Error("会话未建立");
-      await session.setModel(resolveFromProfile(p));
+      await session.setModel(buildModelObject(p, defaultModelRow(p)));
       currentModel = p.provider;
       return {
         content: [{ type: "text", text: `已切换到底层模型 ${target}，会话上下文保留` }],

@@ -28,7 +28,20 @@ pub struct ModelProfile {
     pub base_url: Option<String>,
     /// 请求的模型 ID（OpenAI 兼容中转必需；空 = 通道默认）
     pub model: Option<String>,
+    /// 上游协议：chat = Chat Completions（默认），responses = Responses API
+    pub protocol: Option<String>,
     pub enabled: bool,
+    pub created_at: i64,
+}
+
+/// 供应商档案下的单个模型（中转服务式模型列表条目）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProfileModelRow {
+    pub id: String,
+    pub profile_id: String,
+    pub model: String,
+    pub context_window: Option<i64>,
     pub created_at: i64,
 }
 
@@ -127,8 +140,16 @@ impl Store {
                  api_key    TEXT NOT NULL,
                  base_url   TEXT,
                  model      TEXT,
+                 protocol   TEXT,
                  enabled    INTEGER NOT NULL DEFAULT 1,
                  created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS profile_models (
+                 id             TEXT PRIMARY KEY,
+                 profile_id     TEXT NOT NULL,
+                 model          TEXT NOT NULL,
+                 context_window INTEGER,
+                 created_at     INTEGER NOT NULL
              );",
         )
         .map_err(|e| e.to_string())?;
@@ -139,6 +160,7 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_dir TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN protocol TEXT", []);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -308,10 +330,10 @@ impl Store {
     pub fn list_model_profiles(&self, enabled_only: bool) -> Result<Vec<ModelProfile>, String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let sql = if enabled_only {
-            "SELECT id, provider, label, api_key, base_url, model, enabled, created_at
+            "SELECT id, provider, label, api_key, base_url, model, protocol, enabled, created_at
              FROM model_profiles WHERE enabled = 1 ORDER BY created_at ASC"
         } else {
-            "SELECT id, provider, label, api_key, base_url, model, enabled, created_at
+            "SELECT id, provider, label, api_key, base_url, model, protocol, enabled, created_at
              FROM model_profiles ORDER BY created_at ASC"
         };
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
@@ -324,8 +346,9 @@ impl Store {
                     api_key: row.get(3)?,
                     base_url: row.get(4)?,
                     model: row.get(5)?,
-                    enabled: row.get::<_, i64>(6)? != 0,
-                    created_at: row.get(7)?,
+                    protocol: row.get(6)?,
+                    enabled: row.get::<_, i64>(7)? != 0,
+                    created_at: row.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -452,12 +475,13 @@ impl Store {
         api_key: &str,
         base_url: Option<&str>,
         model: Option<&str>,
+        protocol: Option<&str>,
         enabled: bool,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute(
-            "INSERT INTO model_profiles (id, provider, label, api_key, base_url, model, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO model_profiles (id, provider, label, api_key, base_url, model, protocol, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 provider,
@@ -465,6 +489,7 @@ impl Store {
                 api_key,
                 base_url,
                 model,
+                protocol,
                 enabled as i64,
                 Self::now_millis()
             ],
@@ -484,6 +509,7 @@ impl Store {
     }
 
     /// 编辑档案：provider/label/api_key/base_url 整体覆盖（enabled 不动，由开关单独管）。
+    #[allow(clippy::too_many_arguments)]
     pub fn update_model_profile(
         &self,
         id: &str,
@@ -492,14 +518,15 @@ impl Store {
         api_key: &str,
         base_url: Option<&str>,
         model: Option<&str>,
+        protocol: Option<&str>,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let changed = conn
             .execute(
                 "UPDATE model_profiles
-                 SET provider = ?2, label = ?3, api_key = ?4, base_url = ?5, model = ?6
+                 SET provider = ?2, label = ?3, api_key = ?4, base_url = ?5, model = ?6, protocol = ?7
                  WHERE id = ?1",
-                params![id, provider, label, api_key, base_url, model],
+                params![id, provider, label, api_key, base_url, model, protocol],
             )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
@@ -512,6 +539,83 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute("DELETE FROM model_profiles WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM profile_models WHERE profile_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // ── 供应商的模型列表（参考中转服务配置：一供多模） ──────
+
+    pub fn list_profile_models(&self, profile_id: &str) -> Result<Vec<ProfileModelRow>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, profile_id, model, context_window, created_at
+                 FROM profile_models WHERE profile_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![profile_id], |row| {
+                Ok(ProfileModelRow {
+                    id: row.get(0)?,
+                    profile_id: row.get(1)?,
+                    model: row.get(2)?,
+                    context_window: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    pub fn add_profile_model(
+        &self,
+        profile_id: &str,
+        model: &str,
+        context_window: Option<i64>,
+    ) -> Result<ProfileModelRow, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let id = format!(
+            "pm-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        conn.execute(
+            "INSERT INTO profile_models (id, profile_id, model, context_window, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, profile_id, model, context_window, Self::now_millis()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(ProfileModelRow {
+            id,
+            profile_id: profile_id.into(),
+            model: model.into(),
+            context_window,
+            created_at: Self::now_millis(),
+        })
+    }
+
+    pub fn delete_profile_model(&self, id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute("DELETE FROM profile_models WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_profile_models(&self, profile_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "DELETE FROM profile_models WHERE profile_id = ?1",
+            params![profile_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -624,7 +728,7 @@ mod tests {
     fn model_profiles_crud_and_enabled_filter() {
         let store = Store::in_memory().unwrap();
         store
-            .add_model_profile("p1", "glm", Some("主力"), "key-glm", None, None, true)
+            .add_model_profile("p1", "glm", Some("主力"), "key-glm", None, None, None, true)
             .unwrap();
         store
             .add_model_profile(
@@ -634,19 +738,14 @@ mod tests {
                 "key-gpt",
                 Some("https://x"),
                 Some("gpt-5.1"),
+                Some("responses"),
                 true,
             )
             .unwrap();
 
-        assert_eq!(
-            store
-                .get_model_profile("p2")
-                .unwrap()
-                .unwrap()
-                .model
-                .as_deref(),
-            Some("gpt-5.1")
-        );
+        let p2 = store.get_model_profile("p2").unwrap().unwrap();
+        assert_eq!(p2.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(p2.protocol.as_deref(), Some("responses"));
 
         assert_eq!(store.list_model_profiles(false).unwrap().len(), 2);
         assert_eq!(store.list_model_profiles(true).unwrap().len(), 2);
@@ -664,7 +763,7 @@ mod tests {
     fn update_model_profile_overwrites_and_keeps_enabled() {
         let store = Store::in_memory().unwrap();
         store
-            .add_model_profile("p1", "glm", Some("旧名"), "old-key", None, None, true)
+            .add_model_profile("p1", "glm", Some("旧名"), "old-key", None, None, None, true)
             .unwrap();
         store.set_model_profile_enabled("p1", false).unwrap();
 
@@ -676,6 +775,7 @@ mod tests {
                 "new-key",
                 Some("https://api.x"),
                 Some("gpt-5.1"),
+                Some("chat"),
             )
             .unwrap();
         let p = store.get_model_profile("p1").unwrap().unwrap();
@@ -684,13 +784,54 @@ mod tests {
         assert_eq!(p.api_key, "new-key");
         assert_eq!(p.base_url.as_deref(), Some("https://api.x"));
         assert_eq!(p.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(p.protocol.as_deref(), Some("chat"));
         assert!(!p.enabled, "编辑不应改动启用状态");
 
         assert!(
             store
-                .update_model_profile("ghost", "glm", None, "k", None, None)
+                .update_model_profile("ghost", "glm", None, "k", None, None, None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn profile_models_crud_and_cascade_delete() {
+        let store = Store::in_memory().unwrap();
+        store
+            .add_model_profile(
+                "p1",
+                "custom",
+                Some("中转"),
+                "k",
+                Some("https://api.x/v1"),
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+
+        let m1 = store
+            .add_profile_model("p1", "deepseek-chat", Some(65536))
+            .unwrap();
+        let m2 = store
+            .add_profile_model("p1", "deepseek-v4-pro", None)
+            .unwrap();
+        let rows = store.list_profile_models("p1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].model, "deepseek-chat");
+        assert_eq!(rows[0].context_window, Some(65536));
+
+        store.delete_profile_model(&m2.id).unwrap();
+        assert_eq!(store.list_profile_models("p1").unwrap().len(), 1);
+
+        store.clear_profile_models("p1").unwrap();
+        assert!(store.list_profile_models("p1").unwrap().is_empty());
+
+        // 级联：删档案连带清模型列表
+        store.add_profile_model("p1", "m", None).unwrap();
+        store.delete_model_profile("p1").unwrap();
+        assert!(store.list_profile_models("p1").unwrap().is_empty());
+        assert_eq!(m1.profile_id, "p1");
     }
 
     #[test]
