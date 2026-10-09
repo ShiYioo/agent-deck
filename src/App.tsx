@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PanelLeft, SquarePen, Copy, Check, ArrowDown, GitBranch } from "lucide-react";
+import { AnimatePresence, m } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -25,16 +27,18 @@ import {
 } from "./api";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { piEventToAgentEvent } from "./types";
-import { Sidebar, projectName, HARNESS_ACCENT } from "./components/Sidebar";
+import { Sidebar, projectName, HARNESS_ACCENT, directoryKey } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
-import { Rail } from "./components/Rail";
 import { Composer } from "./components/Composer";
 import { EventLine } from "./components/EventLine";
 import { DiffModal } from "./components/DiffModal";
 import { SettingsPage } from "./components/SettingsPage";
 import { CreateProjectModal } from "./components/CreateProjectModal";
+import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
+import { useFrameQueue } from "./hooks/useFrameQueue";
+import { useAutoScroll } from "./hooks/useAutoScroll";
+import { Disclosure } from "./components/Disclosure";
 import {
-  IconBrandMark,
   IconBack,
   IconKey,
   IconDiff,
@@ -43,8 +47,15 @@ import {
 
 type LogItem = { event: AgentEvent; key: number };
 const emptyEvents: LogItem[] = [];
+type TaskUpdate = {
+  taskId: string;
+  item?: LogItem;
+  running?: boolean;
+  todos?: LiveTask["todos"];
+};
 
 export default function App() {
+  const { enabled: motionEnabled } = useMotionPolicy();
   // composer 的全局默认值
   const [harness, setHarness] = useState("zcode");
   const [mode, setMode] = useState("yolo");
@@ -69,6 +80,48 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [busyHandoff, setBusyHandoff] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const openCreateProject = useCallback(() => setCreateProjectOpen(true), []);
+  const closeCreateProject = useCallback(() => setCreateProjectOpen(false), []);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+  const closeDiff = useCallback(() => setDiff(null), []);
+  const chooseProject = useCallback((id: string | null) => {
+    setSelectedProjectId(id);
+    const project = projects.find((item) => item.id === id);
+    if (project) setCwd(project.dir);
+  }, [projects]);
+  const chooseHarness = useCallback((next: string) => {
+    setHarness(next);
+    setModel("");
+    setMode(next === "zcode" ? "yolo" : next === "codex" ? "full" : "default");
+  }, []);
+  const stopSelected = useCallback(() => {
+    if (selected) cancelTask(selected).catch((e) => setActionError(String(e)));
+  }, [selected]);
+
+  const newChat = useCallback((project?: ProjectRow) => {
+    setSelected(null);
+    setActionError(null);
+    if (project) {
+      setSelectedProjectId(project.id || null);
+      setCwd(project.dir);
+    }
+    if (window.innerWidth <= 760) setSidebarOpen(false);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".composer-input")?.focus());
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n" && !settingsOpen && !createProjectOpen && !diff) {
+        e.preventDefault();
+        newChat();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [newChat, settingsOpen, createProjectOpen, diff]);
 
   const refreshHistory = useCallback(() => {
     listTasks().then(setHistory).catch(() => {});
@@ -78,6 +131,38 @@ export default function App() {
   // 事件监听里读取最新 live 用的镜像
   const liveRef = useRef(live);
   liveRef.current = live;
+  const sessionIds = useRef(new Map<string, string>());
+  const { enqueue: enqueueUpdate, flush: flushUpdates } = useFrameQueue<TaskUpdate>((batch) => {
+    const groups = new Map<string, TaskUpdate[]>();
+    for (const update of batch) {
+      const group = groups.get(update.taskId);
+      if (group) group.push(update);
+      else groups.set(update.taskId, [update]);
+    }
+    setLive((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const [id, updates] of groups) {
+        const task = prev[id];
+        if (!task) continue;
+        const appended: LogItem[] = [];
+        let running = task.running;
+        let todos = task.todos;
+        let sessionId = task.sessionId;
+        for (const update of updates) {
+          if (update.item) {
+            appended.push(update.item);
+            if (update.item.event.type === "session_id") sessionId = update.item.event.id;
+          }
+          if (update.running !== undefined) running = update.running;
+          if (update.todos !== undefined) todos = update.todos;
+        }
+        next[id] = { ...task, running, todos, sessionId, events: appended.length ? [...task.events, ...appended] : task.events };
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  });
 
   /** 窗口失焦时的系统通知（抄 VK 的 NotificationService） */
   const notify = useCallback(async (title: string, body: string) => {
@@ -142,22 +227,15 @@ export default function App() {
     const unlisteners: Promise<UnlistenFn>[] = [
       listen<{ taskId: string; event: AgentEvent }>("task-event", (e) => {
         const { taskId, event } = e.payload;
-        setLive((prev) => {
-          const task = prev[taskId];
-          if (!task) return prev;
-          return {
-            ...prev,
-            [taskId]: {
-              ...task,
-              sessionId: event.type === "session_id" ? event.id : task.sessionId,
-              events: [...task.events, { event, key: nextKey() }],
-            },
-          };
-        });
+        if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
+        enqueueUpdate({ taskId, item: { event, key: nextKey() } });
       }),
       listen<{ taskId: string; code: number | null }>("task-exit", (e) => {
         const { taskId, code } = e.payload;
-        const task = liveRef.current[taskId];
+        flushUpdates();
+        const current = liveRef.current[taskId];
+        const task = current ? { ...current, sessionId: sessionIds.current.get(taskId) ?? current.sessionId } : undefined;
+        sessionIds.current.delete(taskId);
         if (task) {
           notify(
             code === 0 ? "AgentDeck · 任务完成" : "AgentDeck · 任务结束",
@@ -204,26 +282,13 @@ export default function App() {
         }
         if (payload.type === "deck_todo_updated" && Array.isArray(payload.todos)) {
           const todos = payload.todos as { content: string; status: string }[];
-          setLive((prev) => {
-            const task = prev[taskId];
-            if (!task) return prev;
-            return { ...prev, [taskId]: { ...task, todos } };
-          });
+          enqueueUpdate({ taskId, todos });
         }
         const mapped = piEventToAgentEvent(payload as never);
-        setLive((prev) => {
-          const task = prev[taskId];
-          if (!task) return prev;
-          const events = mapped ? [...task.events, { event: mapped, key: nextKey() }] : task.events;
-          const running =
-            payload.type === "deck_run_end"
-              ? false
-              : payload.type === "deck_run_start"
-                ? true
-                : task.running;
-          return { ...prev, [taskId]: { ...task, events, running } };
-        });
+        const running = payload.type === "deck_run_end" ? false : payload.type === "deck_run_start" ? true : undefined;
+        if (mapped || running !== undefined) enqueueUpdate({ taskId, item: mapped ? { event: mapped, key: nextKey() } : undefined, running });
         if (payload.type === "deck_run_end") {
+          flushUpdates();
           setApproval(null);
           setTimeout(refreshHistory, 300);
         }
@@ -239,7 +304,7 @@ export default function App() {
     return () => {
       unlisteners.forEach((p) => p.then((un) => un()));
     };
-  }, [refreshHistory]);
+  }, [refreshHistory, enqueueUpdate, flushUpdates]);
 
   // 发送：@ 智能体唤醒（可并行）；选中已完成任务且有会话 ID → 续接；否则开新任务
   const handleSend = useCallback(
@@ -261,7 +326,7 @@ export default function App() {
       }
       if (!text.trim()) {
         setActionError("请输入任务描述");
-        return;
+        return false;
       }
 
       const row = selected ? history.find((t) => t.id === selected) : undefined;
@@ -280,7 +345,7 @@ export default function App() {
             queued: [...(prev[selected].queued ?? []), text],
           },
         }));
-        return;
+        return true;
       }
 
       // @ 路由的任务是全新派发（不续接旧会话）
@@ -347,8 +412,10 @@ export default function App() {
         }));
         setSelected(taskId);
         setTimeout(refreshHistory, 200);
+        return true;
       } catch (e) {
         setActionError(String(e));
+        return false;
       }
     },
     [
@@ -361,6 +428,8 @@ export default function App() {
       permission,
       flushQueued,
       refreshHistory,
+      selectedProjectId,
+      projects,
     ],
   );
 
@@ -390,9 +459,19 @@ export default function App() {
 
   const handleSelect = useCallback(
     (id: string) => {
+      const row = history.find((t) => t.id === id);
+      if (row) {
+        setCwd(row.cwd);
+        setSelectedProjectId(row.project_id ?? projects.find((p) => directoryKey(p.dir) === directoryKey(row.cwd))?.id ?? null);
+        setHarness(row.harness);
+        setMode(row.mode ?? "default");
+        setModel(row.model ?? "");
+      }
+      setActionError(null);
+      if (window.innerWidth <= 760) setSidebarOpen(false);
       void viewTask(id);
     },
-    [viewTask],
+    [viewTask, history, projects],
   );
 
   const selectedRow = selected ? history.find((t) => t.id === selected) : undefined;
@@ -507,11 +586,25 @@ export default function App() {
   selectedRowRef.current = selectedRow;
 
   return (
-    <div className="flex h-full">
-      <Rail onNew={() => setSelected(null)} onSettings={() => setSettingsOpen(true)} />
+    <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
+      <AnimatePresence initial={false}>
+        {sidebarOpen && <MotionLayer key="sidebar-scrim" className="sidebar-scrim-holder">
+          <button className="sidebar-scrim" aria-label="关闭侧栏" onClick={closeSidebar} />
+        </MotionLayer>}
+        {sidebarOpen && <MotionLayer key="sidebar" preset="sidebar" className="sidebar-host"
+          initial={motionEnabled ? { width: 0, opacity: 0, x: -12 } : false}
+          animate={{ width: "auto", opacity: 1, x: 0 }}
+          exit={{ width: 0, opacity: motionEnabled ? 0 : 1, x: motionEnabled ? -12 : 0 }}>
+          <Sidebar tasks={history} projects={projects} selectedId={selected} onSelect={handleSelect}
+            onNew={newChat} onSettings={openSettings} onCreateProject={openCreateProject}
+            onCollapse={closeSidebar} />
+        </MotionLayer>}
+      </AnimatePresence>
+      <AnimatePresence>
       {createProjectOpen && (
         <CreateProjectModal
-          onClose={() => setCreateProjectOpen(false)}
+          key="create-project"
+          onClose={closeCreateProject}
           onCreated={(dir) => {
             setCreateProjectOpen(false);
             setCwd(dir); // 新项目即当前上下文
@@ -519,35 +612,31 @@ export default function App() {
           }}
         />
       )}
-      <Sidebar tasks={history} selectedId={selected} onSelect={handleSelect} />
+      </AnimatePresence>
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        {selected === null ? (
-          // ── 空态：菱形晶格底纹 + 品牌符浮动 + 错落入场 ──
-          <div
-            key="empty"
-            className="anim-scene relative flex flex-1 flex-col items-center justify-center px-8"
-          >
-            <div className="grid-bg pointer-events-none absolute inset-0" />
-            <div className="float-slow anim-rise relative mb-8 text-stone-300">
-              <IconBrandMark size={56} />
-            </div>
-            <div
-              className="anim-rise relative text-2xl font-medium tracking-tight text-stone-800"
-              style={{ animationDelay: "70ms" }}
-            >
-              我们应该在
-              <span className="mx-1 border-b-2 border-dotted border-stone-400">
-                {projectName(cwd)}
-              </span>
-              中做些什么？
-            </div>
+      <main className={`workspace-main ${selected === null ? "is-new" : ""}`}>
+        <header className="workspace-header">
+          {!sidebarOpen && <button className="icon-button" title="展开侧栏" aria-label="展开侧栏" onClick={() => setSidebarOpen(true)}><PanelLeft size={18} /></button>}
+          <span className="workspace-title">{selected ? selectedRow?.prompt ?? selectedLive?.prompt ?? "聊天" : "新聊天"}</span>
+          <div className="workspace-header-actions">
+            <span className="workspace-project"><GitBranch size={14} />{projectName(selectedRow?.cwd ?? cwd)}</span>
+            <button className="icon-button" title="新聊天" aria-label="新聊天" onClick={() => newChat()}><SquarePen size={17} /></button>
           </div>
+        </header>
+        {selected === null ? (
+          // New chats share the same composer as active conversations.
+          <MotionLayer preset="scene"
+            key="empty"
+            className="new-chat-heading"
+          >
+            <h1>开始新的任务</h1>
+            {cwd && <span className="new-chat-project">{projects.find((p) => directoryKey(p.dir) === directoryKey(cwd))?.name ?? projectName(cwd)}</span>}
+          </MotionLayer>
         ) : (
           // ── 任务详情视图 ──
-          <div
+          <MotionLayer preset="scene"
             key={`task-${selected}`}
-            className="anim-scene flex min-h-0 flex-1 flex-col"
+            className="task-view flex min-h-0 flex-1 flex-col"
           >
             <div className="flex items-center gap-2 border-b border-stone-200/70 px-6 py-3 text-sm">
               <button
@@ -692,15 +781,11 @@ export default function App() {
                     </button>
                   </>
                 )}
-                {!selectedRunning && selectedCanResume && (
-                  <span className="text-stone-400">在下方输入可续接此会话</span>
-                )}
-                {actionError && <span className="text-red-600">{actionError}</span>}
             </div>
 
             {/* 会话接力：把会话记录交给另一个 harness 继续（额度/登录失败时的正解） */}
             {!selectedRunning && selectedRow && (
-              <div className="mx-6 mt-2 rounded-xl border border-stone-200 bg-white p-3">
+              <Disclosure className="handoff-section mx-6 mt-2" title="会话接力">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className="font-medium text-stone-600">
                     {hasQuotaError
@@ -721,10 +806,6 @@ export default function App() {
                         用 {h === "deck" ? "AgentDeck Agent" : h} 接力
                       </button>
                     ))}
-                  <span className="flex-1" />
-                  <span className="text-stone-400">
-                    会话记录将随首条消息一并注入，工作目录不变
-                  </span>
                 </div>
                 {busyHandoff && (
                   <div className="typing-dots mt-2 flex items-center text-xs text-stone-400">
@@ -734,7 +815,7 @@ export default function App() {
                     <span />
                   </div>
                 )}
-              </div>
+              </Disclosure>
             )}
 
             {/* 审批卡片：deck 运行时 approved 模式的工具授权 */}
@@ -775,11 +856,12 @@ export default function App() {
             )}
 
             <LogPanel key={selected} events={selectedEvents} running={selectedRunning} />
-          </div>
+          </MotionLayer>
         )}
 
         {/* 底部输入卡：始终可见。运行中发送 = 入队（结束后自动续发） */}
-        <div className="px-6 pb-5 pt-2">
+        <m.div className="composer-dock" layout={motionEnabled ? "position" : false} layoutDependency={selected === null}>
+          {actionError && <div className="action-error" role="alert">{actionError}</div>}
           {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
             <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
               <span className="text-stone-400">已排队（结束后自动续发）：</span>
@@ -813,22 +895,15 @@ export default function App() {
             </div>
           )}
           <Composer
+            draftKey={selected ?? "new"}
+            onStop={stopSelected}
             cwd={cwd}
             onCwdChange={setCwd}
             projects={projects}
             selectedProjectId={selectedProjectId}
-            onProjectSelect={(id) => {
-              setSelectedProjectId(id);
-              const p = projects.find((x) => x.id === id);
-              if (p) setCwd(p.dir);
-            }}
+            onProjectSelect={chooseProject}
             harness={harness}
-            onHarnessChange={(h) => {
-              setHarness(h);
-              setModel(""); // 切 harness 时模型目录不同，重置
-              // 权限目录随 harness 变化，重置为各家默认
-              setMode(h === "zcode" ? "yolo" : h === "codex" ? "full" : "default");
-            }}
+            onHarnessChange={chooseHarness}
             mode={mode}
             onModeChange={setMode}
             model={model}
@@ -840,25 +915,28 @@ export default function App() {
             recentModels={recentModels}
             placeholder={
               selectedRunning
-                ? "运行中——发送将排队；@其他智能体 可并行唤醒"
+                ? "补充任务…"
                 : selectedCanResume
                   ? "续接此会话…"
-                  : "随心输入 · @harness 或 @harness:模型 指定谁来干（如 @codex:gpt-5.1-codex）"
+                  : "描述任务，或提出问题…"
             }
           />
-        </div>
+        </m.div>
 
+        <AnimatePresence>
         {diff && selectedRow && (
           <DiffModal
+            key={`diff-${diff.taskId}`}
             text={diff.text}
             running={selectedRunning}
             harness={selectedRow.harness}
             model={selectedRow.model}
             mode={selectedRow.mode}
-            onClose={() => setDiff(null)}
+            onClose={closeDiff}
           />
         )}
-        {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
+        {settingsOpen && <SettingsPage key="settings" onClose={closeSettings} />}
+        </AnimatePresence>
       </main>
     </div>
   );
@@ -890,7 +968,7 @@ function eventsToText(events: { event: AgentEvent }[]): string {
     .join("\n");
 }
 
-/** 会话日志面板：历史回放时错落入场，实时流式时逐条滑入；rAF 节流自动滚底 */
+/** Bounded message DOM with user-controlled, frame-coalesced scroll following. */
 function LogPanel({
   events,
   running,
@@ -898,44 +976,20 @@ function LogPanel({
   events: { event: AgentEvent; key: number }[];
   running: boolean;
 }) {
-  const logRef = useRef<HTMLDivElement | null>(null);
-  const prevCount = useRef(0);
-  const scrollPending = useRef(false);
-  const staggerInitial = prevCount.current === 0 && events.length > 0;
-  // 跟随滚动：用户上翻查看历史时暂停自动滚底（Codex 桌面端习惯）
-  const [follow, setFollow] = useState(true);
-
-  const scrollToBottom = (smooth = false) => {
-    const el = logRef.current;
-    if (!el) return;
-    setFollow(true);
-    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
-  };
-
-  const handleScroll = () => {
-    const el = logRef.current;
-    if (!el) return;
-    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setFollow(dist < 60);
-  };
-
-  useEffect(() => {
-    if (!follow || scrollPending.current) return;
-    scrollPending.current = true;
-    requestAnimationFrame(() => {
-      scrollPending.current = false;
-      logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-    });
-    prevCount.current = events.length;
-  }, [events.length, follow]);
+  const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
+  const [copied, setCopied] = useState(false);
 
   const overflow = events.length - MAX_RENDER;
   const visible = overflow > 0 ? events.slice(overflow) : events;
   void overflow;
 
-  const copyAll = () => {
+  const copyAll = async () => {
     const text = eventsToText(events);
-    navigator.clipboard?.writeText(text).catch(() => {});
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {}
   };
 
   return (
@@ -944,20 +998,25 @@ function LogPanel({
         <span>
           {overflow > 0
             ? `前 ${overflow} 条已折叠（完整记录在数据库中）`
-            : `共 ${events.length} 条`}
+             : ""}
         </span>
         <button
           onClick={copyAll}
-          className="rounded px-2 py-0.5 transition-colors hover:bg-stone-100 hover:text-stone-600"
+          className="icon-button"
+          title={copied ? "已复制" : "复制会话"}
+          aria-label={copied ? "已复制" : "复制会话"}
         >
-          复制日志
+          {copied ? <Check size={14} /> : <Copy size={14} />}
         </button>
       </div>
       <div
-        ref={logRef}
-        onScroll={handleScroll}
-        className="log-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-6 pb-4 font-mono text-xs leading-relaxed"
+        ref={viewportRef}
+        onScroll={onScroll}
+        tabIndex={0}
+        aria-label="会话内容"
+         className="log-scroll min-h-0 flex-1 overflow-y-auto"
       >
+      <div ref={contentRef} className="log-content">
       {events.length === 0 && (
         <div className="py-10 text-center text-stone-400">
           {running ? (
@@ -971,22 +1030,28 @@ function LogPanel({
           )}
         </div>
       )}
-      {visible.map(({ event, key }, i) => (
+      {visible.map(({ event, key }) => (
         <EventLine
           key={key}
           event={event}
-          stagger={staggerInitial ? i : 0}
         />
       ))}
       </div>
+      </div>
+      <AnimatePresence>
       {!follow && (
+        <MotionLayer className="scroll-latest" preset="menu">
         <button
-          onClick={() => scrollToBottom(true)}
-          className="anim-pop absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-stone-900 px-3.5 py-1.5 text-xs font-medium text-white shadow-lg hover:bg-stone-700"
+           onClick={scrollToBottom}
+           title="回到最新"
+           aria-label="回到最新"
+          className="icon-button"
         >
-          ↓ 回到最新
+           <ArrowDown size={16} />
         </button>
+        </MotionLayer>
       )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -1,14 +1,17 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { ArrowUp, Square, ChevronDown, Folder } from "lucide-react";
+import { AnimatePresence } from "motion/react";
+import { MotionLayer } from "../motion/MotionProvider";
+import { useTextareaAutosize } from "../hooks/useTextareaAutosize";
 
-import { HARNESS_ACCENT } from "./Sidebar";
+import { HARNESS_ACCENT, projectName } from "./Sidebar";
 import { discoverModels, inTauri } from "../api";
-import { IconFolder, IconSend, IconPlus } from "./icons";
+import { IconFolder } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
 
-/** 底部输入卡：目录 chip + 多行输入 + harness/模式下拉 + 圆形发送键。
- *  聚焦时边框深化、阴影抬升、底部品牌色细线渐显。 */
+/** Shared composer; draft state survives chat switches and failed dispatches. */
 export const Composer = memo(function Composer({
   cwd,
   onCwdChange,
@@ -27,6 +30,8 @@ export const Composer = memo(function Composer({
   running,
   recentModels = [],
   placeholder,
+  draftKey,
+  onStop,
 }: {
   cwd: string;
   onCwdChange: (v: string) => void;
@@ -41,7 +46,9 @@ export const Composer = memo(function Composer({
   projects: { id: string; name: string; dir: string }[];
   selectedProjectId: string | null;
   onProjectSelect: (id: string | null, dir: string) => void;
-  onSend: (text: string) => void;
+  onSend: (text: string) => Promise<boolean>;
+  draftKey: string;
+  onStop: () => void;
   /** 任务运行中：发送将入队而非直接派发 */
   running?: boolean;
   /** 历史常用模型（按频次），动态列表按此置顶排序 */
@@ -49,7 +56,47 @@ export const Composer = memo(function Composer({
   placeholder?: string;
 }) {
   const [text, setText] = useState("");
-  const [focused, setFocused] = useState(false);
+  const [sending, setSending] = useState(false);
+  const drafts = useRef(new Map<string, string>());
+  const currentDraftKey = useRef(draftKey);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    currentDraftKey.current = draftKey;
+    setText(drafts.current.get(draftKey) ?? "");
+    setMention(null);
+    setProjMenuOpen(false);
+  }, [draftKey]);
+  // 项目菜单开关 + 当前生效项目（cwd 匹配或显式选择）
+  const [projMenuOpen, setProjMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!projMenuOpen) return;
+    const dismiss = (e: PointerEvent) => {
+      if (!projectMenuRef.current?.contains(e.target as Node)) setProjMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setProjMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [projMenuOpen]);
+  const activeProject = useMemo(() => {
+    if (selectedProjectId) {
+      return projects.find((x) => x.id === selectedProjectId) ?? null;
+    }
+    if (cwd) {
+      const norm = (s: string) => s.split("\\").join("/").replace(/\/$/, "").toLowerCase();
+      return projects.find((x) => norm(x.dir) === norm(cwd)) ?? null;
+    }
+    return null;
+  }, [projects, selectedProjectId, cwd]);
+
   // @ 提及补全（两段式）：输入 @ 选智能体 → 自动补 ":" 进入模型段选具体模型
   const [mention, setMention] = useState<
     | { kind: "agent"; start: number; query: string }
@@ -58,6 +105,7 @@ export const Composer = memo(function Composer({
   >(null);
   const [mentionIdx, setMentionIdx] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useTextareaAutosize(textareaRef, text);
 
   const MENTION_AGENTS = [
     { name: "deck", label: "AgentDeck Agent", desc: "自有运行时 · 可接 :glm/:gpt" },
@@ -98,7 +146,7 @@ export const Composer = memo(function Composer({
     } else if (agent === "") {
       // 刚输入 @：agent 阶段，列出全部
       setMention({ kind: "agent", start: pos - m[0].length, query: "" });
-    } else if (MENTION_AGENTS.some((a) => a.name === agent)) {
+    } else if (MENTION_AGENTS.some((a) => a.name.startsWith(agent))) {
       setMention({ kind: "agent", start: pos - m[0].length, query: agent });
     } else {
       setMention(null);
@@ -114,13 +162,12 @@ export const Composer = memo(function Composer({
     const insert = name === "zcode" ? `@${name} ` : `@${name}:`;
     const next = el.value.slice(0, mention.start) + insert + el.value.slice(pos);
     setText(next);
-    setMention(null);
+    drafts.current.set(draftKey, next);
+    setMention(name === "zcode" ? null : { kind: "model", start: mention.start, agent: name, query: "" });
     requestAnimationFrame(() => {
       el.focus();
       const caret = mention.start + insert.length;
       el.setSelectionRange(caret, caret);
-      // 手动触发一次补全刷新（模型段自动打开）
-      refreshMention(el);
     });
   };
 
@@ -128,9 +175,10 @@ export const Composer = memo(function Composer({
     const el = textareaRef.current;
     if (!el || !mention || mention.kind !== "model") return;
     const pos = el.selectionStart ?? el.value.length;
-    const insert = model ? `:${model} ` : " ";
+    const insert = model ? `@${mention.agent}:${model} ` : `@${mention.agent} `;
     const next = el.value.slice(0, mention.start) + insert + el.value.slice(pos);
     setText(next);
+    drafts.current.set(draftKey, next);
     setMention(null);
     requestAnimationFrame(() => {
       el.focus();
@@ -139,10 +187,20 @@ export const Composer = memo(function Composer({
     });
   };
 
-  const send = () => {
-    if (!text.trim()) return;
-    onSend(text);
-    setText("");
+  const send = async () => {
+    if (!text.trim() || sending) return;
+    const key = draftKey;
+    const submitted = text;
+    setSending(true);
+    try {
+      if (await onSend(submitted)) {
+        if (drafts.current.get(key) === submitted) drafts.current.delete(key);
+        if (currentDraftKey.current === key) setText((value) => value === submitted ? "" : value);
+        setMention(null);
+      }
+    } finally {
+      setSending(false);
+    }
   };
 
   const accent = HARNESS_ACCENT[harness] ?? "var(--text-3)";
@@ -161,6 +219,7 @@ export const Composer = memo(function Composer({
     }
   }, []);
   useEffect(() => {
+    setDiscovered([]);
     if (!MODEL_CATALOG[harness]) {
       setDiscovered([]);
       return;
@@ -210,53 +269,92 @@ export const Composer = memo(function Composer({
   };
 
   return (
-    <div className="composer-card mx-auto w-full max-w-3xl rounded-2xl border border-stone-200 bg-white shadow-[var(--shadow-1)] focus-within:border-stone-300">
-      {/* 项目选择：从已建项目一键切换（同步工作目录） */}
-      <div className="flex items-center gap-2 px-4 pt-3">
-        <Dropdown
-          value={selectedProjectId ?? ""}
-          onChange={(id) => {
-            onProjectSelect(id || null, "");
-            const p = projects.find((x) => x.id === id);
-            if (p) onCwdChange(p.dir);
-          }}
-          ghost={!selectedProjectId}
-          options={[
-            { value: "", label: "选择项目" },
-            ...projects.map((x) => ({ value: x.id, label: x.name })),
-          ]}
-          title="更改此聊天的项目"
-        />
+    <div className="composer-card">
+      {/* 项目/目录行：未选 → 整行安静「选择项目」；已选 → chip 显示名称 */}
+      <div ref={projectMenuRef} className="composer-project-row">
         <button
-          onClick={async () => {
-            if (!inTauri) {
-              onCwdChange("（桌面应用内可选择文件夹）");
-              return;
-            }
-            const picked = await open({ directory: true, multiple: false });
-            if (typeof picked === "string") onCwdChange(picked);
-          }}
-          title="选择文件夹"
-          className="hover-lift shrink-0 rounded p-0.5 text-stone-400 hover:text-stone-700"
+          onClick={() => setProjMenuOpen((v) => !v)}
+          className="composer-project-button"
+          title={cwd || "选择项目"}
+          aria-expanded={projMenuOpen}
+          aria-haspopup="dialog"
         >
-          <IconFolder size={15} />
+          <IconFolder size={14} className="shrink-0" />
+          {activeProject ? (
+            <span className="truncate font-medium">{activeProject.name}</span>
+          ) : cwd ? (
+            <span className="truncate">{projectName(cwd)}</span>
+          ) : (
+            <span>选择项目</span>
+          )}
+          <ChevronDown size={12} className="shrink-0" />
         </button>
-        <input
-          value={cwd}
-          onChange={(e) => onCwdChange(e.target.value)}
-          placeholder="工作目录（点击左侧文件夹选择，或留空使用默认目录）"
-          className="min-w-0 flex-1 rounded-md bg-stone-100 px-2 py-1 text-xs text-stone-600 outline-none placeholder:text-stone-400 focus:ring-1 focus:ring-stone-300"
-        />
+
+        <AnimatePresence>
+        {projMenuOpen && (
+          <MotionLayer preset="menu" role="dialog" aria-label="选择项目" className="project-menu">
+            <div className="border-b border-stone-100 px-3 py-1.5 text-[10px] text-stone-400">
+              项目
+            </div>
+            {projects.map((pj) => (
+              <button
+                key={pj.id}
+                onClick={() => {
+                  onProjectSelect(pj.id, pj.dir);
+                  onCwdChange(pj.dir);
+                  setProjMenuOpen(false);
+                }}
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${
+                  activeProject?.id === pj.id
+                    ? "bg-stone-100 font-medium text-stone-900"
+                    : "text-stone-600 hover:bg-stone-50"
+                }`}
+              >
+                <IconFolder size={13} className="shrink-0 text-stone-400" />
+                <span className="min-w-0 flex-1 truncate">{pj.name}</span>
+                <span className="max-w-40 truncate font-mono text-[10px] text-stone-400" title={pj.dir}>
+                  {pj.dir}
+                </span>
+              </button>
+            ))}
+            <label className="directory-field">
+              <span>工作目录</span>
+              <input aria-label="工作目录" value={cwd} placeholder="输入文件夹路径"
+                onChange={(e) => { onProjectSelect(null, ""); onCwdChange(e.target.value); }} />
+            </label>
+            <button
+              disabled={!inTauri}
+              onClick={async () => {
+                if (!inTauri) {
+                  setProjMenuOpen(false);
+                  return;
+                }
+                const picked = await open({ directory: true, multiple: false });
+                if (typeof picked === "string") {
+                  onCwdChange(picked);
+                  onProjectSelect(null, "");
+                }
+                setProjMenuOpen(false);
+              }}
+              className="flex w-full items-center gap-2 border-t border-stone-100 px-3 py-2 text-left text-xs text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-40"
+            >
+              <IconFolder size={13} className="shrink-0 text-stone-400" />
+              浏览文件夹…
+            </button>
+          </MotionLayer>
+        )}
+        </AnimatePresence>
       </div>
 
       <div className="relative">
         {/* @ 智能体补全（两段式）：@ 选智能体 → : 选模型 */}
+        <AnimatePresence>
         {mention && (
-          <div className="absolute bottom-full left-4 right-4 z-20 mb-1 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]">
+          <MotionLayer preset="menu" className="mention-menu absolute bottom-full left-4 right-4 z-20 mb-1 overflow-hidden rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]">
             <div className="border-b border-stone-100 px-3 py-1.5 text-[10px] text-stone-400">
               {mention.kind === "model"
-                ? `${mention.agent} 的模型（回车应用，Esc 取消）`
-                : "唤醒智能体 · 选后可接 :模型 精确指定"}
+                 ? `${mention.agent} 的模型`
+                 : "智能体"}
             </div>
             {mention.kind === "agent" &&
               MENTION_AGENTS.filter(
@@ -289,7 +387,7 @@ export const Composer = memo(function Composer({
                       : "暂无模型列表"}
                   </div>
                 )}
-                {modelOptionsFor(mention.agent).map((m, i) => (
+                 {modelOptionsFor(mention.agent).filter((m) => m.toLowerCase().includes(mention.query.toLowerCase())).map((m, i) => (
                   <button
                     key={m}
                     onClick={() => applyModel(m)}
@@ -304,20 +402,23 @@ export const Composer = memo(function Composer({
                 ))}
               </>
             )}
-          </div>
+          </MotionLayer>
         )}
+        </AnimatePresence>
         <textarea
           ref={textareaRef}
           value={text}
           onChange={(e) => {
             setText(e.target.value);
+            drafts.current.set(draftKey, e.target.value);
             refreshMention(e.target);
           }}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (mention) {
               const stageOptions =
                 mention.kind === "agent"
-                  ? MENTION_AGENTS
+                   ? MENTION_AGENTS.filter((a) => a.name.includes(mention.query.toLowerCase()) || a.label.toLowerCase().includes(mention.query.toLowerCase()))
                   : modelOptionsFor(mention.agent).map((m) => ({ name: m, label: m }));
               const visible = mention.kind === "model"
                 ? stageOptions.filter((o) =>
@@ -358,21 +459,15 @@ export const Composer = memo(function Composer({
               send();
             }
           }}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          rows={3}
+           rows={2}
+           aria-label="消息"
           placeholder={placeholder ?? "随心输入"}
-          className="w-full resize-none bg-transparent px-4 pt-3 text-sm text-stone-800 outline-none placeholder:text-stone-400 disabled:opacity-50"
+           className="composer-input"
         />
       </div>
 
-      <div className="flex items-center gap-1.5 px-3 pb-3">
-        <button
-          title="附加文件（开发中）"
-          className="hover-lift flex h-8 w-8 items-center justify-center rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600"
-        >
-          <IconPlus size={15} />
-        </button>
+       <div className="composer-toolbar">
+         <Folder size={15} className="composer-context-icon" />
 
         {/* harness 下拉：身份色信号点 */}
         <Dropdown
@@ -406,8 +501,8 @@ export const Composer = memo(function Composer({
                     // 常用置顶（按历史使用频次）
                     .sort(
                       (a, b) =>
-                        (recentModels.indexOf(b.value) + 1 || 999) -
-                        (recentModels.indexOf(a.value) + 1 || 999),
+                         (recentModels.indexOf(a.value) < 0 ? 999 : recentModels.indexOf(a.value)) -
+                         (recentModels.indexOf(b.value) < 0 ? 999 : recentModels.indexOf(b.value)),
                     )
                 : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
             ]}
@@ -455,24 +550,16 @@ export const Composer = memo(function Composer({
         )}
 
         <button
-          onClick={send}
-          disabled={!text.trim()}
-          className="hover-lift flex h-9 w-9 items-center justify-center rounded-full text-white disabled:opacity-30"
-          style={{ backgroundColor: text.trim() ? accent : "#a8a29e" }}
-          title="发送（Enter）"
-        >
-          <IconSend size={16} />
+           onClick={() => running && !text.trim() ? onStop() : void send()}
+           disabled={sending || (!running && !text.trim())}
+           className="send-button"
+           title={running && !text.trim() ? "停止" : running ? "加入队列" : "发送"}
+           aria-label={running && !text.trim() ? "停止" : running ? "加入队列" : "发送"}
+         >
+           {running && !text.trim() ? <Square size={13} fill="currentColor" /> : <ArrowUp size={18} />}
         </button>
       </div>
 
-      {/* 聚焦时底部品牌色细线渐显 */}
-      <div
-        className="pointer-events-none mx-4 h-px transition-opacity duration-200"
-        style={{
-          background: `linear-gradient(90deg, transparent, ${accent}, transparent)`,
-          opacity: focused ? 1 : 0,
-        }}
-      />
     </div>
   );
 });

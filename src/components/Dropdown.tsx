@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { AnimatePresence } from "motion/react";
+import { MotionLayer } from "../motion/MotionProvider";
 
 import { IconCheck, IconChevronDown, IconSearch } from "./icons";
 
@@ -9,9 +12,7 @@ export type DropdownOption = {
   tag?: string;
 };
 
-/** 自绘下拉框：药丸触发器 + 向上弹出的菜单（composer 贴近视口底部）。
- *  长列表：max-h 滚动 + 搜索框过滤 + 按 groupBy 分组渲染。
- *  支持点击外部关闭、Escape、选中勾标与弹性入场。 */
+/** Portaled menu with viewport-aware positioning and interruptible presence. */
 export function Dropdown({
   value,
   onChange,
@@ -39,6 +40,11 @@ export function Dropdown({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const focusOnOpen = useRef(false);
+  const menuId = useId();
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 280, maxHeight: 320 });
   const current = options.find((o) => o.value === value);
 
   // 打开时清空过滤；点击外部/Escape 关闭
@@ -48,20 +54,52 @@ export function Dropdown({
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      if (!rootRef.current?.contains(e.target as Node) && !menuRef.current?.contains(e.target as Node)) {
         setOpen(false);
       }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
     };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.min(280, window.innerWidth - 24);
+      const height = Math.min(menuRef.current?.scrollHeight ?? 320, 320);
+      const above = rect.top - 12;
+      const below = window.innerHeight - rect.bottom - 12;
+      const useAbove = above >= height || above >= below;
+      const available = Math.max(80, useAbove ? above : below);
+      setPosition({
+        left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
+        top: useAbove ? Math.max(12, rect.top - Math.min(height, available) - 6) : rect.bottom + 6,
+        width,
+        maxHeight: Math.min(320, available),
+      });
+    };
+    update();
+    if (focusOnOpen.current) {
+      const selected = menuRef.current?.querySelector<HTMLButtonElement>('[aria-selected="true"]');
+      (selected ?? menuRef.current?.querySelector<HTMLButtonElement>('[role="option"]'))?.focus();
+      focusOnOpen.current = false;
+    }
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [open, query, options.length]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -87,17 +125,23 @@ export function Dropdown({
   return (
     <div ref={rootRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         title={title}
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
-          open
-            ? "bg-stone-100 text-stone-800"
-            : ghost
-              ? "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
-              : "border border-stone-200 bg-white text-stone-600 hover:bg-stone-50"
-        } disabled:pointer-events-none disabled:opacity-50`}
+        onClick={() => { focusOnOpen.current = false; setOpen((v) => !v); }}
+        className={`dropdown-trigger ${ghost ? "text-stone-400" : ""}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        aria-label={title}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            focusOnOpen.current = true;
+            setOpen(true);
+          }
+        }}
       >
         {dotColor && (
           <span
@@ -114,8 +158,17 @@ export function Dropdown({
         />
       </button>
 
-      {open && (
-        <div className="anim-pop absolute bottom-full left-0 z-20 mb-1.5 w-72 origin-bottom-left overflow-hidden rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]">
+      {createPortal(<AnimatePresence>
+        {open && <MotionLayer preset="menu" key={menuId} ref={menuRef} id={menuId} className="dropdown-menu" style={position}
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+            const buttons = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
+            if (!buttons.length) return;
+            e.preventDefault();
+            const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 : (index + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+            buttons[next].focus();
+          }}>
           {searchable && (
             <div className="border-b border-stone-100 p-2">
               <div className="flex items-center gap-2 rounded-lg bg-stone-100 px-2 py-1.5">
@@ -131,7 +184,7 @@ export function Dropdown({
             </div>
           )}
 
-          <div className="max-h-72 overflow-y-auto py-1">
+          <div role="listbox" aria-label={title} className="overflow-y-auto py-1" style={{ maxHeight: position.maxHeight - (searchable ? 50 : 0) }}>
             {filtered.length === 0 && (
               <div className="px-3 py-6 text-center text-xs text-stone-400">
                 无匹配项
@@ -148,7 +201,8 @@ export function Dropdown({
                 ))
               : filtered.map(renderOption)}
           </div>
-        </div>
+        </MotionLayer>}
+        </AnimatePresence>, document.body
       )}
     </div>
   );
@@ -164,8 +218,9 @@ export function Dropdown({
         onClick={() => {
           onChange(o.value);
           setOpen(false);
+          triggerRef.current?.focus();
         }}
-        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+        className={`dropdown-option flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
           selected
             ? "font-medium text-stone-900"
             : "text-stone-600 hover:bg-stone-100"

@@ -1,5 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useIsPresent } from "motion/react";
+import { MotionLayer } from "../motion/MotionProvider";
 
 import { createProject } from "../api";
 import { IconClose, IconFolder } from "./icons";
@@ -17,10 +19,22 @@ export function CreateProjectModal({
   const [dir, setDir] = useState("");
   const [error, setError] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement | null>(null);
+  const present = useIsPresent();
+  useEffect(() => {
+    if (!present) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onClose(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("keydown", onKey); previous?.focus(); };
+  }, [onClose, present]);
 
   const pickFolder = async () => {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked === "string") setDir(picked);
+    try {
+      const picked = await open({ directory: true, multiple: false });
+      if (typeof picked === "string") setDir(picked);
+    } catch (e) { setError(String(e)); }
   };
 
   const create = async () => {
@@ -42,18 +56,23 @@ export function CreateProjectModal({
   };
 
   return (
-    <div
-      className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-6"
+    <MotionLayer
+      className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-6"
       onClick={onClose}
     >
-      <div
-        className="anim-pop w-full max-w-md rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]"
+      <MotionLayer preset="dialog"
+        className="w-full max-w-md rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]"
+        role="dialog"
+        aria-modal="true"
+        aria-label="创建项目"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3">
           <span className="text-sm font-semibold">创建项目</span>
           <button
-            onClick={onClose}
+             onClick={onClose}
+             title="关闭"
+             aria-label="关闭"
             className="hover-lift rounded p-1 text-stone-400 hover:bg-stone-100 hover:text-stone-700"
           >
             <IconClose size={15} />
@@ -68,6 +87,7 @@ export function CreateProjectModal({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="项目名称"
+              aria-label="项目名称"
               autoFocus
               className="min-w-0 flex-1 text-sm outline-none placeholder:text-stone-400"
             />
@@ -107,7 +127,7 @@ export function CreateProjectModal({
             创建项目
           </button>
         </div>
-      </div>
-    </div>
+      </MotionLayer>
+    </MotionLayer>
   );
 }

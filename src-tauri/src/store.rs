@@ -559,7 +559,7 @@ mod tests {
     fn events_are_appended_in_order() {
         let store = Store::in_memory().unwrap();
         store
-            .create_task("t1", "codex", ".", "hi", None, None)
+            .create_task("t1", "codex", ".", "hi", None, None, None)
             .unwrap();
         for i in 0..5 {
             store.append_event("t1", &format!("e{i}")).unwrap();

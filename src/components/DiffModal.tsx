@@ -1,4 +1,6 @@
 import { useEffect, useMemo } from "react";
+import { useIsPresent } from "motion/react";
+import { MotionLayer } from "../motion/MotionProvider";
 
 import { IconClose } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
@@ -38,14 +40,16 @@ export function DiffModal({
   // deck 运行时的模型选择存在 mode 字段（glm/gpt）
   const modelLabel =
     model ?? (harness === "deck" && mode ? mode.toUpperCase() : null);
+  const present = useIsPresent();
   // Esc 关闭（标准弹层键盘预期）
   useEffect(() => {
+    if (!present) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, present]);
 
   const lines = useMemo(() => text.split("\n"), [text]);
   const stats = useMemo(() => diffStats(text), [text]);
@@ -53,12 +57,13 @@ export function DiffModal({
   // 实时跟随由后端 watcher 推 diff-update 事件（App 统一监听）
 
   return (
-    <div
-      className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-6"
+    <MotionLayer
+      className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-6"
       onClick={onClose}
     >
-      <div
-        className="anim-pop flex h-full w-full max-w-4xl flex-col rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]"
+      <MotionLayer preset="dialog"
+        role="dialog" aria-modal="true" aria-label="Git Diff"
+        className="flex h-full w-full max-w-4xl flex-col rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-stone-100 px-4 py-2">
@@ -108,7 +113,7 @@ export function DiffModal({
             );
           })}
         </pre>
-      </div>
-    </div>
+      </MotionLayer>
+    </MotionLayer>
   );
 }

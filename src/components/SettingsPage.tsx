@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { X, Plus, ArrowLeft } from "lucide-react";
+import { useIsPresent } from "motion/react";
+import { MotionLayer } from "../motion/MotionProvider";
 
 import {
   addModelProfile,
@@ -46,17 +49,20 @@ function Row({
 function Toggle({
   on,
   onChange,
+  label,
 }: {
   on: boolean;
   onChange: (v: boolean) => void;
+  label: string;
 }) {
   return (
     <button
       role="switch"
       aria-checked={on}
+      aria-label={label}
       onClick={() => onChange(!on)}
       className={`relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200 ${
-        on ? "bg-sky-500" : "bg-stone-300"
+        on ? "bg-stone-800" : "bg-stone-300"
       }`}
     >
       <span
@@ -71,6 +77,19 @@ function Toggle({
 /** 全页设置（Codex 桌面端式）：左侧分区导航 + 右侧行式布局 */
 export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [section, setSection] = useState<Section>("general");
+  const present = useIsPresent();
+  useEffect(() => {
+    if (!present) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onClose(); }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      previous?.focus();
+    };
+  }, [onClose, present]);
 
   // 常规
   const [defaultCwd, setDefaultCwd] = useState("");
@@ -146,7 +165,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-white">
+    <MotionLayer preset="scene" className="settings-page fixed inset-0 z-50 flex bg-white" role="dialog" aria-label="设置" aria-modal="true">
       {/* 左侧分区导航 */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-stone-100 bg-stone-50/60">
         <div className="px-5 pb-3 pt-5 text-xl font-semibold tracking-tight">设置</div>
@@ -170,36 +189,36 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
             onClick={onClose}
             className="hover-lift w-full rounded-lg border border-stone-200 px-3 py-2 text-xs text-stone-600 hover:bg-stone-100"
           >
-            返回
+            <span className="flex items-center gap-2"><ArrowLeft size={14} />返回</span>
           </button>
         </div>
       </aside>
 
       {/* 右侧内容 */}
       <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-10 py-10">
+        <MotionLayer key={section} preset="scene" className="mx-auto max-w-2xl px-10 py-10">
           {section === "general" && (
             <>
               <h1 className="text-2xl font-semibold tracking-tight">常规</h1>
 
               <h2 className="mt-8 text-sm font-semibold text-stone-500">任务</h2>
-              <div className="mt-2 rounded-xl border border-stone-200 px-4">
+              <div className="mt-2">
                 <Row
                   label="Worktree 隔离"
                   desc="git 仓库内派发的任务在独立 worktree 分支中运行，完成后可合并或放弃"
                 >
-                  <Toggle on={isolation} onChange={saveIsolation} />
+                  <Toggle label="Worktree 隔离" on={isolation} onChange={saveIsolation} />
                 </Row>
                 <Row
                   label="任务完成通知"
                   desc="窗口失焦时，任务完成或需要审批会弹出系统通知"
                 >
-                  <Toggle on={notifyOn} onChange={saveNotify} />
+                  <Toggle label="任务完成通知" on={notifyOn} onChange={saveNotify} />
                 </Row>
               </div>
 
               <h2 className="mt-8 text-sm font-semibold text-stone-500">工作区</h2>
-              <div className="mt-2 rounded-xl border border-stone-200 px-4">
+              <div className="mt-2">
                 <Row
                   label="默认任务文件夹"
                   desc="在项目外启动的任务默认存储数据的位置"
@@ -223,15 +242,11 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
           {section === "models" && (
             <>
               <h1 className="text-2xl font-semibold tracking-tight">模型池</h1>
-              <p className="mt-2 text-xs leading-relaxed text-stone-500">
-                deck 自有运行时的模型配置档案。启用的档案按顺序构成降级链：主配置额度/认证失败时自动切换到下一个。与
-                ZCode/OpenCode/Codex 各自的登录互不影响。
-              </p>
 
-              <div className="mt-4 rounded-xl border border-stone-200 px-4">
+              <div className="mt-4">
                 {profiles.length === 0 && (
                   <div className="py-4 text-sm text-stone-400">
-                    暂无配置——点下方「添加模型配置」。
+                    暂无配置
                   </div>
                 )}
                 {profiles.map((p) => (
@@ -242,6 +257,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   >
                     <div className="flex items-center gap-2.5">
                       <Toggle
+                        label={`启用 ${p.label ?? p.provider}`}
                         on={p.enabled}
                         onChange={() => {
                           setModelProfileEnabled(p.id, !p.enabled)
@@ -256,7 +272,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                         className="text-stone-300 transition-colors hover:text-red-500"
                         title="删除"
                       >
-                        ✕
+                        <X size={14} />
                       </button>
                     </div>
                   </Row>
@@ -268,7 +284,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   onClick={() => setAdding(true)}
                   className="mt-3 w-full rounded-xl border border-dashed border-stone-300 py-2.5 text-xs text-stone-500 transition-colors hover:bg-stone-50"
                 >
-                  ＋ 添加模型配置
+                  <span className="flex items-center justify-center gap-2"><Plus size={14} />添加模型配置</span>
                 </button>
               ) : (
                 <div className="mt-3 space-y-2 rounded-xl border border-stone-200 bg-stone-50/70 p-4">
@@ -320,19 +336,18 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
               {status && <div className="mt-2 text-xs text-emerald-600">{status}</div>}
             </>
           )}
-        </div>
+        </MotionLayer>
 
         {/* 右上关闭 */}
         <button
           onClick={onClose}
           className="hover-lift fixed right-6 top-6 z-10 rounded-lg border border-stone-200 bg-white p-1.5 text-stone-400 hover:text-stone-700"
           title="关闭设置（Esc）"
+          aria-label="关闭设置"
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M18 6 6 18M6 6l12 12" />
-          </svg>
+          <X size={15} />
         </button>
       </main>
-    </div>
+    </MotionLayer>
   );
 }
