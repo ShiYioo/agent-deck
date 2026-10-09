@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { inTauri } from "../api";
 import { IconBrandMark } from "./icons";
 
-/** 自绘标题栏：拖拽区 + 最小化/最大化/关闭（原生装饰已关闭） */
+/** 自绘标题栏：拖拽区 + 最小化/最大化/关闭（原生装饰已关闭，配色随 UI 亮色主题） */
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
   // 窗口句柄：浏览器预览或 IPC 环境不完整（如 e2e mock）时为 null，窗控点击为 no-op
@@ -28,33 +28,27 @@ export function TitleBar() {
   }, [win]);
 
   return (
-    <header
-      data-tauri-drag-region
-      className="flex h-10 shrink-0 select-none items-center justify-between border-b border-stone-800/60 bg-stone-950 pl-3"
-    >
+    <header className="titlebar" data-tauri-drag-region>
       {/* 品牌 + 拖拽区（data-tauri-drag-region 已含双击最大化） */}
-      <div className="flex items-center gap-2" data-tauri-drag-region>
-        <span className="text-emerald-400">
-          <IconBrandMark size={16} />
+      <div className="titlebar-brand" data-tauri-drag-region>
+        <span className="titlebar-mark">
+          <IconBrandMark size={14} />
         </span>
-        <span className="text-xs font-medium text-stone-300">Agent Deck</span>
+        <span>Agent Deck</span>
       </div>
 
       {/* 窗控按钮（Windows 习惯：右对齐，窄描边图形） */}
-      <div className="flex items-center">
-        <button
-          onClick={() => win?.minimize()}
-          title="最小化"
-          className="flex h-10 w-11 items-center justify-center text-stone-300 transition-colors hover:bg-stone-800"
-        >
+      <div className="titlebar-controls">
+        <button className="titlebar-btn" onClick={() => win?.minimize()} title="最小化" aria-label="最小化">
           <svg width="11" height="11" viewBox="0 0 11 11">
             <path d="M0 5.5h11" stroke="currentColor" strokeWidth="1" />
           </svg>
         </button>
         <button
+          className="titlebar-btn"
           onClick={() => win?.toggleMaximize()}
           title={maximized ? "还原" : "最大化"}
-          className="flex h-10 w-11 items-center justify-center text-stone-300 transition-colors hover:bg-stone-800"
+          aria-label={maximized ? "还原" : "最大化"}
         >
           {maximized ? (
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor">
@@ -66,11 +60,7 @@ export function TitleBar() {
             </svg>
           )}
         </button>
-        <button
-          onClick={() => win?.close()}
-          title="关闭"
-          className="flex h-10 w-11 items-center justify-center text-stone-300 transition-colors hover:bg-red-600 hover:text-white"
-        >
+        <button className="titlebar-btn close" onClick={() => win?.close()} title="关闭" aria-label="关闭">
           <svg width="11" height="11" viewBox="0 0 11 11">
             <path d="M0.5 0.5l10 10M10.5 0.5l-10 10" stroke="currentColor" strokeWidth="1" />
           </svg>
@@ -79,4 +69,3 @@ export function TitleBar() {
     </header>
   );
 }
-
