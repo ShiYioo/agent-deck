@@ -5,7 +5,7 @@
   "identifier": "com.shiyoo.agentdeck",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm bundle:sidecar",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -28,6 +28,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": {
+      "../agent/dist/deck-agent.mjs": "agent/deck-agent.mjs"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -1,0 +1,46 @@
+name: Release
+
+# 打 tag（v*）触发：构建 NSIS 安装包并发布 GitHub Release。
+# 版本号以 tauri.conf.json 的 version 为准，tag 应与其一致（如 v0.1.0）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # 与 CI 一致：Windows-first 项目，产物为 Windows 安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm 版本由 package.json 的 packageManager 字段唯一决定（action v4 会自动读取）
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tauri-action 内部执行 tauri build（含 beforeBuildCommand：
+      # 前端构建 + sidecar 打包），然后创建 Release 并上传安装包
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "AgentDeck ${{ github.ref_name }}"
+          releaseBody: "Windows 安装包：下载 AgentDeck_*_x64-setup.exe 安装。运行 deck 引擎与各 CLI harness 需要本机已装 Node.js。"
+          releaseDraft: false
+          prerelease: false
