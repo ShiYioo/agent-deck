@@ -129,42 +129,70 @@ for (const target of [fs, fs.promises]) {
 }
 
 /**
- * 构建完整 pi-ai Model 对象。
- * - glm 通道保持原样（字段由 pi 的 zai 注册表解析）
- * - OpenAI 兼容通道显式声明 api（Chat Completions / Responses API）、
- *   contextWindow（pi 以此判断自动压缩时机）与 maxTokens
- * p.models 是设置面板维护的模型目录：[{id, contextWindow}]
+ * 模型池 → pi 声明式供应商配置（models.json，等价 opencode.json 的角色）。
+ * 每个启用档案一个 provider：baseUrl / apiKey / api（协议）/ models 目录
+ * （contextWindow/maxTokens 随行声明，pi 以此判断压缩与输出上限）。
+ * 写入临时文件后由 ModelRuntime.create({ modelsPath }) 加载——
+ * 模型、凭据、寻址（providerId/modelId）全部走 pi 注册表，不再手搓 Model。
  */
-function buildModelObject(p, m) {
-  const glm = p.provider === "glm";
-  const id = m?.id || p.model || (glm ? "glm-4.7" : "gpt-5.1");
-  const base = {
-    provider: glm ? "zai" : "openai",
-    id,
-    name: id,
-    apiKey: p.key,
-    baseUrl:
-      p.baseUrl ||
-      (glm ? process.env.ZAI_BASE_URL : process.env.OPENAI_BASE_URL) ||
-      (glm ? "https://api.z.ai/api/coding/paas/v4" : "https://api.openai.com/v1"),
-  };
-  if (glm) return base;
-  // 上游协议：Chat API / Responses API / Anthropic Messages（pi-ai 原生支持）
-  const api =
-    p.protocol === "responses"
-      ? "openai-responses"
-      : p.protocol === "anthropic"
-        ? "anthropic-messages"
-        : "openai-completions";
-  return {
-    ...base,
-    provider: p.protocol === "anthropic" ? "anthropic" : base.provider,
-    api,
-    type: "chat",
-    reasoning: false,
-    contextWindow: m?.contextWindow || 128000,
-    maxTokens: m?.maxTokens || 8192,
-  };
+function buildModelsJson(profiles) {
+  const providers = {};
+  for (const p of profiles) {
+    const rows = profileModelRows(p);
+    const models = rows.length
+      ? rows.map((m) => ({
+          id: m.id,
+          name: m.id,
+          contextWindow: m.contextWindow ?? 128000,
+          maxTokens: m.maxTokens ?? 8192,
+          reasoning: false,
+        }))
+      : [
+          {
+            id: p.model || (p.provider === "glm" ? "glm-4.7" : "gpt-5.1"),
+            name: p.model || "default",
+            contextWindow: 128000,
+            maxTokens: 8192,
+            reasoning: false,
+          },
+        ];
+    providers[p.id] = {
+      name: p.label || p.provider,
+      baseUrl:
+        p.baseUrl ||
+        (p.provider === "glm" ? process.env.ZAI_BASE_URL : process.env.OPENAI_BASE_URL) ||
+        (p.provider === "glm" ? "https://api.z.ai/api/coding/paas/v4" : "https://api.openai.com/v1"),
+      api:
+        p.protocol === "responses"
+          ? "openai-responses"
+          : p.protocol === "anthropic"
+            ? "anthropic-messages"
+            : "openai-completions",
+      apiKey: p.key,
+      models,
+    };
+  }
+  return { providers };
+}
+
+/** 从声明式配置建 runtime，并解析默认模型（providerId/modelId 寻址） */
+async function createRuntimeForProfile(p) {
+  const modelsFile = path.join(os.tmpdir(), `deck-models-${process.pid}.json`);
+  fs.writeFileSync(modelsFile, JSON.stringify(buildModelsJson([p])));
+  const runtime = await ModelRuntime.create({ modelsPath: modelsFile, refreshOnCreate: false });
+  const rows = profileModelRows(p);
+  const defaultId =
+    (rows.find((r) => r.id === p.model) ?? rows[0] ?? { id: p.model }).id ||
+    (p.provider === "glm" ? "glm-4.7" : "gpt-5.1");
+  const model = runtime.getModel(p.id, defaultId);
+  if (!model) {
+    throw new Error(`模型 ${p.id}/${defaultId} 未注册成功——检查 Base URL 与上游协议`);
+  }
+  const scoped = rows
+    .map((r) => runtime.getModel(p.id, r.id))
+    .filter(Boolean)
+    .map((m) => ({ model: m }));
+  return { runtime, model, scoped };
 }
 
 /** 档案 → 模型目录行（无目录时回退到默认模型单行） */
@@ -180,10 +208,7 @@ function profileModelRows(p) {
   return rows;
 }
 
-function defaultModelRow(p) {
-  const rows = profileModelRows(p);
-  return rows.find((r) => r.id === p.model) ?? rows[0] ?? null;
-}
+
 
 /** deck 自持工具集（抄 OpenCode 工具形态）：读/写/改/命令/搜索/定位/列表 */
 function buildTools(mode) {
@@ -222,11 +247,11 @@ function buildTools(mode) {
 
 async function ensureSessionForProfile(p, { cwd, mode }) {
   const rows = profileModelRows(p);
-  const resolved = buildModelObject(p, defaultModelRow(p));
-  if (!resolved.apiKey) {
+  const resolved = await createRuntimeForProfile(p);
+  if (!p.key) {
     throw new Error(`配置 ${p.provider} 缺少 API Key`);
   }
-  const want = JSON.stringify([p.provider, p.key, p.baseUrl, p.protocol, rows, cwd, mode]);
+  const want = JSON.stringify([p.id, p.key, p.baseUrl, p.protocol, rows, cwd, mode]);
   if (session && currentModel === want) return session;
 
   if (session) {
@@ -238,17 +263,12 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
 
   currentCwd = cwd || process.cwd();
   // createAgentSession 返回 { session, extensionsResult } 包装，必须解包
-  const runtime = await ModelRuntime.create({
-    authPath: path.join(os.tmpdir(), "deck-agent-auth.json"),
-    refreshOnCreate: true,
-  });
-  await runtime.setRuntimeApiKey(resolved.provider, resolved.apiKey);
   const created = await createAgentSession({
     cwd: currentCwd,
-    model: resolved,
-    modelRuntime: runtime,
+    model: resolved.model,
+    modelRuntime: resolved.runtime,
     // 模型目录：该供应商下配置的全部模型（切换/循环的基础）
-    scopedModels: rows.map((m) => ({ model: buildModelObject(p, m) })),
+    scopedModels: resolved.scoped,
     customTools: buildTools(mode),
     noTools: undefined,
   });
@@ -594,7 +614,8 @@ const SWITCH_MODEL_TOOL = {
     }
     try {
       if (!session) throw new Error("会话未建立");
-      await session.setModel(buildModelObject(p, defaultModelRow(p)));
+      const built = await createRuntimeForProfile(p);
+      await session.setModel(built.model);
       currentModel = p.provider;
       return {
         content: [{ type: "text", text: `已切换到底层模型 ${target}，会话上下文保留` }],
@@ -636,6 +657,13 @@ async function handle(msg) {
             : msg.prompt;
           await s.prompt(promptText);
           firstRun = false;
+          // stopReason=error（如 401 令牌过期）：把上游错误显式上报，而不是静默收尾
+          if (s.messages?.length) {
+            const lastAssistant = [...s.messages].reverse().find((m) => m.role === "assistant");
+            if (lastAssistant?.stopReason === "error" && lastAssistant.errorMessage) {
+              throw new Error(String(lastAssistant.errorMessage).slice(0, 300));
+            }
+          }
           succeeded = true;
           deckEvent("run_end");
           break;
