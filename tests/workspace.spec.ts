@@ -322,13 +322,13 @@ test("model profile add/edit flow sends camelCase keys and persists in the mock"
 
   // 编辑：改备注名 → 保存 → 行标题更新
   await page.getByRole("button", { name: "编辑 custom" }).click();
-  await page.getByPlaceholder(/名称/).fill("中转 · 测试");
+  await page.getByRole("textbox", { name: "供应商名称" }).fill("中转 · 测试");
   await page.getByRole("button", { name: "保存修改" }).click();
   await expect(page.getByText("已保存")).toBeVisible();
   await expect(page.getByText("自定义 · 中转 · 测试")).toBeVisible();
 
-  // 模型目录：手动加一个模型，上下文窗口显示
-  await page.getByRole("button", { name: "模型列表 中转 · 测试" }).click();
+  // 模型目录：重新进入编辑表单，内嵌面板中添加模型
+  await page.getByRole("button", { name: "编辑 中转 · 测试" }).click();
   await page.getByRole("textbox", { name: "新模型名称" }).fill("deepseek-v4-pro");
   await page.getByRole("textbox", { name: "新上下文窗口" }).fill("1M");
   await page.getByRole("textbox", { name: "新最大输出" }).fill("8K");
@@ -350,5 +350,6 @@ test("model profile add/edit flow sends camelCase keys and persists in the mock"
   await expect(page.getByRole("textbox", { name: "模型名称", exact: true }).last()).toHaveValue(
     "deepseek-v4-flash",
   );
-  await expect(page.getByText("模型 1", { exact: false })).toBeVisible();
+  await expect(page.getByText("模型列表（1）")).toBeVisible();
+  await expect(page.getByText("1 个模型")).toBeVisible();
 });

@@ -1,16 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  X,
-  Plus,
-  ArrowLeft,
-  Pencil,
-  ChevronDown,
-  ChevronRight,
-  RefreshCw,
-  Trash2,
-  Coins,
-} from "lucide-react";
+import { X, Plus, ArrowLeft, Pencil, RefreshCw, Trash2, Coins } from "lucide-react";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 
@@ -236,7 +226,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   });
   const [status, setStatus] = useState<string | null>(null);
   // 模型列表管理：展开的供应商 + 其模型目录 + 添加行输入
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [modelLists, setModelLists] = useState<Record<string, ProfileModel[]>>({});
   const [newModelName, setNewModelName] = useState("");
   const [newModelWindow, setNewModelWindow] = useState("");
@@ -310,6 +299,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     });
     setAdding(false);
     setEditingId(p.id);
+    listProfileModels(p.id)
+      .then((rows) => setModelLists((m) => ({ ...m, [p.id]: rows })))
+      .catch(() => {});
   };
 
   const closeForm = () => {
@@ -364,15 +356,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   };
 
   // ── 模型列表管理 ──
-  const toggleModels = (p: ModelProfile) => {
-    if (expandedId === p.id) {
-      setExpandedId(null);
-      return;
-    }
-    setExpandedId(p.id);
-    listProfileModels(p.id).then((rows) => setModelLists((m) => ({ ...m, [p.id]: rows }))).catch(() => {});
-  };
-
   const reloadModels = (profileId: string) => {
     listProfileModels(profileId)
       .then((rows) => {
@@ -453,6 +436,100 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       flash(String(e));
     }
   };
+
+  const editingProfile = editingId ? profiles.find((p) => p.id === editingId) ?? null : null;
+
+  // 模型列表管理面板（编辑表单内嵌；一供多模）
+  const renderModelManager = (p: ModelProfile) => (
+    <div className="rounded-xl border border-stone-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs font-semibold text-stone-500">
+          模型列表（{modelCounts[p.id] ?? 0}）
+        </span>
+        <div className="flex gap-2">
+          <button
+            onClick={() => fetchModelsFromUpstream(p)}
+            disabled={fetchingModels}
+            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+            title="从上游 GET /models 拉取"
+          >
+            <RefreshCw size={12} className={fetchingModels ? "animate-spin" : ""} />
+            从上游获取
+          </button>
+          <button
+            onClick={() => fetchRates(p)}
+            disabled={fetchingRates}
+            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+            title="sub2api 模型广场优先，new-api 价格表兜底"
+          >
+            <Coins size={12} className={fetchingRates ? "animate-pulse" : ""} />
+            获取倍率
+          </button>
+          <button
+            onClick={() => clearModels(p)}
+            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100"
+          >
+            <Trash2 size={12} />
+            清空
+          </button>
+        </div>
+      </div>
+
+      {(modelLists[p.id] ?? []).length === 0 && (
+        <div className="py-2 text-xs text-stone-400">暂无模型——手动添加，或从上游获取</div>
+      )}
+      {(modelLists[p.id] ?? []).map((m) => (
+        <div key={m.id} className="flex items-center gap-2">
+          <ModelRow row={m} onSaved={() => reloadModels(p.id)} onError={flash} />
+          <button
+            onClick={() => {
+              deleteProfileModel(m.id)
+                .then(() => reloadModels(p.id))
+                .catch(() => {});
+            }}
+            className="shrink-0 text-stone-300 transition-colors hover:text-red-500"
+            title="删除模型"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ))}
+
+      <div className="mt-2 flex gap-2">
+        <input
+          value={newModelName}
+          onChange={(e) => setNewModelName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+          aria-label="新模型名称"
+          placeholder="模型名称（如 deepseek-chat）"
+          className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+        />
+        <input
+          value={newModelWindow}
+          onChange={(e) => setNewModelWindow(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+          aria-label="新上下文窗口"
+          placeholder="上下文窗口"
+          className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+        />
+        <input
+          value={newModelMax}
+          onChange={(e) => setNewModelMax(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+          aria-label="新最大输出"
+          placeholder="最大输出"
+          className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+        />
+        <button
+          onClick={() => addModelRow(p)}
+          className="flex shrink-0 items-center gap-1 rounded-lg bg-stone-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
+        >
+          <Plus size={12} />
+          添加
+        </button>
+      </div>
+    </div>
+  );
 
   const navItems: { key: Section; label: string }[] = [
     { key: "general", label: "常规" },
@@ -561,20 +638,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                         }}
                       />
                       <button
-                        onClick={() => toggleModels(p)}
-                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors ${
-                          expandedId === p.id
-                            ? "border-stone-300 bg-stone-100 text-stone-800"
-                            : "border-stone-200 text-stone-500 hover:bg-stone-50"
-                        }`}
-                        title="模型列表（添加 / 从上游获取 / 获取倍率）"
-                        aria-label={`模型列表 ${p.label ?? p.provider}`}
-                        aria-expanded={expandedId === p.id}
-                      >
-                        模型 {modelCounts[p.id] ?? 0}
-                        {expandedId === p.id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                      </button>
-                      <button
                         onClick={() => openEdit(p)}
                         className="text-stone-300 transition-colors hover:text-stone-700"
                         title="编辑"
@@ -594,98 +657,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     </div>
                   </Row>
 
-                  {expandedId === p.id && (
-                    <div className="pb-4">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-xs font-semibold text-stone-500">模型列表</span>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => fetchModelsFromUpstream(p)}
-                            disabled={fetchingModels}
-                            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
-                            title="从上游 GET /models 拉取"
-                          >
-                            <RefreshCw size={12} className={fetchingModels ? "animate-spin" : ""} />
-                            从上游获取
-                          </button>
-                          <button
-                            onClick={() => fetchRates(p)}
-                            disabled={fetchingRates}
-                            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
-                            title="sub2api 模型广场优先，new-api 价格表兜底"
-                          >
-                            <Coins size={12} className={fetchingRates ? "animate-pulse" : ""} />
-                            获取倍率
-                          </button>
-                          <button
-                            onClick={() => clearModels(p)}
-                            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100"
-                          >
-                            <Trash2 size={12} />
-                            清空
-                          </button>
-                        </div>
-                      </div>
-
-                      {(modelLists[p.id] ?? []).length === 0 && (
-                        <div className="py-2 text-xs text-stone-400">
-                          暂无模型——手动添加，或从上游获取
-                        </div>
-                      )}
-                      {(modelLists[p.id] ?? []).map((m) => (
-                        <div key={m.id} className="flex items-center gap-2">
-                          <ModelRow
-                            row={m}
-                            onSaved={() => reloadModels(p.id)}
-                            onError={flash}
-                          />
-                          <button
-                            onClick={() => {
-                              deleteProfileModel(m.id).then(() => reloadModels(p.id)).catch(() => {});
-                            }}
-                            className="shrink-0 text-stone-300 transition-colors hover:text-red-500"
-                            title="删除模型"
-                          >
-                            <X size={13} />
-                          </button>
-                        </div>
-                      ))}
-
-                      <div className="mt-2 flex gap-2">
-                        <input
-                          value={newModelName}
-                          onChange={(e) => setNewModelName(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
-                          aria-label="新模型名称"
-                          placeholder="模型名称（如 deepseek-chat）"
-                          className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
-                        />
-                        <input
-                          value={newModelWindow}
-                          onChange={(e) => setNewModelWindow(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
-                          aria-label="新上下文窗口"
-                          placeholder="上下文窗口"
-                          className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
-                        />
-                        <input
-                          value={newModelMax}
-                          onChange={(e) => setNewModelMax(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
-                          aria-label="新最大输出"
-                          placeholder="最大输出"
-                          className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
-                        />
-                        <button
-                          onClick={() => addModelRow(p)}
-                          className="flex shrink-0 items-center gap-1 rounded-lg bg-stone-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
-                        >
-                          <Plus size={12} />
-                          添加
-                        </button>
-                      </div>
-                    </div>
-                  )}
                   </div>
                 ))}
               </div>
@@ -707,6 +678,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   <input
                     value={form.label}
                     onChange={(e) => setForm({ ...form, label: e.target.value })}
+                    aria-label="供应商名称"
                     placeholder="名称（可选，如「中转 · DeepSeek」）"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
                   />
@@ -748,9 +720,20 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   <input
                     value={form.model}
                     onChange={(e) => setForm({ ...form, model: e.target.value })}
-                    placeholder="模型 ID（如 deepseek-chat，留空用通道默认）"
+                    aria-label="默认模型 ID"
+                    placeholder="默认模型 ID（派任务未指定时用；如 glm-5.3-flash）"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 font-mono text-xs outline-none focus:border-stone-400"
                   />
+
+                  {/* 模型列表：编辑态内嵌管理（一供多模）；新增态先保存再维护 */}
+                  {editingId && editingProfile ? (
+                    renderModelManager(editingProfile)
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-stone-200 px-3 py-2 text-xs text-stone-400">
+                      保存后可在表单里继续维护该供应商的模型列表（多模型 / 从上游获取 / 倍率）
+                    </div>
+                  )}
+
                   <div className="flex gap-2">
                     <button
                       onClick={saveProfile}
