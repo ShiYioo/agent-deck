@@ -331,8 +331,10 @@ test("model profile add/edit flow sends camelCase keys and persists in the mock"
   await page.getByRole("button", { name: "模型列表 中转 · 测试" }).click();
   await page.getByPlaceholder(/模型名称/).fill("deepseek-v4-pro");
   await page.getByPlaceholder("上下文窗口").fill("1M");
+  await page.getByPlaceholder("最大输出").fill("8K");
   await page.getByRole("button", { name: "添加", exact: true }).click();
   await expect(page.getByText("deepseek-v4-pro")).toBeVisible();
   await expect(page.getByText("1M", { exact: true })).toBeVisible();
+  await expect(page.getByText("出 8K", { exact: true })).toBeVisible();
   await expect(page.getByText("模型 1", { exact: false })).toBeVisible();
 });

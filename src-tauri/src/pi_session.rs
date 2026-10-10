@@ -59,6 +59,9 @@ pub struct ProfileModelParam {
     pub id: String,
     #[serde(default)]
     pub context_window: Option<i64>,
+    /// 最大输出 token（空 = 通道默认）
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
 }
 
 /// 每个 task_id 一个发送端：往 sidecar stdin 写指令。

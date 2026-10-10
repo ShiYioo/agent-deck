@@ -148,6 +148,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [modelLists, setModelLists] = useState<Record<string, ProfileModel[]>>({});
   const [newModelName, setNewModelName] = useState("");
   const [newModelWindow, setNewModelWindow] = useState("");
+  const [newModelMax, setNewModelMax] = useState("");
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchingRates, setFetchingRates] = useState(false);
   // 每个档案的模型数量（行上直接可见，也是展开按钮的徽标）
@@ -257,7 +258,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
           const fetched = await fetchUpstreamModels(saved.base_url, saved.api_key).catch(() => [] as string[]);
           const ids = Array.isArray(fetched) ? fetched : [];
           for (const id of ids) {
-            await addProfileModel(saved.id, id, null).catch(() => {});
+            await addProfileModel(saved.id, id, null, null).catch(() => {});
           }
           if (ids.length > 0) {
             reloadModels(saved.id);
@@ -300,10 +301,16 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       flash("上下文窗口格式：1M / 200K / 纯数字 token");
       return;
     }
+    const maxOut = parseContextWindow(newModelMax);
+    if (Number.isNaN(maxOut)) {
+      flash("最大输出格式：8K / 64K / 纯数字 token");
+      return;
+    }
     try {
-      await addProfileModel(p.id, name, win);
+      await addProfileModel(p.id, name, win, maxOut);
       setNewModelName("");
       setNewModelWindow("");
+      setNewModelMax("");
       reloadModels(p.id);
     } catch (e) {
       flash(String(e));
@@ -319,7 +326,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     try {
       const ids = await fetchUpstreamModels(p.base_url, p.api_key);
       await clearProfileModels(p.id);
-      for (const id of ids) await addProfileModel(p.id, id, null);
+      for (const id of ids) await addProfileModel(p.id, id, null, null);
       reloadModels(p.id);
       flash(`已从上游获取 ${ids.length} 个模型`);
     } catch (e) {
@@ -538,8 +545,17 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                           <span className="min-w-0 flex-1 truncate font-mono text-xs text-stone-700">
                             {m.model}
                           </span>
-                          <span className="shrink-0 font-mono text-xs text-stone-400">
+                          <span
+                            className="shrink-0 font-mono text-xs text-stone-400"
+                            title="上下文窗口"
+                          >
                             {formatContextWindow(m.context_window) || "默认"}
+                          </span>
+                          <span
+                            className="shrink-0 font-mono text-xs text-stone-400"
+                            title="最大输出 token"
+                          >
+                            {m.max_tokens ? `出 ${formatContextWindow(m.max_tokens)}` : ""}
                           </span>
                           {m.rate_multiplier != null && (
                             <span
@@ -574,7 +590,14 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => setNewModelWindow(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
                           placeholder="上下文窗口"
-                          className="w-28 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+                          className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
+                        />
+                        <input
+                          value={newModelMax}
+                          onChange={(e) => setNewModelMax(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+                          placeholder="最大输出"
+                          className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
                         />
                         <button
                           onClick={() => addModelRow(p)}

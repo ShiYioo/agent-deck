@@ -27,6 +27,7 @@ fn profile_models_param(store: &Store, profile_id: &str) -> Vec<pi_session::Prof
         .map(|m| pi_session::ProfileModelParam {
             id: m.model,
             context_window: m.context_window,
+            max_tokens: m.max_tokens,
         })
         .collect()
 }
@@ -612,11 +613,12 @@ fn add_profile_model(
     profile_id: String,
     model: String,
     context_window: Option<i64>,
+    max_tokens: Option<i64>,
 ) -> Result<ProfileModelRow, String> {
     if model.trim().is_empty() {
         return Err("模型名称不能为空".into());
     }
-    store.add_profile_model(&profile_id, model.trim(), context_window)
+    store.add_profile_model(&profile_id, model.trim(), context_window, max_tokens)
 }
 
 /// 前端 → Rust：删除模型列表中的一行。
@@ -778,7 +780,7 @@ async fn fetch_upstream_rates(
     for (model, rate) in &upstream.rates {
         let updated = store.set_profile_model_rate(&profile_id, model, *rate)?;
         if !updated {
-            store.add_profile_model(&profile_id, model, None)?;
+            store.add_profile_model(&profile_id, model, None, None)?;
             store.set_profile_model_rate(&profile_id, model, *rate)?;
         }
         applied += 1;

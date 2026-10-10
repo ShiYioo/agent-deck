@@ -95,6 +95,8 @@ export type ProfileModel = {
   profile_id: string;
   model: string;
   context_window: number | null;
+  /** 最大输出 token（null = 通道默认 8192） */
+  max_tokens: number | null;
   /** 计费倍率快照（sub2api 模型广场 / new-api pricing；null = 未知） */
   rate_multiplier: number | null;
   created_at: number;
@@ -152,11 +154,13 @@ export async function addProfileModel(
   profileId: string,
   model: string,
   contextWindow: number | null,
+  maxTokens: number | null,
 ): Promise<ProfileModel> {
   return await invoke<ProfileModel>("add_profile_model", {
     profileId,
     model,
     contextWindow,
+    maxTokens,
   });
 }
 

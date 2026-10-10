@@ -128,16 +128,20 @@ function buildModelObject(p, m) {
     type: "chat",
     reasoning: false,
     contextWindow: m?.contextWindow || 128000,
-    maxTokens: 8192,
+    maxTokens: m?.maxTokens || 8192,
   };
 }
 
 /** 档案 → 模型目录行（无目录时回退到默认模型单行） */
 function profileModelRows(p) {
   const rows = Array.isArray(p.models)
-    ? p.models.filter((m) => m && m.id).map((m) => ({ id: m.id, contextWindow: m.context_window || m.contextWindow }))
+    ? p.models.filter((m) => m && m.id).map((m) => ({
+        id: m.id,
+        contextWindow: m.context_window || m.contextWindow,
+        maxTokens: m.max_tokens || m.maxTokens,
+      }))
     : [];
-  if (rows.length === 0 && p.model) rows.push({ id: p.model, contextWindow: null });
+  if (rows.length === 0 && p.model) rows.push({ id: p.model, contextWindow: null, maxTokens: null });
   return rows;
 }
 

@@ -111,6 +111,7 @@ export async function mockDesktop(page: Page, failSend = true) {
             profile_id: pid,
             model: String(args.model),
             context_window: (args.contextWindow as number | null) ?? null,
+            max_tokens: (args.maxTokens as number | null) ?? null,
             rate_multiplier: null,
             created_at: 0,
           });
