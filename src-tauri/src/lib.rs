@@ -616,6 +616,164 @@ fn clear_profile_models(store: State<'_, Store>, profile_id: String) -> Result<(
     store.clear_profile_models(&profile_id)
 }
 
+/// 上游倍率来源摘要（fetch_upstream_rates 返回）
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct UpstreamRatesSummary {
+    /// sub2api 模型广场 | new-api pricing
+    source: &'static str,
+    /// 命中并落库的模型数（含新增行）
+    applied: usize,
+}
+
+struct UpstreamRates {
+    source: &'static str,
+    rates: Vec<(String, f64)>,
+}
+
+fn upstream_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// sub2api 模型广场：GET {base}/api/v1/model-plaza（匿名可访问，带 token 显示专属倍率）。
+/// 返回 模型名 → 生效倍率（user_rate_multiplier 优先于分组 rate_multiplier）。
+async fn probe_sub2api_plaza(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+) -> Result<UpstreamRates, String> {
+    let url = format!("{base}/api/v1/model-plaza");
+    let mut req = client.get(&url);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("上游返回 {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败：{e}"))?;
+    let groups = v
+        .get("groups")
+        .and_then(|x| x.as_array())
+        .ok_or("响应缺少 groups 字段")?;
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for g in groups {
+        // 生效倍率：用户专属倍率优先，否则分组倍率
+        let effective_rate = g
+            .get("user_rate_multiplier")
+            .and_then(|x| x.as_f64())
+            .or_else(|| g.get("rate_multiplier").and_then(|x| x.as_f64()));
+        let Some(default_rate) = effective_rate else {
+            continue;
+        };
+        if let Some(models) = g.get("models").and_then(|x| x.as_array()) {
+            for m in models {
+                let Some(name) = m.get("name").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                if !name.is_empty() {
+                    out.push((name.trim().to_string(), default_rate));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("模型广场没有返回任何模型".into());
+    }
+    Ok(UpstreamRates {
+        source: "sub2api",
+        rates: out,
+    })
+}
+
+/// new-api / one-api 系价格表兜底：GET {base}/api/pricing。
+async fn probe_newapi_pricing(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+) -> Result<UpstreamRates, String> {
+    let url = format!("{base}/api/pricing");
+    let mut req = client.get(&url);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("上游返回 {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败：{e}"))?;
+    let data = v
+        .get("data")
+        .and_then(|x| x.as_array())
+        .ok_or("响应缺少 data 字段")?;
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for m in data {
+        let Some(name) = m.get("model_name").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        // quota_type 0 = 按倍率计费；1 = 按次（model_price），两者都展示为倍率口径
+        let rate = m
+            .get("model_ratio")
+            .and_then(|x| x.as_f64())
+            .or_else(|| m.get("model_price").and_then(|x| x.as_f64()));
+        if let Some(rate) = rate {
+            out.push((name.trim().to_string(), rate));
+        }
+    }
+    if out.is_empty() {
+        return Err("价格表没有返回任何模型".into());
+    }
+    Ok(UpstreamRates {
+        source: "new-api",
+        rates: out,
+    })
+}
+
+/// 前端 → Rust：获取上游计费倍率并落库（sub2api 模型广场优先，new-api 价格表兜底）。
+/// 目录中没有的模型会作为新行插入（倍率已知、上下文窗口未知）。
+#[tauri::command]
+async fn fetch_upstream_rates(
+    store: State<'_, Store>,
+    profile_id: String,
+    base_url: String,
+    api_key: String,
+) -> Result<UpstreamRatesSummary, String> {
+    let base = base_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("请先填写并保存 Base URL".into());
+    }
+    let client = upstream_http_client()?;
+    let upstream = match probe_sub2api_plaza(&client, &base, api_key.trim()).await {
+        Ok(r) => r,
+        Err(plaza_err) => match probe_newapi_pricing(&client, &base, api_key.trim()).await {
+            Ok(r) => r,
+            Err(_) => return Err(format!("未识别到倍率接口（{plaza_err}）")),
+        },
+    };
+    let mut applied = 0usize;
+    for (model, rate) in &upstream.rates {
+        let updated = store.set_profile_model_rate(&profile_id, model, *rate)?;
+        if !updated {
+            store.add_profile_model(&profile_id, model, None)?;
+            store.set_profile_model_rate(&profile_id, model, *rate)?;
+        }
+        applied += 1;
+    }
+    Ok(UpstreamRatesSummary {
+        source: upstream.source,
+        applied,
+    })
+}
+
 /// 前端 → Rust：从上游拉取模型列表（OpenAI 兼容 GET {base}/models）。
 #[tauri::command]
 async fn fetch_upstream_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
@@ -808,7 +966,8 @@ pub fn run() {
             add_profile_model,
             delete_profile_model,
             clear_profile_models,
-            fetch_upstream_models
+            fetch_upstream_models,
+            fetch_upstream_rates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

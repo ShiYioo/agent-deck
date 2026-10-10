@@ -42,6 +42,8 @@ pub struct ProfileModelRow {
     pub profile_id: String,
     pub model: String,
     pub context_window: Option<i64>,
+    /// 计费倍率（sub2api 模型广场 / new-api pricing 快照；空 = 未知）
+    pub rate_multiplier: Option<f64>,
     pub created_at: i64,
 }
 
@@ -149,6 +151,7 @@ impl Store {
                  profile_id     TEXT NOT NULL,
                  model          TEXT NOT NULL,
                  context_window INTEGER,
+                 rate_multiplier REAL,
                  created_at     INTEGER NOT NULL
              );",
         )
@@ -161,6 +164,10 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN protocol TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE profile_models ADD COLUMN rate_multiplier REAL",
+            [],
+        );
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -553,7 +560,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, profile_id, model, context_window, created_at
+                "SELECT id, profile_id, model, context_window, rate_multiplier, created_at
                  FROM profile_models WHERE profile_id = ?1 ORDER BY created_at ASC",
             )
             .map_err(|e| e.to_string())?;
@@ -564,7 +571,8 @@ impl Store {
                     profile_id: row.get(1)?,
                     model: row.get(2)?,
                     context_window: row.get(3)?,
-                    created_at: row.get(4)?,
+                    rate_multiplier: row.get(4)?,
+                    created_at: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -588,8 +596,8 @@ impl Store {
                 .unwrap_or_default()
         );
         conn.execute(
-            "INSERT INTO profile_models (id, profile_id, model, context_window, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO profile_models (id, profile_id, model, context_window, rate_multiplier, created_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
             params![id, profile_id, model, context_window, Self::now_millis()],
         )
         .map_err(|e| e.to_string())?;
@@ -598,8 +606,27 @@ impl Store {
             profile_id: profile_id.into(),
             model: model.into(),
             context_window,
+            rate_multiplier: None,
             created_at: Self::now_millis(),
         })
+    }
+
+    /// 覆盖某模型行的倍率（获取倍率落库用）；模型行不存在返回 false。
+    pub fn set_profile_model_rate(
+        &self,
+        profile_id: &str,
+        model: &str,
+        rate: f64,
+    ) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let changed = conn
+            .execute(
+                "UPDATE profile_models SET rate_multiplier = ?3
+                 WHERE profile_id = ?1 AND model = ?2",
+                params![profile_id, model, rate],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(changed > 0)
     }
 
     pub fn delete_profile_model(&self, id: &str) -> Result<(), String> {
@@ -827,8 +854,24 @@ mod tests {
         store.clear_profile_models("p1").unwrap();
         assert!(store.list_profile_models("p1").unwrap().is_empty());
 
+        // 倍率：写行 + 按名覆盖 + 未知名返回 false
+        store
+            .add_profile_model("p1", "deepseek-chat", None)
+            .unwrap();
+        assert!(
+            store
+                .set_profile_model_rate("p1", "deepseek-chat", 0.5)
+                .unwrap()
+        );
+        let rows = store.list_profile_models("p1").unwrap();
+        assert_eq!(rows[0].rate_multiplier, Some(0.5));
+        assert!(
+            !store
+                .set_profile_model_rate("p1", "ghost-model", 1.0)
+                .unwrap()
+        );
+
         // 级联：删档案连带清模型列表
-        store.add_profile_model("p1", "m", None).unwrap();
         store.delete_model_profile("p1").unwrap();
         assert!(store.list_profile_models("p1").unwrap().is_empty());
         assert_eq!(m1.profile_id, "p1");

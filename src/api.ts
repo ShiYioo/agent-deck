@@ -95,6 +95,8 @@ export type ProfileModel = {
   profile_id: string;
   model: string;
   context_window: number | null;
+  /** 计费倍率快照（sub2api 模型广场 / new-api pricing；null = 未知） */
+  rate_multiplier: number | null;
   created_at: number;
 };
 
@@ -110,8 +112,8 @@ export async function addModelProfile(params: {
   base_url: string | null;
   model: string | null;
   protocol: string | null;
-}): Promise<void> {
-  await invoke("add_model_profile", params);
+}): Promise<ModelProfile> {
+  return await invoke<ModelProfile>("add_model_profile", params);
 }
 
 export async function updateModelProfile(params: {
@@ -156,6 +158,19 @@ export async function fetchUpstreamModels(
   apiKey: string,
 ): Promise<string[]> {
   return await invoke<string[]>("fetch_upstream_models", { baseUrl, apiKey });
+}
+
+/** 获取上游计费倍率并落库（sub2api 模型广场优先，new-api 价格表兜底） */
+export async function fetchUpstreamRates(
+  profileId: string,
+  baseUrl: string,
+  apiKey: string,
+): Promise<{ source: string; applied: number }> {
+  return await invoke("fetch_upstream_rates", {
+    profileId,
+    baseUrl,
+    apiKey,
+  });
 }
 
 export async function setModelProfileEnabled(

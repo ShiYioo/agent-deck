@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { X, Plus, ArrowLeft, Pencil, ChevronDown, ChevronRight, RefreshCw, Trash2 } from "lucide-react";
+import {
+  X,
+  Plus,
+  ArrowLeft,
+  Pencil,
+  ChevronDown,
+  ChevronRight,
+  RefreshCw,
+  Trash2,
+  Coins,
+} from "lucide-react";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 
@@ -11,6 +21,7 @@ import {
   deleteModelProfile,
   deleteProfileModel,
   fetchUpstreamModels,
+  fetchUpstreamRates,
   getDefaultCwd,
   getSetting,
   listModelProfiles,
@@ -138,6 +149,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [newModelName, setNewModelName] = useState("");
   const [newModelWindow, setNewModelWindow] = useState("");
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchingRates, setFetchingRates] = useState(false);
 
   const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", model: "", protocol: "chat" };
 
@@ -216,15 +228,31 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       protocol: form.protocol,
     };
     try {
+      let saved: ModelProfile | null = null;
       if (editingId) {
-        await updateModelProfile({ id: editingId, ...payload });
+        saved = await updateModelProfile({ id: editingId, ...payload });
         flash("已保存");
       } else {
-        await addModelProfile(payload);
+        saved = await addModelProfile(payload);
         flash("已添加并启用");
       }
       closeForm();
       loadProfiles();
+
+      // 从上游自动获取模型：目录为空且凭据齐全时静默拉取填满（失败不打扰）
+      if (saved?.base_url && saved.api_key) {
+        const existing = await listProfileModels(saved.id).catch(() => [] as ProfileModel[]);
+        if (existing.length === 0) {
+          const ids = await fetchUpstreamModels(saved.base_url, saved.api_key).catch(() => [] as string[]);
+          for (const id of ids) {
+            await addProfileModel(saved.id, id, null).catch(() => {});
+          }
+          if (ids.length > 0) {
+            reloadModels(saved.id);
+            flash(`已自动获取 ${ids.length} 个上游模型`);
+          }
+        }
+      }
     } catch (e) {
       flash(String(e));
     }
@@ -281,6 +309,23 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       flash(String(e));
     } finally {
       setFetchingModels(false);
+    }
+  };
+
+  const fetchRates = async (p: ModelProfile) => {
+    if (!p.base_url) {
+      flash("先填写并保存 Base URL 再获取倍率");
+      return;
+    }
+    setFetchingRates(true);
+    try {
+      const r = await fetchUpstreamRates(p.id, p.base_url, p.api_key);
+      reloadModels(p.id);
+      flash(`已从 ${r.source} 获取 ${r.applied} 个模型的倍率`);
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setFetchingRates(false);
     }
   };
 
@@ -443,6 +488,15 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                             从上游获取
                           </button>
                           <button
+                            onClick={() => fetchRates(p)}
+                            disabled={fetchingRates}
+                            className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+                            title="sub2api 模型广场优先，new-api 价格表兜底"
+                          >
+                            <Coins size={12} className={fetchingRates ? "animate-pulse" : ""} />
+                            获取倍率
+                          </button>
+                          <button
                             onClick={() => clearModels(p)}
                             className="flex items-center gap-1 rounded-lg border border-stone-200 px-2 py-1 text-xs text-stone-600 hover:bg-stone-100"
                           >
@@ -465,6 +519,14 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                           <span className="shrink-0 font-mono text-xs text-stone-400">
                             {formatContextWindow(m.context_window) || "默认"}
                           </span>
+                          {m.rate_multiplier != null && (
+                            <span
+                              className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 font-mono text-xs text-stone-600"
+                              title="上游计费倍率"
+                            >
+                              {m.rate_multiplier}x
+                            </span>
+                          )}
                           <button
                             onClick={() => {
                               deleteProfileModel(m.id).then(() => reloadModels(p.id)).catch(() => {});
