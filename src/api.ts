@@ -113,7 +113,15 @@ export async function addModelProfile(params: {
   model: string | null;
   protocol: string | null;
 }): Promise<ModelProfile> {
-  return await invoke<ModelProfile>("add_model_profile", params);
+  // Tauri 2 命令参数默认收 camelCase（Rust 侧 snake_case 自动转换）
+  return await invoke<ModelProfile>("add_model_profile", {
+    provider: params.provider,
+    label: params.label,
+    apiKey: params.api_key,
+    baseUrl: params.base_url,
+    model: params.model,
+    protocol: params.protocol,
+  });
 }
 
 export async function updateModelProfile(params: {
@@ -125,7 +133,15 @@ export async function updateModelProfile(params: {
   model: string | null;
   protocol: string | null;
 }): Promise<ModelProfile> {
-  return await invoke<ModelProfile>("update_model_profile", params);
+  return await invoke<ModelProfile>("update_model_profile", {
+    id: params.id,
+    provider: params.provider,
+    label: params.label,
+    apiKey: params.api_key,
+    baseUrl: params.base_url,
+    model: params.model,
+    protocol: params.protocol,
+  });
 }
 
 export async function listProfileModels(profileId: string): Promise<ProfileModel[]> {

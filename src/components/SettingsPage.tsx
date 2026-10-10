@@ -243,7 +243,8 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       if (saved?.base_url && saved.api_key) {
         const existing = await listProfileModels(saved.id).catch(() => [] as ProfileModel[]);
         if (existing.length === 0) {
-          const ids = await fetchUpstreamModels(saved.base_url, saved.api_key).catch(() => [] as string[]);
+          const fetched = await fetchUpstreamModels(saved.base_url, saved.api_key).catch(() => [] as string[]);
+          const ids = Array.isArray(fetched) ? fetched : [];
           for (const id of ids) {
             await addProfileModel(saved.id, id, null).catch(() => {});
           }
