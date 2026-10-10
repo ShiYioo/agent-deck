@@ -21,6 +21,7 @@ import {
   createAgentSession,
   createCodingTools,
   ModelRuntime,
+  SessionManager,
   createReadTool as m_createReadTool,
   createWriteTool as m_createWriteTool,
   createEditTool as m_createEditTool,
@@ -245,13 +246,13 @@ function buildTools(mode) {
   return mode === "approved" ? tools.map(wrapWithGate) : tools;
 }
 
-async function ensureSessionForProfile(p, { cwd, mode }) {
+async function ensureSessionForProfile(p, { cwd, mode, resumeFile } = {}) {
   const rows = profileModelRows(p);
   const resolved = await createRuntimeForProfile(p);
   if (!p.key) {
     throw new Error(`配置 ${p.provider} 缺少 API Key`);
   }
-  const want = JSON.stringify([p.id, p.key, p.baseUrl, p.protocol, rows, cwd, mode]);
+  const want = JSON.stringify([p.id, p.key, p.baseUrl, p.protocol, rows, cwd, mode, resumeFile ?? null]);
   if (session && currentModel === want) return session;
 
   if (session) {
@@ -262,6 +263,15 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
   }
 
   currentCwd = cwd || process.cwd();
+  // 续接：任务上次会话文件存在则打开（完整上下文继续），否则新会话
+  let sessionManager;
+  if (resumeFile && fs.existsSync(resumeFile)) {
+    try {
+      sessionManager = SessionManager.open(resumeFile, undefined, currentCwd);
+    } catch {
+      sessionManager = undefined;
+    }
+  }
   // createAgentSession 返回 { session, extensionsResult } 包装，必须解包
   const created = await createAgentSession({
     cwd: currentCwd,
@@ -269,6 +279,7 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
     modelRuntime: resolved.runtime,
     // 模型目录：该供应商下配置的全部模型（切换/循环的基础）
     scopedModels: resolved.scoped,
+    sessionManager,
     customTools: buildTools(mode),
     noTools: undefined,
   });
@@ -279,10 +290,12 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
     );
   }
   currentModel = want;
-  // 上报会话 ID（持久化到任务记录，支撑续接语义）
+  // 上报会话 ID 与恢复句柄（持久化到任务记录，支撑续接语义）
   try {
     const sid = session.sessionId ?? session.id;
     if (sid) emit({ type: "deck_session_id", id: String(sid) });
+    const sf = session.sessionFile;
+    if (sf) emit({ type: "deck_session_file", path: String(sf) });
   } catch {}
   // 上下文治理（pi 内置，显式开启）：auto-compaction 压缩增长的历史，
   // auto-retry 对过载/限流做指数退避（上下文溢出走 compaction 不重试）
@@ -649,7 +662,9 @@ async function handle(msg) {
           const s = await ensureSessionForProfile(p, {
             cwd: msg.cwd,
             mode: msg.mode === "approved" ? "approved" : "auto",
+            resumeFile: i === 0 ? msg.resumeSessionFile : undefined,
           });
+          if (i === 0 && msg.resumeSessionFile) firstRun = false; // 续接：纪律已在历史里
           deckEvent("run_start", { model: p.provider });
           // 通用级运行规范：仅会话首轮注入（纪律只说一次）
           const promptText = firstRun

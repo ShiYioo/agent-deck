@@ -30,6 +30,9 @@ pub struct PiRunParams {
     /// 项目记忆（同 cwd 历史要点，注入运行规范）
     #[serde(default)]
     pub memories: Vec<String>,
+    /// 续接句柄：上次 pi 会话文件路径（deck 任务续接语义）
+    #[serde(default)]
+    pub resume_session_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +134,7 @@ pub async fn run_pi_task(
         "model": params.model,
         "cwd": params.cwd,
         "profiles": params.profiles,
+        "resumeSessionFile": params.resume_session_file,
         "memories": params.memories,
         "mode": params.mode,
     });
@@ -194,6 +198,16 @@ pub async fn run_pi_task(
                         .unwrap_or("")
                         .to_string();
 
+                    // 会话文件路径入库（deck 续接句柄；deck_session_id 仅展示用）
+                    if event_type == "deck_session_file" {
+                        if let Some(path) = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("path"))
+                            .and_then(|i| i.as_str())
+                        {
+                            let _ = store2.set_session_id(&task_id2, path);
+                        }
+                    }
                     // 会话 ID 入库（支撑续接语义与归属展示）
                     if event_type == "deck_session_id" {
                         if let Some(id) = parsed
