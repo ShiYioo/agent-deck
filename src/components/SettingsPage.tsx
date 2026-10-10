@@ -650,8 +650,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     <div className="mb-1 text-xs font-medium text-stone-500">上游协议</div>
                     <div className="flex gap-2">
                       {[
-                        { key: "chat", label: "Chat Completions" },
+                        { key: "chat", label: "Chat API" },
                         { key: "responses", label: "Responses API" },
+                        { key: "anthropic", label: "Anthropic Messages" },
                       ].map((opt) => (
                         <button
                           key={opt.key}

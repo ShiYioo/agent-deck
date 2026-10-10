@@ -122,9 +122,17 @@ function buildModelObject(p, m) {
       (glm ? "https://api.z.ai/api/coding/paas/v4" : "https://api.openai.com/v1"),
   };
   if (glm) return base;
+  // 上游协议：Chat API / Responses API / Anthropic Messages（pi-ai 原生支持）
+  const api =
+    p.protocol === "responses"
+      ? "openai-responses"
+      : p.protocol === "anthropic"
+        ? "anthropic-messages"
+        : "openai-completions";
   return {
     ...base,
-    api: p.protocol === "responses" ? "openai-responses" : "openai-completions",
+    provider: p.protocol === "anthropic" ? "anthropic" : base.provider,
+    api,
     type: "chat",
     reasoning: false,
     contextWindow: m?.contextWindow || 128000,
