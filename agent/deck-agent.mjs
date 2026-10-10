@@ -20,6 +20,7 @@
 import {
   createAgentSession,
   createCodingTools,
+  ModelRuntime,
   createReadTool as m_createReadTool,
   createWriteTool as m_createWriteTool,
   createEditTool as m_createEditTool,
@@ -29,6 +30,8 @@ import {
   createLsTool as m_createLsTool,
 } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import path from "node:path";
+import os from "node:os";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
@@ -99,6 +102,30 @@ function emit(event) {
 
 function deckEvent(type, extra = {}) {
   emit({ type: `deck_${type}`, ...extra });
+}
+
+// 进程级兜底：未捕获异常/拒绝 → 作为 deck_error 上报（进程保活让 Rust 把事件送达前端），
+// 避免"任务永远转圈"或只有一行崩溃日志
+process.on("uncaughtException", (err) => {
+  try {
+    deckEvent("error", { message: `运行时异常：${err?.message ?? err}` });
+  } catch {}
+});
+process.on("unhandledRejection", (reason) => {
+  try {
+    deckEvent("error", { message: `运行时异常：${reason?.message ?? reason}` });
+  } catch {}
+});
+
+// Windows 盘根坑：lstat/realpath 裸盘符（如 "C:"）会 EISDIR——pi 目录遍历走到盘根时触发。
+// 统一改写成带反斜杠的形式。
+import fs from "node:fs";
+for (const target of [fs, fs.promises]) {
+  const orig = target.lstat;
+  target.lstat = function (path, ...rest) {
+    if (typeof path === "string" && /^[a-zA-Z]:$/.test(path)) path = path + "\\";
+    return orig.call(this, path, ...rest);
+  };
 }
 
 /**
@@ -210,14 +237,27 @@ async function ensureSessionForProfile(p, { cwd, mode }) {
   }
 
   currentCwd = cwd || process.cwd();
-  session = await createAgentSession({
+  // createAgentSession 返回 { session, extensionsResult } 包装，必须解包
+  const runtime = await ModelRuntime.create({
+    authPath: path.join(os.tmpdir(), "deck-agent-auth.json"),
+    refreshOnCreate: true,
+  });
+  await runtime.setRuntimeApiKey(resolved.provider, resolved.apiKey);
+  const created = await createAgentSession({
     cwd: currentCwd,
     model: resolved,
+    modelRuntime: runtime,
     // 模型目录：该供应商下配置的全部模型（切换/循环的基础）
     scopedModels: rows.map((m) => ({ model: buildModelObject(p, m) })),
     customTools: buildTools(mode),
     noTools: undefined,
   });
+  session = created?.session;
+  if (!session || typeof session.subscribe !== "function") {
+    throw new Error(
+      `会话创建失败：返回了非会话对象（${created?.error ?? created?.message ?? typeof created}）`,
+    );
+  }
   currentModel = want;
   // 上报会话 ID（持久化到任务记录，支撑续接语义）
   try {
