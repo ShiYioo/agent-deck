@@ -102,10 +102,17 @@ function Toggle({
 /** 模型目录行：内联编辑，失焦/回车自动保存（倍率来自上游，只读展示） */
 function ModelRow({
   row,
+  isDefault,
+  onMakeDefault,
+  onRenamed,
   onSaved,
   onError,
 }: {
   row: ProfileModel;
+  isDefault: boolean;
+  onMakeDefault: (name: string) => void;
+  /** 重命名了默认模型行时同步父级选择 */
+  onRenamed: (oldName: string, newName: string) => void;
   onSaved: () => void;
   onError: (msg: string) => void;
 }) {
@@ -131,6 +138,7 @@ function ModelRow({
     setSaving(true);
     try {
       await updateProfileModel(row.id, trimmed, ctx, out);
+      if (isDefault && trimmed !== row.model) onRenamed(row.model, trimmed);
       onSaved();
     } catch (e) {
       onError(String(e));
@@ -143,6 +151,19 @@ function ModelRow({
     "min-w-0 rounded-lg border border-transparent px-1.5 py-1 font-mono text-xs outline-none transition-colors hover:border-stone-200 focus:border-stone-400 focus:bg-white";
   return (
     <div className="flex items-center gap-2 py-1">
+      <button
+        role="radio"
+        aria-checked={isDefault}
+        aria-label={`设为默认 ${row.model}`}
+        title={isDefault ? "默认模型" : "设为默认模型"}
+        onClick={() => onMakeDefault(row.model)}
+        className={`shrink-0 rounded-full border transition-colors ${
+          isDefault
+            ? "border-stone-800 bg-stone-900"
+            : "border-stone-300 bg-white hover:border-stone-500"
+        }`}
+        style={{ width: 14, height: 14 }}
+      />
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
@@ -221,9 +242,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     label: "",
     api_key: "",
     base_url: "",
-    model: "",
     protocol: "chat",
   });
+  // 默认模型：在模型列表里用单选钮指定（不再单独输入）
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   // 模型列表管理：展开的供应商 + 其模型目录 + 添加行输入
   const [modelLists, setModelLists] = useState<Record<string, ProfileModel[]>>({});
@@ -235,7 +257,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   // 每个档案的模型数量（行上直接可见，也是展开按钮的徽标）
   const [modelCounts, setModelCounts] = useState<Record<string, number>>({});
 
-  const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", model: "", protocol: "chat" };
+  const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", protocol: "chat" };
 
   const loadProfiles = useCallback(() => {
     listModelProfiles()
@@ -284,6 +306,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
   const openAdd = () => {
     setForm(emptyForm);
+    setDefaultModel(null);
     setEditingId(null);
     setAdding(true);
   };
@@ -294,9 +317,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       label: p.label ?? "",
       api_key: p.api_key,
       base_url: p.base_url ?? "",
-      model: p.model ?? "",
       protocol: p.protocol ?? "chat",
     });
+    setDefaultModel(p.model ?? null);
     setAdding(false);
     setEditingId(p.id);
     listProfileModels(p.id)
@@ -308,6 +331,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     setAdding(false);
     setEditingId(null);
     setForm(emptyForm);
+    setDefaultModel(null);
   };
 
   const saveProfile = async () => {
@@ -320,7 +344,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       label: form.label.trim() || null,
       api_key: form.api_key.trim(),
       base_url: form.base_url.trim() || null,
-      model: form.model.trim() || null,
+      model: defaultModel,
       protocol: form.protocol,
     };
     try {
@@ -443,8 +467,8 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const renderModelManager = (p: ModelProfile) => (
     <div className="rounded-xl border border-stone-200 bg-white p-3">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold text-stone-500">
-          模型列表（{modelCounts[p.id] ?? 0}）
+        <span className="text-xs font-semibold text-stone-500" title="行首圆点选中 = 默认模型（派任务未指定时使用）">
+          模型列表（{modelCounts[p.id] ?? 0}）· 圆点选默认
         </span>
         <div className="flex gap-2">
           <button
@@ -480,7 +504,14 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       )}
       {(modelLists[p.id] ?? []).map((m) => (
         <div key={m.id} className="flex items-center gap-2">
-          <ModelRow row={m} onSaved={() => reloadModels(p.id)} onError={flash} />
+          <ModelRow
+            row={m}
+            isDefault={defaultModel === m.model}
+            onMakeDefault={setDefaultModel}
+            onRenamed={(o, n) => setDefaultModel((cur) => (cur === o ? n : cur))}
+            onSaved={() => reloadModels(p.id)}
+            onError={flash}
+          />
           <button
             onClick={() => {
               deleteProfileModel(m.id)
@@ -717,15 +748,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                       ))}
                     </div>
                   </div>
-                  <input
-                    value={form.model}
-                    onChange={(e) => setForm({ ...form, model: e.target.value })}
-                    aria-label="默认模型 ID"
-                    placeholder="默认模型 ID（派任务未指定时用；如 glm-5.3-flash）"
-                    className="w-full rounded-lg border border-stone-200 px-3 py-2 font-mono text-xs outline-none focus:border-stone-400"
-                  />
-
-                  {/* 模型列表：编辑态内嵌管理（一供多模）；新增态先保存再维护 */}
+                  {/* 模型列表：编辑态内嵌管理（一供多模）；行首单选钮指定默认模型 */}
                   {editingId && editingProfile ? (
                     renderModelManager(editingProfile)
                   ) : (

@@ -310,11 +310,10 @@ test("model profile add/edit flow sends camelCase keys and persists in the mock"
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("button", { name: "模型池" }).click();
 
-  // 新增：API Key/Base URL/模型 ID → 保存 → 列表出现该档案
+  // 新增：Base URL/Key → 保存（默认模型在模型列表里用圆点选）→ 列表出现该档案
   await page.getByRole("button", { name: "添加模型配置" }).click();
   await page.getByPlaceholder(/Base URL/).fill("https://api.test/v1");
   await page.getByPlaceholder("API Key").fill("sk-test-1234");
-  await page.getByPlaceholder(/模型 ID/).fill("deepseek-chat");
   await page.getByRole("button", { name: "添加并启用" }).click();
   await expect(page.getByText("已添加并启用")).toBeVisible();
   await expect(page.getByText("自定义", { exact: true })).toBeVisible();
@@ -350,6 +349,15 @@ test("model profile add/edit flow sends camelCase keys and persists in the mock"
   await expect(page.getByRole("textbox", { name: "模型名称", exact: true }).last()).toHaveValue(
     "deepseek-v4-flash",
   );
+
+  // 圆点选默认 → 保存 → 重开表单，选中态持久
+  await page.getByRole("radio", { name: "设为默认 deepseek-v4-flash" }).click();
+  await page.getByRole("button", { name: "保存修改" }).click();
+  await expect(page.getByText("已保存")).toBeVisible();
+  await page.getByRole("button", { name: "编辑 中转 · 测试" }).click();
+  await expect(
+    page.getByRole("radio", { name: "设为默认 deepseek-v4-flash" }),
+  ).toHaveAttribute("aria-checked", "true");
   await expect(page.getByText("模型列表（1）")).toBeVisible();
   await expect(page.getByText("1 个模型")).toBeVisible();
 });
