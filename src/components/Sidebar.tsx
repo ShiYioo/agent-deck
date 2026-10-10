@@ -1,5 +1,5 @@
 import { memo, useMemo, useRef, useState } from "react";
-import { ChevronDown, Folder, FolderPlus, Search, Settings, SquarePen, PanelLeftClose, X, CircleAlert, LoaderCircle } from "lucide-react";
+import { ChevronDown, Folder, FolderPlus, Search, Settings, SquarePen, PanelLeftClose, X, CircleAlert, LoaderCircle, Trash2 } from "lucide-react";
 import type { ProjectRow, TaskRow } from "../types";
 import { AnimatePresence } from "motion/react";
 import { MotionLayer, useMotionPolicy } from "../motion/MotionProvider";
@@ -24,12 +24,13 @@ export function directoryKey(dir: string): string {
 }
 
 export const Sidebar = memo(function Sidebar({
-  tasks, projects, selectedId, onSelect, onNew, onSettings, onCreateProject, onCollapse,
+  tasks, projects, selectedId, onSelect, onDelete, onNew, onSettings, onCreateProject, onCollapse,
 }: {
   tasks: TaskRow[];
   projects: ProjectRow[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
   onNew: (project?: ProjectRow) => void;
   onSettings: () => void;
   onCreateProject: () => void;
@@ -98,12 +99,22 @@ export const Sidebar = memo(function Sidebar({
               initial={enabled && g.rows.length <= 40 ? { height: 0, opacity: 0 } : false} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
               transition={{ duration: enabled && g.rows.length <= 40 ? 0.14 : 0 }}>
             {g.rows.map((task) => (
-              <button key={task.id} className={`thread-item ${selectedId === task.id ? "is-active" : ""}`} aria-current={selectedId === task.id ? "page" : undefined}
-                title={task.prompt} onClick={() => onSelect(task.id)}>
-                <span className="thread-title">{task.prompt}</span>
-                {task.status === "running" && <LoaderCircle size={13} className="animate-spin shrink-0" aria-label="运行中" />}
-                {task.status === "failed" && <CircleAlert size={13} className="shrink-0 text-red-600" aria-label="失败" />}
-              </button>
+              <div key={task.id} className="thread-row">
+                <button className={`thread-item ${selectedId === task.id ? "is-active" : ""}`} aria-current={selectedId === task.id ? "page" : undefined}
+                  title={task.prompt} onClick={() => onSelect(task.id)}>
+                  <span className="thread-title">{task.prompt}</span>
+                  {task.status === "running" && <LoaderCircle size={13} className="animate-spin shrink-0" aria-label="运行中" />}
+                  {task.status === "failed" && <CircleAlert size={13} className="shrink-0 text-red-600" aria-label="失败" />}
+                </button>
+                <button
+                  className="thread-delete"
+                  title="删除会话"
+                  aria-label={`删除会话 ${task.prompt}`}
+                  onClick={(e) => { e.stopPropagation(); onDelete(task.id); }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
             ))}
             </MotionLayer>}
             </AnimatePresence>

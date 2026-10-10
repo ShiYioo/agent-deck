@@ -27,6 +27,11 @@ export async function startTask(params: {
   return task_id;
 }
 
+export async function deleteTask(taskId: string): Promise<void> {
+  if (!inTauri) browserStub("删除会话");
+  await invoke("delete_task", { taskId });
+}
+
 export async function cancelTask(taskId: string): Promise<void> {
   if (!inTauri) browserStub("终止任务");
   // deck 任务走 pi 会话的协作式中断；CLI 任务走进程组强杀

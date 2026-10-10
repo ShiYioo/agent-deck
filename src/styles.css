@@ -211,7 +211,12 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
 .project-toggle svg { flex-shrink: 0; color: #818181; }
 .project-new { opacity: 0; }
 .project-heading:hover .project-new, .project-heading:focus-within .project-new { opacity: 1; }
-.thread-item { display: flex; align-items: center; gap: 8px; width: 100%; height: 33px; padding: 0 10px 0 29px; border-radius: 6px; font-size: 12px; color: #666; text-align: left; }
+.thread-row { position: relative; display: flex; align-items: center; }
+.thread-row .thread-item { flex: 1; min-width: 0; }
+.thread-delete { position: absolute; right: 6px; display: none; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 5px; color: #8c8c8c; }
+.thread-row:hover .thread-delete { display: flex; }
+.thread-delete:hover { background: rgba(0, 0, 0, 0.08); color: #dc2626; }
+.thread-item { display: flex; align-items: center; gap: 8px; width: 100%; height: 33px; padding: 0 26px 0 29px; border-radius: 6px; font-size: 12px; color: #666; text-align: left; }
 .thread-title { flex: 1; }
 .thread-item:hover { background: #ebebeb; }
 .thread-item.is-active { background: #e5e5e5; color: #222; }

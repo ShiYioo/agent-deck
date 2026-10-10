@@ -11,6 +11,7 @@ import {
 import {
   buildSmartHandoffPrompt,
   cancelTask,
+  deleteTask,
   discardTaskWorktree,
   listProjects as listProjectsApi,
   mergeTaskWorktree,
@@ -513,6 +514,21 @@ export default function App() {
     };
   }, [diffTaskId, selectedRunning]);
 
+  const handleDeleteTask = useCallback(
+    (id: string) => {
+      deleteTask(id).catch((e) => setActionError(String(e)));
+      setHistory((prev) => prev.filter((t) => t.id !== id));
+      setHistoryEvents((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setSelected((cur) => (cur === id ? null : cur));
+    },
+    [],
+  );
+
 
   // Esc 终止运行中的任务（Codex 桌面端习惯；输入框/弹层聚焦时除外）
   useEffect(() => {
@@ -599,6 +615,7 @@ export default function App() {
           animate={{ width: "auto", opacity: 1, x: 0 }}
           exit={{ width: 0, opacity: motionEnabled ? 0 : 1, x: motionEnabled ? -12 : 0 }}>
           <Sidebar tasks={history} projects={projects} selectedId={selected} onSelect={handleSelect}
+            onDelete={handleDeleteTask}
             onNew={newChat} onSettings={openSettings} onCreateProject={openCreateProject}
             onCollapse={closeSidebar} />
         </MotionLayer>}

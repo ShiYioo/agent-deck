@@ -373,6 +373,29 @@ fn get_task_diff(store: State<'_, Store>, task_id: String) -> Result<String, Str
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// 前端 → Rust：删除会话（运行中先终止；事件与任务记录一并清除）。
+#[tauri::command]
+fn delete_task(
+    app: AppHandle,
+    registry: State<'_, TaskRegistry>,
+    pi_registry: State<'_, pi_session::PiRegistry>,
+    store: State<'_, Store>,
+    task_id: String,
+) -> Result<(), String> {
+    let row = store
+        .get_task(&task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    if row.status == "running" {
+        let _ = cancel_task(registry, task_id.clone());
+        if row.harness == "deck" {
+            let _ = pi_command(pi_registry, task_id.clone(), "abort".into(), None);
+        }
+    }
+    store.delete_task(&task_id)?;
+    let _ = app.emit("task-deleted", &task_id);
+    Ok(())
+}
+
 /// 前端 → Rust：唤起 harness 的登录流程（弹独立控制台跑 `* login`，
 /// 浏览器 OAuth 完成后控制台自动结束，凭据写入各家的共享配置）。
 #[tauri::command]
@@ -1022,6 +1045,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_task,
             cancel_task,
+            delete_task,
             list_tasks,
             get_task_events,
             get_task_diff,

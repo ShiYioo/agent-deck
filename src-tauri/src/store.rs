@@ -421,6 +421,20 @@ impl Store {
         Ok(rows)
     }
 
+    /// 删除任务及其全部事件（会话记录一并清除，不可恢复）。
+    pub fn delete_task(&self, id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute("DELETE FROM task_events WHERE task_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute("DELETE FROM tasks WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("任务不存在：{id}"));
+        }
+        Ok(())
+    }
+
     pub fn delete_project(&self, id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute(
@@ -909,6 +923,24 @@ mod tests {
         store.delete_model_profile("p1").unwrap();
         assert!(store.list_profile_models("p1").unwrap().is_empty());
         assert_eq!(m1.profile_id, "p1");
+    }
+
+    #[test]
+    fn delete_task_removes_row_and_events() {
+        let store = Store::in_memory().unwrap();
+        store
+            .create_task("t9", "deck", ".", "你好", None, None, None)
+            .unwrap();
+        store
+            .append_event("t9", r#"{"type":"user_message","text":"你好"}"#)
+            .unwrap();
+        assert!(store.get_task("t9").unwrap().is_some());
+        assert_eq!(store.get_event_count("t9").unwrap(), 1);
+
+        store.delete_task("t9").unwrap();
+        assert!(store.get_task("t9").unwrap().is_none());
+        assert_eq!(store.get_event_count("t9").unwrap(), 0);
+        assert!(store.delete_task("t9").is_err());
     }
 
     #[test]
