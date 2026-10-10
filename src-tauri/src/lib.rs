@@ -301,6 +301,25 @@ fn get_task_diff(store: State<'_, Store>, task_id: String) -> Result<String, Str
         .get_task(&task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
 
+    if !std::path::Path::new(&row.cwd).is_dir() {
+        return Err(format!("任务目录不存在：{}", row.cwd));
+    }
+
+    // 非 git 目录：明确返回空 diff（不是错误），前端显示为"无改动"
+    let inside = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(&row.cwd)
+        .stdin(Stdio::null())
+        .output();
+    match inside {
+        Ok(out)
+            if out.status.success()
+                && out.stdout
+                    == b"true
+" => {}
+        _ => return Ok(String::new()),
+    }
+
     // worktree 任务：diff 对 base_branch（纯任务改动）；普通任务：对 HEAD
     let diff_args: Vec<&str> = match row.base_branch.as_deref() {
         Some(b) => vec!["--no-pager", "diff", "--no-color", "--unified=3", b],
@@ -314,11 +333,10 @@ fn get_task_diff(store: State<'_, Store>, task_id: String) -> Result<String, Str
         .map_err(|e| format!("无法执行 git：{e}"))?;
 
     if !output.status.success() {
+        // 只留一行关键信息，不把 git 的 usage 全文倒进 UI
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "git diff 失败（目录可能不是 git 仓库）：{}",
-            stderr.trim()
-        ));
+        let first_line = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("git diff 失败：{first_line}"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
