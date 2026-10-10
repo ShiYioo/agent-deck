@@ -27,6 +27,7 @@ import {
   listModelProfiles,
   listProfileModels,
   setModelProfileEnabled,
+  updateProfileModel,
   setSetting,
   updateModelProfile,
 } from "../api";
@@ -105,6 +106,97 @@ function Toggle({
         }`}
       />
     </button>
+  );
+}
+
+/** 模型目录行：内联编辑，失焦/回车自动保存（倍率来自上游，只读展示） */
+function ModelRow({
+  row,
+  onSaved,
+  onError,
+}: {
+  row: ProfileModel;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [name, setName] = useState(row.model);
+  const [win, setWin] = useState(formatContextWindow(row.context_window));
+  const [max, setMax] = useState(formatContextWindow(row.max_tokens));
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === row.model) {
+      if (!trimmed) setName(row.model);
+    }
+    const ctx = parseContextWindow(win);
+    const out = parseContextWindow(max);
+    if (Number.isNaN(ctx) || Number.isNaN(out)) {
+      onError("窗口格式：1M / 200K / 纯数字 token");
+      return;
+    }
+    const unchanged =
+      trimmed === row.model && ctx === row.context_window && out === row.max_tokens;
+    if (!trimmed || unchanged) return;
+    setSaving(true);
+    try {
+      await updateProfileModel(row.id, trimmed, ctx, out);
+      onSaved();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputCls =
+    "min-w-0 rounded-lg border border-transparent px-1.5 py-1 font-mono text-xs outline-none transition-colors hover:border-stone-200 focus:border-stone-400 focus:bg-white";
+  return (
+    <div className="flex items-center gap-2 py-1">
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        aria-label="模型名称"
+        className={`min-w-0 flex-1 font-mono text-xs text-stone-700 ${inputCls}`}
+      />
+      <input
+        value={win}
+        onChange={(e) => setWin(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        aria-label="上下文窗口"
+        placeholder="默认"
+        title="上下文窗口（1M / 200K / 纯数字 token）"
+        className={`w-20 shrink-0 text-center font-mono text-xs text-stone-500 ${inputCls}`}
+      />
+      <input
+        value={max}
+        onChange={(e) => setMax(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        aria-label="最大输出 token"
+        placeholder="出 8K"
+        title="最大输出 token（8K / 64K / 纯数字）"
+        className={`w-20 shrink-0 text-center font-mono text-xs text-stone-500 ${inputCls} ${max ? "" : "opacity-0 focus:opacity-100"}`}
+      />
+      {row.rate_multiplier != null && (
+        <span
+          className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 font-mono text-xs text-stone-600"
+          title="上游计费倍率"
+        >
+          {row.rate_multiplier}x
+        </span>
+      )}
+      {saving && <span className="shrink-0 text-xs text-stone-300">…</span>}
+    </div>
   );
 }
 
@@ -541,30 +633,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                         </div>
                       )}
                       {(modelLists[p.id] ?? []).map((m) => (
-                        <div key={m.id} className="flex items-center gap-2 py-1">
-                          <span className="min-w-0 flex-1 truncate font-mono text-xs text-stone-700">
-                            {m.model}
-                          </span>
-                          <span
-                            className="shrink-0 font-mono text-xs text-stone-400"
-                            title="上下文窗口"
-                          >
-                            {formatContextWindow(m.context_window) || "默认"}
-                          </span>
-                          <span
-                            className="shrink-0 font-mono text-xs text-stone-400"
-                            title="最大输出 token"
-                          >
-                            {m.max_tokens ? `出 ${formatContextWindow(m.max_tokens)}` : ""}
-                          </span>
-                          {m.rate_multiplier != null && (
-                            <span
-                              className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 font-mono text-xs text-stone-600"
-                              title="上游计费倍率"
-                            >
-                              {m.rate_multiplier}x
-                            </span>
-                          )}
+                        <div key={m.id} className="flex items-center gap-2">
+                          <ModelRow
+                            row={m}
+                            onSaved={() => reloadModels(p.id)}
+                            onError={flash}
+                          />
                           <button
                             onClick={() => {
                               deleteProfileModel(m.id).then(() => reloadModels(p.id)).catch(() => {});
@@ -582,6 +656,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                           value={newModelName}
                           onChange={(e) => setNewModelName(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+                          aria-label="新模型名称"
                           placeholder="模型名称（如 deepseek-chat）"
                           className="min-w-0 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
                         />
@@ -589,6 +664,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                           value={newModelWindow}
                           onChange={(e) => setNewModelWindow(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+                          aria-label="新上下文窗口"
                           placeholder="上下文窗口"
                           className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
                         />
@@ -596,6 +672,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                           value={newModelMax}
                           onChange={(e) => setNewModelMax(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && addModelRow(p)}
+                          aria-label="新最大输出"
                           placeholder="最大输出"
                           className="w-24 shrink-0 rounded-lg border border-stone-200 px-2 py-1.5 font-mono text-xs outline-none focus:border-stone-400"
                         />

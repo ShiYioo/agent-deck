@@ -21,6 +21,7 @@ export async function mockDesktop(page: Page, failSend = true) {
     const w = window as unknown as Record<string, unknown>;
     const calls: string[] = [];
     w.__testCalls = calls;
+    w.__testProfileModels = profileModels;
     const requests: Record<string, unknown>[] = [];
     w.__testRequests = requests;
     w.__emit = (event: string, payload: unknown) => {
@@ -116,6 +117,21 @@ export async function mockDesktop(page: Page, failSend = true) {
             created_at: 0,
           });
           return { ...(profileModels[pid] as unknown[]).at(-1) };
+        }
+        if (cmd === "update_profile_model") {
+          if (!("contextWindow" in args) || !("maxTokens" in args)) {
+            throw new Error("update_profile_model 需要 camelCase 参数（contextWindow/maxTokens）");
+          }
+          for (const list of Object.values(profileModels)) {
+            const row = list.find((m) => m.id === args.id);
+            if (row) {
+              row.model = String(args.model);
+              row.context_window = (args.contextWindow as number | null) ?? null;
+              row.max_tokens = (args.maxTokens as number | null) ?? null;
+              return null;
+            }
+          }
+          throw new Error("模型行不存在");
         }
         if (cmd === "delete_profile_model") {
           for (const list of Object.values(profileModels)) {

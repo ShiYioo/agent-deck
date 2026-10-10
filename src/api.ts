@@ -164,6 +164,20 @@ export async function addProfileModel(
   });
 }
 
+export async function updateProfileModel(
+  id: string,
+  model: string,
+  contextWindow: number | null,
+  maxTokens: number | null,
+): Promise<void> {
+  await invoke("update_profile_model", {
+    id,
+    model,
+    contextWindow,
+    maxTokens,
+  });
+}
+
 export async function deleteProfileModel(id: string): Promise<void> {
   await invoke("delete_profile_model", { id });
 }

@@ -621,6 +621,21 @@ fn add_profile_model(
     store.add_profile_model(&profile_id, model.trim(), context_window, max_tokens)
 }
 
+/// 前端 → Rust：编辑模型行（内联保存）。
+#[tauri::command]
+fn update_profile_model(
+    store: State<'_, Store>,
+    id: String,
+    model: String,
+    context_window: Option<i64>,
+    max_tokens: Option<i64>,
+) -> Result<(), String> {
+    if model.trim().is_empty() {
+        return Err("模型名称不能为空".into());
+    }
+    store.update_profile_model(&id, model.trim(), context_window, max_tokens)
+}
+
 /// 前端 → Rust：删除模型列表中的一行。
 #[tauri::command]
 fn delete_profile_model(store: State<'_, Store>, id: String) -> Result<(), String> {
@@ -981,6 +996,7 @@ pub fn run() {
             delete_model_profile,
             list_profile_models,
             add_profile_model,
+            update_profile_model,
             delete_profile_model,
             clear_profile_models,
             fetch_upstream_models,

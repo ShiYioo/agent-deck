@@ -621,6 +621,29 @@ impl Store {
         })
     }
 
+    /// 编辑模型行：名称/上下文/最大输出整体覆盖；行不存在报错。
+    pub fn update_profile_model(
+        &self,
+        id: &str,
+        model: &str,
+        context_window: Option<i64>,
+        max_tokens: Option<i64>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let changed = conn
+            .execute(
+                "UPDATE profile_models
+                 SET model = ?2, context_window = ?3, max_tokens = ?4
+                 WHERE id = ?1",
+                params![id, model, context_window, max_tokens],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err(format!("模型行不存在：{id}"));
+        }
+        Ok(())
+    }
+
     /// 覆盖某模型行的倍率（获取倍率落库用）；模型行不存在返回 false。
     pub fn set_profile_model_rate(
         &self,
