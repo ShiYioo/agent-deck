@@ -35,6 +35,8 @@ pub struct PiRunParams {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ModelProfileParam {
+    /// 档案 id（Composer 选择器定位用；sidecar 忽略）
+    pub id: String,
     /// 通道：glm = zai 系；其余（含 custom）= OpenAI 兼容
     pub provider: String,
     pub key: String,

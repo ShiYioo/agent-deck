@@ -104,6 +104,7 @@ async fn start_task(
             .list_model_profiles(true)?
             .into_iter()
             .map(|p| pi_session::ModelProfileParam {
+                id: p.id.clone(),
                 provider: p.provider,
                 key: p.api_key,
                 base_url: p.base_url,
@@ -112,6 +113,19 @@ async fn start_task(
                 models: profile_models_param(&store, &p.id),
             })
             .collect();
+        // Composer 选择器：model = "<profileId>:<modelId>" → 该档案置顶并锁定模型，
+        // 其余启用档案随后兜底（保留自动降级链）
+        let mut chain = profiles;
+        if let Some(sel) = model.as_deref().filter(|s| !s.is_empty() && *s != "auto") {
+            if let Some((pid, mid)) = sel.split_once(':') {
+                if let Some(pos) = chain.iter().position(|p| p.id == pid) {
+                    let mut chosen = chain.remove(pos);
+                    chosen.model = Some(mid.to_string());
+                    chain.insert(0, chosen);
+                }
+            }
+        }
+        let profiles = chain;
         let use_cwd_deck = cwd.clone();
         let task_memories = store.list_memories(&cwd, 20).unwrap_or_default();
         let params = pi_session::PiRunParams {
@@ -362,6 +376,7 @@ async fn build_smart_handoff_prompt(
             .list_model_profiles(true)?
             .into_iter()
             .map(|p| pi_session::ModelProfileParam {
+                id: p.id.clone(),
                 provider: p.provider,
                 key: p.api_key,
                 base_url: p.base_url,

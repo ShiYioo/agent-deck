@@ -150,11 +150,22 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [newModelWindow, setNewModelWindow] = useState("");
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchingRates, setFetchingRates] = useState(false);
+  // 每个档案的模型数量（行上直接可见，也是展开按钮的徽标）
+  const [modelCounts, setModelCounts] = useState<Record<string, number>>({});
 
   const emptyForm = { provider: "custom", label: "", api_key: "", base_url: "", model: "", protocol: "chat" };
 
   const loadProfiles = useCallback(() => {
-    listModelProfiles().then(setProfiles).catch(() => {});
+    listModelProfiles()
+      .then((rows) => {
+        setProfiles(rows);
+        for (const p of rows) {
+          listProfileModels(p.id)
+            .then((ms) => setModelCounts((m) => ({ ...m, [p.id]: ms.length })))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -270,7 +281,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   };
 
   const reloadModels = (profileId: string) => {
-    listProfileModels(profileId).then((rows) => setModelLists((m) => ({ ...m, [profileId]: rows }))).catch(() => {});
+    listProfileModels(profileId)
+      .then((rows) => {
+        setModelLists((m) => ({ ...m, [profileId]: rows }));
+        setModelCounts((cnt) => ({ ...cnt, [profileId]: rows.length }));
+      })
+      .catch(() => {});
   };
 
   const addModelRow = async (p: ModelProfile) => {
@@ -433,7 +449,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   <div key={p.id} className="border-b border-stone-100 last:border-b-0">
                   <Row
                     label={`${PROVIDER_LABEL[p.provider] ?? p.provider}${p.label ? ` · ${p.label}` : ""}`}
-                    desc={`${maskKey(p.api_key)}${p.base_url ? ` · ${p.base_url}` : ""}`}
+                    desc={`${maskKey(p.api_key)}${p.base_url ? ` · ${p.base_url}` : ""} · ${modelCounts[p.id] ?? 0} 个模型`}
                   >
                     <div className="flex items-center gap-2.5">
                       <Toggle
@@ -447,12 +463,17 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                       />
                       <button
                         onClick={() => toggleModels(p)}
-                        className="text-stone-300 transition-colors hover:text-stone-700"
-                        title="模型列表"
+                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors ${
+                          expandedId === p.id
+                            ? "border-stone-300 bg-stone-100 text-stone-800"
+                            : "border-stone-200 text-stone-500 hover:bg-stone-50"
+                        }`}
+                        title="模型列表（添加 / 从上游获取 / 获取倍率）"
                         aria-label={`模型列表 ${p.label ?? p.provider}`}
                         aria-expanded={expandedId === p.id}
                       >
-                        {expandedId === p.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        模型 {modelCounts[p.id] ?? 0}
+                        {expandedId === p.id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                       </button>
                       <button
                         onClick={() => openEdit(p)}

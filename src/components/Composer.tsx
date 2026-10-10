@@ -6,7 +6,7 @@ import { MotionLayer } from "../motion/MotionProvider";
 import { useTextareaAutosize } from "../hooks/useTextareaAutosize";
 
 import { HARNESS_ACCENT, projectName } from "./Sidebar";
-import { discoverModels, inTauri } from "../api";
+import { discoverModels, inTauri, listModelProfiles, listProfileModels } from "../api";
 import { IconFolder } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
@@ -108,14 +108,14 @@ export const Composer = memo(function Composer({
   useTextareaAutosize(textareaRef, text);
 
   const MENTION_AGENTS = [
-    { name: "deck", label: "AgentDeck Agent", desc: "自有运行时 · 可接 :glm/:gpt" },
+    { name: "deck", label: "AgentDeck Agent", desc: "自有运行时 · 可接 :模型池模型" },
     { name: "zcode", label: "ZCode · GLM", desc: "模型走账号默认" },
     { name: "codex", label: "Codex · GPT", desc: "可接 :模型名" },
     { name: "opencode", label: "OpenCode", desc: "可接 :provider/model" },
   ];
 
   const modelOptionsFor = (agent: string): string[] => {
-    if (agent === "deck") return ["glm", "gpt"];
+    if (agent === "deck") return deckOptions.map((o) => o.value);
     if (agent === "zcode") return []; // zcode 无模型旗标
     const discoveredModels = modelOptionsBy[agent] ?? [];
     if (discoveredModels.length) return discoveredModels;
@@ -218,6 +218,38 @@ export const Composer = memo(function Composer({
         .catch(() => {});
     }
   }, []);
+
+  // deck 模型目录：模型池里启用档案的模型列表（value = "<profileId>:<modelId>"，
+  // 无目录的档案暴露其默认模型），下拉与 @deck: 提及共用
+  const [deckOptions, setDeckOptions] = useState<{ value: string; label: string; group: string }[]>([]);
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    (async () => {
+      try {
+        const profiles = await listModelProfiles();
+        const out: { value: string; label: string; group: string }[] = [];
+        for (const p of profiles.filter((x) => x.enabled)) {
+          const group = p.label || p.provider;
+          const rows = await listProfileModels(p.id).catch(() => []);
+          if (rows.length > 0) {
+            for (const r of rows) {
+              out.push({ value: `${p.id}:${r.model}`, label: r.model, group });
+            }
+          } else {
+            const fallback = p.model ?? (p.provider === "glm" ? "glm-4.7" : "gpt-5.1");
+            out.push({ value: `${p.id}:${fallback}`, label: fallback, group });
+          }
+        }
+        if (alive) setDeckOptions(out);
+      } catch {
+        /* 模型池不可用：保持空目录（deck 走全链自治） */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [harness]);
   useEffect(() => {
     setDiscovered([]);
     if (!MODEL_CATALOG[harness]) {
@@ -483,34 +515,42 @@ export const Composer = memo(function Composer({
           title="选择 harness"
         />
 
-        {/* codex/opencode：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
-        {MODEL_CATALOG[harness] && (
+        {/* codex/opencode/deck：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
+        {(MODEL_CATALOG[harness] || harness === "deck") && (
           <Dropdown
             value={model}
             onChange={onModelChange}
             options={[
-              { value: "", label: "默认模型" },
-              ...(discovered.length
-                ? discovered
-                    .map((m) => ({
-                      value: m,
-                      label: m,
-                      // opencode 的 free 模型（如 -free 后缀）标注免费徽章
-                      tag: /free/i.test(m) ? "免费" : undefined,
-                    }))
-                    // 常用置顶（按历史使用频次）
-                    .sort(
-                      (a, b) =>
-                         (recentModels.indexOf(a.value) < 0 ? 999 : recentModels.indexOf(a.value)) -
-                         (recentModels.indexOf(b.value) < 0 ? 999 : recentModels.indexOf(b.value)),
-                    )
-                : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
+              { value: "", label: harness === "deck" ? "模型池默认（自动降级）" : "默认模型" },
+              ...(harness === "deck"
+                ? deckOptions.map((o) => ({
+                    value: o.value,
+                    label: `${o.group} · ${o.label}`,
+                    group: o.group,
+                  }))
+                : discovered.length
+                  ? discovered
+                      .map((m) => ({
+                        value: m,
+                        label: m,
+                        // opencode 的 free 模型（如 -free 后缀）标注免费徽章
+                        tag: /free/i.test(m) ? "免费" : undefined,
+                      }))
+                      // 常用置顶（按历史使用频次）
+                      .sort(
+                        (a, b) =>
+                           (recentModels.indexOf(a.value) < 0 ? 999 : recentModels.indexOf(a.value)) -
+                           (recentModels.indexOf(b.value) < 0 ? 999 : recentModels.indexOf(b.value)),
+                      )
+                  : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
             ]}
             searchable
             groupBy={
-              harness === "opencode"
-                ? (value) => (value.includes("/") ? value.split("/")[0] : "默认")
-                : undefined
+              harness === "deck"
+                ? (value) => deckOptions.find((o) => o.value === value)?.group ?? "其他"
+                : harness === "opencode"
+                  ? (value) => (value.includes("/") ? value.split("/")[0] : "默认")
+                  : undefined
             }
             title="模型"
           />
