@@ -32,16 +32,46 @@ fn profile_models_param(store: &Store, profile_id: &str) -> Vec<pi_session::Prof
         .collect()
 }
 
+/// 去掉 Windows verbatim 前缀（`\\?\C:\...`）：node 的模块加载器解析这种路径
+/// 会在盘根段 lstat 出 EISDIR，sidecar 启动即崩。
+fn normalize_windows_path(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.as_os_str().to_string_lossy().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest)
+    } else {
+        p
+    }
+}
+
 /// deck-agent.mjs 的位置：优先资源目录（打包后），回退仓库源码（开发模式）。
 fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
+    // 开发模式永远优先源码：资源目录里的副本可能是任意历史构建的旧产物
+    #[cfg(debug_assertions)]
+    {
+        let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("agent")
+            .join("deck-agent.mjs");
+        if dev.exists() {
+            return normalize_windows_path(dev);
+        }
+    }
     if let Ok(res_dir) = app.path().resource_dir() {
-        let p = res_dir.join("agent").join("deck-agent.mjs");
+        let p = normalize_windows_path(res_dir.join("agent").join("deck-agent.mjs"));
         if p.exists() {
             return p;
         }
     }
-    // 开发模式：cargo 工作目录是 src-tauri，仓库根在上一级
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent/deck-agent.mjs")
+    normalize_windows_path(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("agent")
+            .join("deck-agent.mjs"),
+    )
 }
 
 /// 运行中/刚结束的任务：保留子进程句柄用于取消。

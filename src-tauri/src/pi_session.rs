@@ -282,6 +282,11 @@ pub async fn run_pi_task(
         }
     });
 
+    eprintln!(
+        "[deck-debug] spawn sidecar: {} (exists={})",
+        sidecar_js.display(),
+        sidecar_js.exists()
+    );
     // stderr：仅收集尾部用于报错
     let err_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
@@ -292,10 +297,9 @@ pub async fn run_pi_task(
             match reader.read_until(b'\n', &mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    tail = (String::from_utf8_lossy(&buf).to_string() + &tail)
-                        .chars()
-                        .take(1500)
-                        .collect();
+                    let line = String::from_utf8_lossy(&buf).to_string();
+                    eprintln!("[deck-debug][stderr] {}", line.trim_end());
+                    tail = (line + &tail).chars().take(1500).collect();
                 }
             }
         }
