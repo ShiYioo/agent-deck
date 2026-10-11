@@ -453,8 +453,8 @@ export default function App() {
       let atModel: string | null = null;
       if (at) {
         atTarget = at[1].toLowerCase();
-        // zcode CLI 无模型旗标，@zcode:xxx 的模型部分被忽略（走账号默认）
-        atModel = at[2] && atTarget !== "zcode" ? at[2] : null;
+        // @zcode:provider/model 切换 ZCode 默认模型
+        atModel = at[2];
         text = text.slice(at[0].length);
       }
       if (!text.trim()) {

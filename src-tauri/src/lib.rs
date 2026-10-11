@@ -391,6 +391,16 @@ pub(crate) async fn start_task_impl(
     }
     mark_conversation(&store, &task_id, conversation_id.as_deref())?;
 
+    // ZCode 模型选择：CLI 无 --model 旗标，官方机制是持久化 defaultModelSelection
+    // （/model 的落盘字段）。选了模型 = 切换 ZCode 默认模型，对该 CLI 后续会话生效。
+    if harness == Harness::Zcode
+        && let Some(m) = model.as_deref().filter(|s| !s.is_empty())
+    {
+        if let Err(e) = write_zcode_default_model(m) {
+            return Err(format!("应用 ZCode 模型失败：{e}"));
+        }
+    }
+
     let child = runner::spawn(
         harness,
         &mode,
@@ -764,16 +774,94 @@ fn set_setting(store: State<'_, Store>, key: String, value: String) -> Result<()
 
 /// 前端 → Rust：动态发现 harness 的真实模型列表。
 /// codex 读 desktop 状态文件（账号实际下发过的模型）；
-/// opencode 调 `opencode models`；其余返回空（前端用内置目录）。
+/// opencode 调 `opencode models`；zcode 读 ~/.zcode/v2/config.json 的
+/// provider.models（按 setting.json 选中的 provider 过滤）；其余返回空。
 #[tauri::command]
 async fn discover_models(harness: String) -> Vec<String> {
     tauri::async_runtime::spawn_blocking(move || match harness.as_str() {
         "codex" => discover_codex_models(),
         "opencode" => discover_opencode_models(),
+        "zcode" => discover_zcode_models(),
         _ => Vec::new(),
     })
     .await
     .unwrap_or_default()
+}
+
+/// ZCode 模型目录：config.json → provider.<选中或全部>.models 的键。
+/// 返回 "providerId/modelId"（ZCode ModelSelection 的 picker 形态）。
+fn discover_zcode_models() -> Vec<String> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    let cfg: serde_json::Value = match std::fs::read_to_string(home.join(".zcode/v2/config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let providers = cfg.get("provider").and_then(|v| v.as_object());
+    let Some(providers) = providers else {
+        return Vec::new();
+    };
+
+    // 用户在 ZCode 里选中的 provider（setting.json → family selected key 去 "coding-plan:" 前缀）
+    let selected: Option<String> = std::fs::read_to_string(home.join(".zcode/v2/setting.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|s| {
+            s.get("modelProviderFamilySelectedKeys")?
+                .get("bigmodel")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .map(|k| k.trim_start_matches("coding-plan:").to_string());
+
+    let mut out = Vec::new();
+    let mut ids: Vec<&String> = providers.keys().collect();
+    ids.sort();
+    for pid in ids {
+        if let Some(sel) = &selected {
+            if pid.as_str() != sel && !pid.starts_with("builtin:") {
+                continue;
+            }
+            if pid.starts_with("builtin:") && pid.as_str() != sel && sel.starts_with("builtin:") {
+                continue;
+            }
+        }
+        if let Some(models) = providers[pid].get("models").and_then(|m| m.as_object()) {
+            for mid in models.keys() {
+                out.push(format!("{pid}/{mid}"));
+            }
+        }
+    }
+    out
+}
+
+/// 把 ZCode 默认模型写入 personal 配置（官方 /model 的持久化字段）。
+/// model 形如 "providerId/modelId"；原子替换，保留其余字段。
+fn write_zcode_default_model(model: &str) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("无法定位家目录")?;
+    let path = home.join(".zcode/v2/config.json");
+    let (provider_id, model_id) = model
+        .split_once('/')
+        .ok_or_else(|| format!("ZCode 模型需为 providerId/modelId：{model}"))?;
+    let mut cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).map_err(|e| format!("读取 ZCode 配置失败：{e}"))?,
+    )
+    .map_err(|e| format!("解析 ZCode 配置失败：{e}"))?;
+    cfg["defaultModelSelection"] = serde_json::json!({
+        "providerId": provider_id,
+        "modelId": model_id,
+    });
+    // 原子写：临时文件 + rename
+    let tmp = path.with_extension("json.agentdeck-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&cfg).unwrap_or_default())
+        .map_err(|e| format!("写入 ZCode 配置失败：{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换 ZCode 配置失败：{e}"))?;
+    Ok(())
 }
 
 const CODEX_MODEL_FALLBACK: &[&str] = &["gpt-5.1-codex", "gpt-5.1", "o4-mini"];

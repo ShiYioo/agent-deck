@@ -6,19 +6,21 @@ test("first screen skips unused catalogs and repeated agent selection shares dis
   await page.goto("/");
   await expect(page.locator(".session-item")).toHaveCount(3);
   const calls = () => page.evaluate(() => (window as unknown as { __testCalls: string[] }).__testCalls);
-  expect((await calls()).filter((command) => command === "discover_models")).toHaveLength(0);
+  // 默认 harness 是 zcode：首屏发现 zcode 模型目录（有目录的 harness 才发现）
+  expect((await calls()).filter((command) => command === "discover_models")).toHaveLength(1);
   expect((await calls()).filter((command) => command === "list_model_profiles")).toHaveLength(0);
   const trigger = page.getByRole("button", { name: "选择 harness", exact: true });
   await trigger.click();
   await page.getByRole("option", { name: "Codex · GPT", exact: true }).click();
-  await expect.poll(async () => (await calls()).filter((command) => command === "discover_models").length).toBe(1);
+  await expect.poll(async () => (await calls()).filter((command) => command === "discover_models").length).toBe(2);
   await trigger.click();
   await page.getByRole("option", { name: "ZCode · GLM", exact: true }).click();
   await trigger.click();
   await page.getByRole("option", { name: "Codex · GPT", exact: true }).click();
   await page.getByRole("button", { name: "模型", exact: true }).click();
   await expect(page.getByRole("option", { name: "gpt-test", exact: true })).toBeVisible();
-  expect((await calls()).filter((command) => command === "discover_models")).toHaveLength(1);
+  // 同 harness 的发现结果共享，重复选择不重复请求
+  expect((await calls()).filter((command) => command === "discover_models")).toHaveLength(2);
 });
 
 test("loading conversations have feedback and repeated clicks do not duplicate requests", async ({ page }) => {

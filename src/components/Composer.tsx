@@ -143,14 +143,14 @@ export const Composer = memo(function Composer({
 
   const MENTION_AGENTS = [
     { name: "deck", label: "AgentDeck Agent", desc: "自有运行时 · 可接 :模型池模型" },
-    { name: "zcode", label: "ZCode · GLM", desc: "模型走账号默认" },
+    { name: "zcode", label: "ZCode · GLM", desc: "可接 :provider/model（切换默认模型）" },
     { name: "codex", label: "Codex · GPT", desc: "可接 :模型名" },
     { name: "opencode", label: "OpenCode", desc: "可接 :provider/model" },
   ];
 
   const modelOptionsFor = (agent: string): string[] => {
     if (agent === "deck") return deckOptions.map((o) => o.value);
-    if (agent === "zcode") return []; // zcode 无模型旗标
+    if (agent === "zcode") return modelOptionsBy.zcode ?? [];
     const discoveredModels = modelOptionsBy[agent] ?? [];
     if (discoveredModels.length) return discoveredModels;
     return (MODEL_CATALOG[agent] ?? []).map((o) => o.value).filter(Boolean);
@@ -192,12 +192,11 @@ export const Composer = memo(function Composer({
     const el = textareaRef.current;
     if (!el || !mention || mention.kind !== "agent") return;
     const pos = el.selectionStart ?? el.value.length;
-    // zcode 无模型旗标：直接空格收尾；其余补 ":" 进入模型段
-    const insert = name === "zcode" ? `@${name} ` : `@${name}:`;
+    const insert = `@${name}:`;
     const next = el.value.slice(0, mention.start) + insert + el.value.slice(pos);
     setText(next);
     drafts.current.set(draftKey, next);
-    setMention(name === "zcode" ? null : { kind: "model", start: mention.start, agent: name, query: "" });
+    setMention({ kind: "model", start: mention.start, agent: name, query: "" });
     requestAnimationFrame(() => {
       el.focus();
       const caret = mention.start + insert.length;
@@ -245,7 +244,7 @@ export const Composer = memo(function Composer({
   const requestedHarness = mention?.kind === "model" ? mention.agent : harness;
   const discovered = modelOptionsBy[harness] ?? [];
   useEffect(() => {
-    if (requestedHarness !== "codex" && requestedHarness !== "opencode") return;
+    if (requestedHarness !== "codex" && requestedHarness !== "opencode" && requestedHarness !== "zcode") return;
     let alive = true;
     discoverModels(requestedHarness)
       .then((list) => {
@@ -560,7 +559,7 @@ export const Composer = memo(function Composer({
         </div>
 
         {/* codex/opencode/deck：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
-        {(MODEL_CATALOG[harness] || harness === "deck") && (
+        {(MODEL_CATALOG[harness] || harness === "deck" || (harness === "zcode" && (modelOptionsBy.zcode?.length ?? 0) > 0)) && (
           <div className="composer-model-control"><Dropdown
             value={model}
             onChange={onModelChange}
