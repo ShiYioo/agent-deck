@@ -57,7 +57,7 @@ export const EventLine = memo(function EventLine({
       return (
         <Disclosure
           className="activity-event"
-          title={<><IconSparkle size={13} /><span>思考{event.durationMs ? ` · ${(event.durationMs / 1000).toFixed(1)} 秒` : ""}</span></>}
+          title={<><IconSparkle size={13} /><span>思考{event.durationMs && event.durationMs >= 100 ? ` · ${(event.durationMs / 1000).toFixed(1)} 秒` : ""}</span></>}
         >
           <pre>{event.text}</pre>
         </Disclosure>
@@ -69,9 +69,20 @@ export const EventLine = memo(function EventLine({
         </Disclosure>
       );
     case "tool_result":
+      if (!event.ok) {
+        // 失败必须醒目：红色标题 + 失败标志 + 错误信息默认展开（模型据此继续，用户据此判断）
+        return (
+          <div className="event-error">
+            <Disclosure className="activity-event" defaultOpen
+              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{event.tool} 失败</span></>}>
+              <pre className="text-red-600">{event.detail || "（无错误详情）"}</pre>
+            </Disclosure>
+          </div>
+        );
+      }
       return (
-        <Disclosure className={`activity-event ${event.ok ? "" : "event-error"}`} defaultOpen={!event.ok}
-          title={<>{event.ok ? <IconCheckCircle size={13} /> : <IconXCircle size={13} />}<span>{event.tool} · {event.ok ? "已完成" : "失败"}</span></>}>
+        <Disclosure className="activity-event"
+          title={<>{event.ok ? <IconCheckCircle size={13} /> : <IconXCircle size={13} />}<span>{event.tool} · 已完成</span></>}>
           <pre>{event.detail}</pre>
         </Disclosure>
       );

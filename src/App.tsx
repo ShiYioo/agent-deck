@@ -1284,34 +1284,23 @@ export default function App() {
 /** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
 const MAX_RENDER = 500;
 
-/** 耗时派生：思考块运行结束回填思考秒数；complete 回填本轮工作秒数 */
+/** 耗时派生：每块思考独立计时（上一事件 → 本块到达）；complete 回填本轮工作秒数 */
 function decorateTiming(events: LogItem[]): LogItem[] {
   const out = events.map(({ event, key }) => ({
     key,
     event: { ...event } as AgentEvent & { ts?: number; durationMs?: number },
   }));
-  // 思考运行：连续 thinking（流式快照同属一段），结束于首个非 thinking 事件
-  let thinkStart: number | null = null;
-  let thinkLast = -1;
+  let prevTs: number | null = null; // 上一事件的到达时刻
   let turnStart: number | null = null;
-  const flushThinking = () => {
-    if (thinkStart !== null && thinkLast >= 0) {
-      const last = out[thinkLast].event as AgentEvent & { ts?: number; durationMs?: number };
-      if (last.ts && last.ts > thinkStart) last.durationMs = last.ts - thinkStart;
-    }
-    thinkStart = null;
-    thinkLast = -1;
-  };
   for (const item of out) {
     const ev = item.event;
-    if (ev.type === "thinking") {
-      if (thinkStart === null && ev.ts) thinkStart = ev.ts;
-      if (ev.ts) thinkLast = out.indexOf(item);
-      continue;
+    // 思考块：ts = 该块思考结束（message_end 到达）≈ 思考耗时起点是上一事件
+    if (ev.type === "thinking" && ev.ts && prevTs !== null && ev.ts > prevTs) {
+      ev.durationMs = ev.ts - prevTs;
     }
-    flushThinking();
-    if (ev.type === "user_message" && !ev.hidden) {
-      turnStart = ev.ts ?? null;
+    if (ev.ts) prevTs = ev.ts;
+    if (ev.type === "user_message" && !ev.hidden && ev.ts) {
+      turnStart = ev.ts;
     } else if (ev.type === "complete") {
       // 一轮的工作耗时：本轮 user_message → complete 的真实间隔
       if (turnStart !== null && ev.ts && ev.ts > turnStart) {
@@ -1320,7 +1309,6 @@ function decorateTiming(events: LogItem[]): LogItem[] {
       turnStart = null;
     }
   }
-  // 思考延伸到末尾（仍在流式）不回填：结束后才提供
   return out.map(({ event, key }) => ({ event: event as AgentEvent, key }));
 }
 
