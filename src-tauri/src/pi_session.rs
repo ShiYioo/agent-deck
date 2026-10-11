@@ -419,17 +419,25 @@ pub async fn pi_summarize_text(
 
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
+    let mut seen_lines = 0usize;
     loop {
         buf.clear();
         match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(e) => {
+                eprintln!("[deck-debug][summarize] read error: {e}");
+                break;
+            }
             Ok(_) => {
                 let line = String::from_utf8_lossy(&buf);
+                seen_lines += 1;
+                eprintln!("[deck-debug][summarize-out] {}", line.trim_end());
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                     continue;
                 };
                 match v.get("type").and_then(|x| x.as_str()) {
-                    Some("summarize_result") => {
+                    // sidecar 的 deckEvent 会加 deck_ 前缀（deck_summarize_result）
+                    Some("deck_summarize_result") | Some("summarize_result") => {
                         let text = v
                             .get("text")
                             .and_then(|x| x.as_str())
@@ -440,7 +448,7 @@ pub async fn pi_summarize_text(
                         }
                         return Ok(text);
                     }
-                    Some("summarize_error") | Some("deck_error") => {
+                    Some("deck_summarize_error") | Some("summarize_error") | Some("deck_error") => {
                         let msg = v
                             .get("message")
                             .and_then(|x| x.as_str())
@@ -469,8 +477,9 @@ pub async fn pi_summarize_text(
         .rev()
         .collect::<Vec<_>>()
         .join(" | ");
+    eprintln!("[deck-debug][summarize] EOF without result: lines={seen_lines}");
     Err(format!(
-        "sidecar 在返回结果前退出（{exit_note}）{}",
+        "sidecar 在返回结果前退出（{exit_note}，sidecar 输出 {seen_lines} 行）{}",
         if err_tail.is_empty() {
             String::new()
         } else {
