@@ -114,7 +114,10 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             let has_error = obj.get("error").is_some();
             let ok = obj.get("ok").and_then(Value::as_bool).unwrap_or(!has_error) && !is_error(obj);
             if ok {
-                events.push(AgentEvent::Complete { ok: true });
+                events.push(AgentEvent::Complete {
+                    ok: true,
+                    tokens: None,
+                });
             } else {
                 let message = error_message(obj).unwrap_or_else(|| "执行失败".to_string());
                 events.push(AgentEvent::Error {
@@ -360,7 +363,10 @@ mod tests {
     #[test]
     fn complete_success_and_failure() {
         let evs = events(r#"{"kind":"complete","ok":true}"#);
-        assert!(evs.contains(&AgentEvent::Complete { ok: true }));
+        assert!(evs.contains(&AgentEvent::Complete {
+            ok: true,
+            tokens: None
+        }));
 
         let evs = events(r#"{"kind":"result","error":{"message":"boom"}}"#);
         assert!(matches!(

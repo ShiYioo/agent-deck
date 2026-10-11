@@ -50,7 +50,25 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             });
         }
         "turn.completed" | "task_complete" => {
-            events.push(AgentEvent::Complete { ok: true });
+            // 操作级：上游 token 用量原样上报（turn.completed.usage）
+            let parsed = obj.get("usage").map(|u| crate::executors::TokenUsage {
+                input: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+                output: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+                reasoning: u
+                    .get("reasoning_output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                cached: u
+                    .get("cached_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            });
+            // 全零 = 上游没给有效用量
+            let tokens = match parsed {
+                Some(t) if t.input == 0 && t.output == 0 => None,
+                other => other,
+            };
+            events.push(AgentEvent::Complete { ok: true, tokens });
         }
         "turn.failed" | "error" => {
             let message = field_str(obj, &["message", "error"])
@@ -135,6 +153,43 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                     .to_string(),
                 args: None,
             });
+        }
+        "error" => {
+            let message = field_str(item, &["message", "error"])
+                .unwrap_or("执行出错")
+                .to_string();
+            events.push(AgentEvent::Error {
+                kind: crate::executors::error_kind(&message).to_string(),
+                message,
+            });
+        }
+        "todo_list" => {
+            let n = item
+                .get("todos")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            events.push(AgentEvent::Status {
+                text: format!("todo 更新：{n} 项"),
+            });
+        }
+        "mcp_tool_call" => {
+            let server = field_str(item, &["server"]).unwrap_or("mcp");
+            let tool = field_str(item, &["tool"]).unwrap_or("call");
+            let status = field_str(item, &["status"]).unwrap_or_default();
+            let output = field_str(item, &["output", "result"]).unwrap_or_default();
+            events.push(AgentEvent::ToolUse {
+                tool: format!("mcp:{server}/{tool}"),
+                detail: truncate_json(item),
+                args: None,
+            });
+            if !output.is_empty() {
+                events.push(AgentEvent::ToolResult {
+                    tool: format!("mcp:{server}/{tool}"),
+                    ok: status != "error",
+                    detail: output.chars().take(400).collect(),
+                });
+            }
         }
         other => {
             let _ = other;
@@ -243,7 +298,50 @@ mod tests {
     #[test]
     fn turn_completed_and_failed() {
         let evs = events(r#"{"type":"turn.completed","usage":{}}"#);
-        assert!(evs.contains(&AgentEvent::Complete { ok: true }));
+        assert!(evs.contains(&AgentEvent::Complete {
+            ok: true,
+            tokens: None
+        }));
+
+        // 官方 exec --json 实测形状：thread/turn/item + usage
+        let thread = parse_line(
+            r#"{"type":"thread.started","thread_id":"01a12a51-2f4d-7521-ba74-630862f7395c"}"#,
+        );
+        assert!(thread.contains(&AgentEvent::SessionId {
+            id: "01a12a51-2f4d-7521-ba74-630862f7395c".into()
+        }));
+
+        let turn = parse_line(
+            r#"{"type":"turn.completed","usage":{"input_tokens":13053,"cached_input_tokens":13050,"output_tokens":5,"reasoning_output_tokens":0}}"#,
+        );
+        assert!(turn.iter().any(|e| matches!(
+            e,
+            AgentEvent::Complete { ok: true, tokens: Some(t) } if t.input == 13053 && t.output == 5 && t.cached == 13050
+        )));
+
+        let msg = parse_line(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"好的"}}"#,
+        );
+        assert!(msg.contains(&AgentEvent::AssistantMessage {
+            text: "好的".into()
+        }));
+
+        let cmd = parse_line(
+            r#"{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls","exit_code":0,"aggregated_output":"f1"}}"#,
+        );
+        assert!(cmd.contains(&AgentEvent::ToolUse {
+            tool: "shell".into(),
+            detail: "ls".into(),
+            args: None
+        }));
+
+        let err = parse_line(
+            r#"{"type":"item.completed","item":{"id":"i2","type":"error","message":"boom"}}"#,
+        );
+        assert!(
+            err.iter()
+                .any(|e| matches!(e, AgentEvent::Error { message, .. } if message == "boom"))
+        );
 
         let evs = events(r#"{"type":"turn.failed","message":"boom"}"#);
         assert!(matches!(

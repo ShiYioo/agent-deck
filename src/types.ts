@@ -7,7 +7,12 @@ export type AgentEvent =
   | { type: "tool_use"; tool: string; detail: string; args?: Record<string, unknown> }
   | { type: "tool_result"; tool: string; ok: boolean; detail: string }
   | { type: "status"; text: string }
-  | { type: "complete"; ok: boolean; durationMs?: number }
+  | {
+      type: "complete";
+      ok: boolean;
+      durationMs?: number;
+      tokens?: { input: number; output: number; reasoning?: number; cached?: number };
+    }
   | { type: "error"; kind: string; message: string }
   | { type: "raw"; line: string };
 

@@ -82,14 +82,22 @@ export const EventLine = memo(function EventLine({
           {event.text}
         </div>
       );
-    case "complete":
+    case "complete": {
+      const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
       return (
         <div className="activity-event flex items-center gap-1.5">
            {event.ok ? <IconCheckCircle size={14} className="shrink-0" /> : <IconXCircle size={14} className="shrink-0" />}
           任务{event.ok ? "完成" : "结束"}
           {event.durationMs ? ` · 工作 ${Math.round(event.durationMs / 1000)} 秒` : ""}
+          {event.tokens && (
+            <span className="text-stone-400" title={`输入 ${event.tokens.input} · 输出 ${event.tokens.output}${event.tokens.reasoning ? ` · 推理 ${event.tokens.reasoning}` : ""}${event.tokens.cached ? ` · 缓存命中 ${event.tokens.cached}` : ""} tokens`}>
+              · tokens ↑{fmtK(event.tokens.input)} ↓{fmtK(event.tokens.output)}
+              {event.tokens.reasoning ? `（思考 ${fmtK(event.tokens.reasoning)}）` : ""}
+            </span>
+          )}
         </div>
       );
+    }
     case "error":
       return (
         <div role="alert" className="event-error flex items-start gap-1.5 whitespace-pre-wrap text-red-600">

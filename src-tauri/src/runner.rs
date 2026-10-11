@@ -92,7 +92,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                 for event in harness.parse_line(trimmed) {
                     if matches!(
                         &event,
-                        AgentEvent::Error { .. } | AgentEvent::Complete { ok: false }
+                        AgentEvent::Error { .. } | AgentEvent::Complete { ok: false, .. }
                     ) {
                         failed = true;
                     }

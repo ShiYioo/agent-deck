@@ -134,6 +134,21 @@ impl Harness {
 }
 
 /// 统一事件模型：所有 harness 的输出都被归一化成这些事件后推给前端。
+/// 一轮的 token 用量（上游原样上报；0 值保留以对齐字段）
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reasoning: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cached: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -170,6 +185,9 @@ pub enum AgentEvent {
     },
     Complete {
         ok: bool,
+        /// 本轮 token 用量（codex turn.completed 等；空 = 该 harness 未上报）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<TokenUsage>,
     },
     /// kind = "auth" 时前端显示登录引导
     Error {
