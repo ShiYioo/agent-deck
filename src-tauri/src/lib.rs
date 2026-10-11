@@ -1,5 +1,6 @@
 mod diff_watch;
 mod executors;
+mod collaboration;
 mod handoff;
 mod pi_session;
 mod runner;
@@ -80,6 +81,7 @@ fn sidecar_path(app: &AppHandle) -> std::path::PathBuf {
 pub struct RunningTask {
     pub label: String,
     pub child: Option<command_group::AsyncGroupChild>,
+    pub cancelled: bool,
 }
 
 /// 全局任务表。runner 持有 Arc 克隆以便在流结束后回写退出码。
@@ -100,6 +102,47 @@ pub struct TaskStartInfo {
     task_id: String,
 }
 
+#[derive(Serialize)]
+struct HarnessHealth {
+    ready: bool,
+    issues: Vec<String>,
+}
+
+#[tauri::command]
+async fn check_harness(
+    app: AppHandle,
+    store: State<'_, Store>,
+    harness: String,
+) -> Result<HarnessHealth, String> {
+    let mut issues = Vec::new();
+    if harness == "deck" {
+        if which::which("node").is_err() {
+            issues.push("未找到 Node.js".into());
+        }
+        if !sidecar_path(&app).is_file() {
+            issues.push("运行时文件缺失".into());
+        }
+        let profiles = store.list_model_profiles(true)?;
+        if profiles.is_empty() {
+            issues.push("请在设置中添加并启用模型配置".into());
+        } else if profiles
+            .iter()
+            .all(|profile| profile.api_key.trim().is_empty())
+        {
+            issues.push("启用的模型配置缺少 API Key".into());
+        }
+    } else {
+        let runner = Harness::parse(&harness)?;
+        if which::which(runner.program()).is_err() {
+            issues.push(format!("未找到 {}，请安装并加入 PATH", runner.program()));
+        }
+    }
+    Ok(HarnessHealth {
+        ready: issues.is_empty(),
+        issues,
+    })
+}
+
 /// 前端 → Rust：启动一个无头 agent 任务。
 // tauri command 签名参数固定较多，属框架形态
 #[allow(clippy::too_many_arguments)]
@@ -116,20 +159,40 @@ async fn start_task(
     model: Option<String>,
     permission: Option<String>,
     resume_session_id: Option<String>,
+    project_id: Option<String>,
 ) -> Result<TaskStartInfo, String> {
+    start_task_impl(
+        app, registry, store, pi_registry, harness, cwd, prompt, mode, model,
+        permission, resume_session_id, project_id,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_task_impl(
+    app: AppHandle,
+    registry: State<'_, TaskRegistry>,
+    store: State<'_, Store>,
+    pi_registry: State<'_, pi_session::PiRegistry>,
+    harness: String,
+    cwd: String,
+    prompt: String,
+    mode: Option<String>,
+    model: Option<String>,
+    permission: Option<String>,
+    resume_session_id: Option<String>,
+    project_id: Option<String>,
+) -> Result<TaskStartInfo, String> {
+    if prompt.trim().is_empty() {
+        return Err("请输入任务描述".into());
+    }
+    if !Path::new(&cwd).is_dir() {
+        return Err(format!("工作目录不存在：{cwd}"));
+    }
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
-        let deck_project = store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id);
-        store.create_task(
-            &task_id,
-            "deck",
-            &cwd,
-            &prompt,
-            mode.as_deref(),
-            None,
-            deck_project.as_deref(),
-        )?;
+        let deck_project = project_id
+            .or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
         // 模型池：启用的配置档案按创建顺序构成自治链（sidecar 内自动降级）
         let profiles: Vec<pi_session::ModelProfileParam> = store
             .list_model_profiles(true)?
@@ -157,6 +220,23 @@ async fn start_task(
             }
         }
         let profiles = chain;
+        if profiles.is_empty() {
+            return Err("模型池为空，请到设置添加并启用至少一个模型配置".into());
+        }
+        store.create_task(
+            &task_id,
+            "deck",
+            &cwd,
+            &prompt,
+            permission.as_deref(),
+            model.as_deref(),
+            deck_project.as_deref(),
+        )?;
+        let user_event = serde_json::json!({ "type": "user_message", "text": prompt });
+        store.append_event(&task_id, &user_event.to_string())?;
+        if let Some(id) = &resume_session_id {
+            store.set_session_id(&task_id, id)?;
+        }
         let use_cwd_deck = cwd.clone();
         let task_memories = store.list_memories(&cwd, 20).unwrap_or_default();
         let params = pi_session::PiRunParams {
@@ -181,10 +261,29 @@ async fn start_task(
         let task_id2 = task_id.clone();
         let app2 = app.clone();
         tauri::async_runtime::spawn(async move {
-            let result =
-                pi_session::run_pi_task(app2, task_id2, params, store2, reg, sidecar).await;
+            let result = pi_session::run_pi_task(
+                app2.clone(),
+                task_id2.clone(),
+                params,
+                store2.clone_handle(),
+                reg.clone(),
+                sidecar,
+            )
+            .await;
             if let Err(e) = result {
-                eprintln!("pi task failed: {e}");
+                reg.remove(&task_id2);
+                let event = serde_json::json!({
+                    "type": "deck_error", "taskId": task_id2, "message": e
+                });
+                let _ = store2.append_event(&task_id2, &event.to_string());
+                store2.finish_task(&task_id2, "failed", Some(1));
+                let _ = app2.emit("pi-event", event);
+                let _ = app2.emit(
+                    "task-exit",
+                    serde_json::json!({
+                        "taskId": task_id2, "code": 1, "status": "failed"
+                    }),
+                );
             }
         });
         return Ok(TaskStartInfo { task_id });
@@ -195,7 +294,8 @@ async fn start_task(
 
     // git 仓库内派发的任务：自动 worktree 隔离（改动圈在任务分支里）
     let mut worktree: Option<WorktreePaths> = None;
-    if harness.name() != "deck"
+    if resume_session_id.is_none()
+        && project_id.is_none()
         && worktree::is_git_repo(Path::new(&cwd))
         && store
             .get_setting("worktree_isolation")
@@ -216,20 +316,8 @@ async fn start_task(
         .as_ref()
         .map(|w| w.dir.to_string_lossy().to_string())
         .unwrap_or_else(|| cwd.clone());
-    if let Some(w) = &worktree {
-        store.set_task_worktree(
-            &task_id,
-            &w.branch,
-            &w.base_commit,
-            &w.dir.to_string_lossy(),
-        )?;
-    }
-
-    let cli_project = store
-        .find_project_by_dir(&task_cwd)
-        .ok()
-        .flatten()
-        .map(|p| p.id);
+    let cli_project = project_id
+        .or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
     store.create_task(
         &task_id,
         harness.name(),
@@ -239,6 +327,24 @@ async fn start_task(
         model.as_deref(),
         cli_project.as_deref(),
     )?;
+    if let Some(w) = &worktree {
+        store.set_task_worktree(
+            &task_id,
+            &w.branch,
+            &w.base_commit,
+            &w.dir.to_string_lossy(),
+        )?;
+    }
+    store.append_event(
+        &task_id,
+        &serde_json::json!({
+            "type": "user_message", "text": prompt
+        })
+        .to_string(),
+    )?;
+    if let Some(id) = &resume_session_id {
+        store.set_session_id(&task_id, id)?;
+    }
 
     let child = runner::spawn(
         harness,
@@ -271,6 +377,7 @@ async fn start_task(
             RunningTask {
                 label: harness.name().to_string(),
                 child: Some(child),
+                cancelled: false,
             },
         );
 
@@ -299,7 +406,8 @@ fn cancel_task(registry: State<'_, TaskRegistry>, task_id: String) -> Result<(),
     let mut guard = registry.0.lock().map_err(|_| "task registry poisoned")?;
     if let Some(task) = guard.get_mut(&task_id) {
         if let Some(child) = task.child.as_mut() {
-            let _ = child.start_kill();
+            child.start_kill().map_err(|e| format!("终止失败：{e}"))?;
+            task.cancelled = true;
         }
         Ok(())
     } else {
@@ -309,21 +417,83 @@ fn cancel_task(registry: State<'_, TaskRegistry>, task_id: String) -> Result<(),
 
 /// 前端 → Rust：最近的任务历史。
 #[tauri::command]
-fn list_tasks(store: State<'_, Store>, limit: Option<i64>) -> Result<Vec<TaskRow>, String> {
+async fn list_tasks(store: State<'_, Store>, limit: Option<i64>) -> Result<Vec<TaskRow>, String> {
     store.list_tasks(limit.unwrap_or(50))
 }
 
 /// 前端 → Rust：读取某个任务的全部事件（历史回放）。
 #[tauri::command]
-fn get_task_events(
+async fn get_task_events(
     store: State<'_, Store>,
     task_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let raw = store.get_events(&task_id, 0, i64::MAX)?;
+    conversation_events(&store, &task_id)
+}
+
+pub(crate) fn conversation_events(store: &Store, task_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let row = store
+        .get_task(task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let mut turns = if let Some(session) = row.session_id.as_deref() {
+        store
+            .list_tasks(i64::MAX)?
+            .into_iter()
+            .filter(|turn| {
+                turn.harness == row.harness
+                    && turn.session_id.as_deref() == Some(session)
+                    && turn.created_at <= row.created_at
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![row]
+    };
+    turns.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    let mut raw = Vec::new();
+    for turn in turns {
+        raw.extend(store.get_events(&turn.id, 0, i64::MAX)?);
+    }
     Ok(raw
         .iter()
         .filter_map(|s| serde_json::from_str(s).ok())
         .collect())
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use super::*;
+
+    #[test]
+    fn history_replays_prior_turns_without_future_or_other_harness_events() {
+        let store = Store::in_memory().unwrap();
+        for (id, harness) in [("first", "deck"), ("other", "codex"), ("second", "deck")] {
+            store
+                .create_task(id, harness, ".", id, None, None, None)
+                .unwrap();
+            store.set_session_id(id, "shared-session").unwrap();
+            store
+                .append_event(
+                    id,
+                    &serde_json::json!({
+                        "type": "user_message", "text": id
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let first = conversation_events(&store, "first").unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["text"], "first");
+        let second = conversation_events(&store, "second").unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|event| event["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert!(conversation_events(&store, "missing").is_err());
+    }
 }
 
 /// 前端 → Rust：任务工作目录的 git diff（M3 diff 面板数据源）。
@@ -396,6 +566,33 @@ fn delete_task(
     Ok(())
 }
 
+/// Delete a conversation by any turn, including turns outside the UI history window.
+#[tauri::command]
+fn delete_session(
+    app: AppHandle,
+    registry: State<'_, TaskRegistry>,
+    pi_registry: State<'_, pi_session::PiRegistry>,
+    store: State<'_, Store>,
+    task_id: String,
+) -> Result<Vec<String>, String> {
+    let turns = store.session_tasks(&task_id)?;
+    for turn in &turns {
+        if turn.status == "running" {
+            if turn.harness == "deck" {
+                pi_command(pi_registry.clone(), turn.id.clone(), "abort".into(), None)?;
+            } else {
+                cancel_task(registry.clone(), turn.id.clone())?;
+            }
+        }
+    }
+    let ids = turns.into_iter().map(|turn| turn.id).collect::<Vec<_>>();
+    store.delete_tasks(&ids)?;
+    for id in &ids {
+        let _ = app.emit("task-deleted", id);
+    }
+    Ok(ids)
+}
+
 /// 前端 → Rust：唤起 harness 的登录流程（弹独立控制台跑 `* login`，
 /// 浏览器 OAuth 完成后控制台自动结束，凭据写入各家的共享配置）。
 #[tauri::command]
@@ -419,7 +616,7 @@ fn run_login(harness: String) -> Result<(), String> {
         .map_err(|e| format!("唤起登录失败：{e}"))
 }
 
-fn pi_session_task_id() -> String {
+pub(crate) fn pi_session_task_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -438,7 +635,10 @@ async fn build_smart_handoff_prompt(
     let row = store
         .get_task(&task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let events = store.get_events(&task_id, 0, i64::MAX)?;
+    let events = conversation_events(&store, &task_id)?
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>();
     let convo = handoff::render_conversation(&events);
 
     // 无会话记录：不是压缩失败，直接组装「仅任务原话」的交接
@@ -518,12 +718,12 @@ fn set_setting(store: State<'_, Store>, key: String, value: String) -> Result<()
 /// codex 读 desktop 状态文件（账号实际下发过的模型）；
 /// opencode 调 `opencode models`；其余返回空（前端用内置目录）。
 #[tauri::command]
-fn discover_models(harness: String) -> Vec<String> {
-    match harness.as_str() {
+async fn discover_models(harness: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || match harness.as_str() {
         "codex" => discover_codex_models(),
         "opencode" => discover_opencode_models(),
         _ => Vec::new(),
-    }
+    }).await.unwrap_or_default()
 }
 
 const CODEX_MODEL_FALLBACK: &[&str] = &["gpt-5.1-codex", "gpt-5.1", "o4-mini"];
@@ -568,10 +768,14 @@ fn discover_codex_models() -> Vec<String> {
 
 fn discover_opencode_models() -> Vec<String> {
     // opencode 是 .cmd 垫片，Windows 下须经 cmd /C
-    let output = std::process::Command::new("cmd")
-        .args(["/C", "opencode", "models"])
-        .stdin(Stdio::null())
-        .output();
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "opencode", "models"]).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output();
     let Ok(output) = output else {
         return Vec::new();
     };
@@ -1032,20 +1236,27 @@ pub fn run() {
             let dir = app.path().app_data_dir().expect("no app data dir");
             std::fs::create_dir_all(&dir).expect("failed to create data dir");
             let store = Store::open(&dir.join("agent-deck.db")).expect("failed to open store");
-            // 清理 git worktree 残留登记（用户手动删目录后的元数据）
-            if let Some(root) = store.get_setting("default_cwd").ok().flatten() {
-                worktree::prune_stale(Path::new(&root));
-            }
+            let cleanup_root = store.get_setting("default_cwd").ok().flatten();
             app.manage(store);
+            // Git maintenance must not delay window creation.
+            if let Some(root) = cleanup_root {
+                tauri::async_runtime::spawn_blocking(move || worktree::prune_stale(Path::new(&root)));
+            }
             Ok(())
         })
         .manage(TaskRegistry::default())
+        .manage(collaboration::CollaborationRegistry::default())
         .manage(pi_session::PiRegistry::default())
         .manage(diff_watch::DiffWatchRegistry::default())
         .invoke_handler(tauri::generate_handler![
             start_task,
+            collaboration::start_collaboration,
+            collaboration::cancel_collaboration,
+            collaboration::list_collaborations,
+            check_harness,
             cancel_task,
             delete_task,
+            delete_session,
             list_tasks,
             get_task_events,
             get_task_diff,

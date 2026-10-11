@@ -83,6 +83,9 @@ impl PiRegistry {
     pub fn remove(&self, task_id: &str) -> Option<PiSender> {
         self.0.lock().ok().and_then(|mut g| g.remove(task_id))
     }
+    pub fn get(&self, task_id: &str) -> Option<PiSender> {
+        self.0.lock().ok().and_then(|g| g.get(task_id).cloned())
+    }
 }
 
 /// 启动一次 pi 运行：spawn sidecar → 事件循环（转发+入库）→ 退出码回传。
@@ -124,7 +127,8 @@ pub async fn run_pi_task(
 
     // 指令通道：注册到 registry，供 cancel/approve/reject 命令使用
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let tx2 = tx.clone(); // out_task 用于触发记忆抽取
+    let (abort_tx, mut abort_rx) = tokio::sync::watch::channel(false);
+    let tx2 = tx.clone();
     registry.insert(task_id.clone(), tx);
 
     // stdin 写入任务：先发 run 指令，再转发后续 channel 指令
@@ -142,46 +146,34 @@ pub async fn run_pi_task(
         .write_all(serde_json::to_string(&run_cmd).unwrap().as_bytes())
         .await
         .map_err(|e| format!("写入 run 指令失败：{e}"))?;
-    stdin.write_all(b"\n").await.ok();
+    stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
     let mut stdin = Some(stdin);
     let stdin_task = tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
+            if line.contains("\"cmd\":\"abort\"") {
+                let _ = abort_tx.send(true);
+            }
             let Some(s) = stdin.as_mut() else { break };
             if s.write_all(line.as_bytes()).await.is_err() || s.write_all(b"\n").await.is_err() {
                 break;
             }
-            if line.contains("\"cmd\":\"abort\"") || line.contains("__CLOSE__") {
-                break; // abort / 记忆抽取完成：关闭 stdin，sidecar 收尾
+            if line.contains("\"cmd\":\"close\"") {
+                break;
             }
         }
     });
 
-    // stdout：逐行 JSON 事件 → 前端 + 入库；
-    // 成功结束（deck_run_end）后触发记忆抽取，抽取完成发 close 收尾
+    // Stream to the UI; persist final snapshots only.
     let app2 = app.clone();
     let task_id2 = task_id.clone();
     let store2 = store.clone_handle();
-    let cwd2 = params.cwd.clone();
-    let out_task = tokio::spawn(async move {
+    let mut out_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         let mut buf = Vec::new();
-        let mut memorize_sent = false;
-        // memorize 抽取阶段的超时deadline（LLM 卡住时兜底收尾）
-        let mut memorize_deadline: Option<tokio::time::Instant> = None;
+        let mut outcome = None;
         loop {
             buf.clear();
-            // 抽取等待期：180s 内没有下一行事件则强制收尾
-            let read = if let Some(deadline) = memorize_deadline {
-                match tokio::time::timeout_at(deadline, reader.read_until(b'\n', &mut buf)).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
-                        break;
-                    }
-                }
-            } else {
-                reader.read_until(b'\n', &mut buf).await
-            };
+            let read = reader.read_until(b'\n', &mut buf).await;
             match read {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
@@ -208,78 +200,39 @@ pub async fn run_pi_task(
                             let _ = store2.set_session_id(&task_id2, path);
                         }
                     }
-                    // 会话 ID 入库（支撑续接语义与归属展示）
-                    if event_type == "deck_session_id" {
-                        if let Some(id) = parsed
-                            .as_ref()
-                            .and_then(|v| v.get("id"))
-                            .and_then(|i| i.as_str())
-                        {
-                            let _ = store2.set_session_id(&task_id2, id);
-                        }
-                    }
-
-                    // 失败收尾：deck_error 后 sidecar 不再产出，关 stdin 让它退出
-                    let mut failure = false;
+                    // Only the session file is a resume handle; the UUID is display-only.
                     if event_type == "deck_error" {
-                        failure = true;
-                        let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
+                        outcome = Some("failed");
                     }
-
-                    // 成功结束 → 触发记忆抽取（经 stdin 通道发 memorize）
-                    if event_type == "deck_run_end" && !memorize_sent {
-                        memorize_sent = true;
-                        memorize_deadline =
-                            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(180));
-                        let convo = crate::handoff::render_conversation(
-                            &store2
-                                .get_events(&task_id2, 0, i64::MAX)
-                                .unwrap_or_default(),
-                        );
-                        if !convo.trim().is_empty() {
-                            let existing = store2.list_memories(&cwd2, 50).unwrap_or_default();
-                            let cmd = serde_json::json!({
-                                "cmd": "memorize",
-                                "text": convo,
-                                "cwd": cwd2,
-                                "existing": existing,
-                            });
-                            let _ = tx2.send(serde_json::to_string(&cmd).unwrap());
-                            // 注意：不 continue——run_end 仍要入库+转发给前端
-                        }
-                    }
-
-                    // 抽取结果 → 入库 + 发 close 收尾
-                    if event_type == "deck_memorize_result" {
-                        memorize_deadline = None;
-                        if let Some(arr) = parsed
-                            .as_ref()
-                            .and_then(|v| v.get("memories"))
-                            .and_then(|m| m.as_array())
-                        {
-                            for m in arr {
-                                if let Some(text) = m.as_str() {
-                                    let _ = store2.add_memory(&cwd2, text);
-                                }
-                            }
-                        }
-                        let _ = tx2.send("{\"cmd\":\"__CLOSE__\"}".to_string());
+                    if event_type == "deck_run_end" {
+                        let value = parsed.as_ref().unwrap();
+                        outcome = Some(if value["status"] == "cancelled" {
+                            "cancelled"
+                        } else if outcome == Some("failed") || value["ok"] == false {
+                            "failed"
+                        } else {
+                            "done"
+                        });
                     }
 
                     // 事件原样入库（已是 JSON），转发时包上 taskId
-                    let _ = store2.append_event(&task_id2, trimmed);
+                    if event_type != "message_update" {
+                        let _ = store2.append_event(&task_id2, trimmed);
+                    }
                     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {
                         if let Some(obj) = value.as_object_mut() {
                             obj.insert("taskId".into(), serde_json::json!(task_id2));
                         }
                         let _ = app2.emit("pi-event", value);
-                        if failure {
-                            break; // 失败已通知且 close 已发，不等流自然结束
+                        if outcome.is_some() {
+                            let _ = tx2.send("{\"cmd\":\"close\"}".to_string());
+                            break;
                         }
                     }
                 }
             }
         }
+        outcome
     });
 
     eprintln!(
@@ -306,35 +259,68 @@ pub async fn run_pi_task(
         tail
     });
 
-    let _ = stdin_task.await;
-    let _ = out_task.await;
-    let err_tail = err_task.await.unwrap_or_default();
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    registry.remove(&task_id);
-
-    let code = status.code().unwrap_or(-1);
-    if code != 0 && !err_tail.trim().is_empty() {
-        let _ = store.append_event(
-            &task_id,
-            &serde_json::json!({
-                "type": "deck_error",
-                "message": format!("deck-agent 异常退出：{}", err_tail.trim())
-            })
-            .to_string(),
-        );
-    }
-
-    // 与 CLI 执行器同款收尾：状态落库 + task-exit 事件给前端
-    let status_str = match code {
-        0 => "done",
-        _ => "failed",
+    // EOF/crash must not leave the stdin writer waiting on the registry forever.
+    let outcome = tokio::select! {
+        result = &mut out_task => result.map_err(|e| e.to_string())?,
+        _ = async {
+            while !*abort_rx.borrow() {
+                if abort_rx.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut out_task).await {
+                Ok(result) => result.map_err(|e| e.to_string())?.or(Some("cancelled")),
+                Err(_) => {
+                    out_task.abort();
+                    let event = serde_json::json!({
+                        "type": "deck_run_end", "taskId": task_id,
+                        "ok": false, "status": "cancelled"
+                    });
+                    let _ = store.append_event(&task_id, &event.to_string());
+                    let _ = app.emit("pi-event", event);
+                    let _ = child.kill().await;
+                    Some("cancelled")
+                }
+            }
+        }
     };
-    store.finish_task(&task_id, status_str, Some(code as i64));
+    registry.remove(&task_id);
+    if outcome.is_none() {
+        stdin_task.abort();
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(result) => {
+            result.map_err(|e| e.to_string())?;
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+        }
+    }
+    stdin_task.abort();
+    let _ = stdin_task.await;
+    let err_tail = err_task.await.unwrap_or_default();
+    let status_str = outcome.unwrap_or("failed");
+    let code = match status_str {
+        "done" => Some(0),
+        "cancelled" => None,
+        _ => Some(1),
+    };
+    if outcome.is_none() {
+        let event = serde_json::json!({
+            "type": "deck_error",
+            "taskId": task_id,
+            "message": format!("deck-agent 在任务完成前退出：{}", err_tail.trim())
+        });
+        let _ = store.append_event(&task_id, &event.to_string());
+        let _ = app.emit("pi-event", event);
+    }
+    store.finish_task(&task_id, status_str, code);
     let _ = app.emit(
         "task-exit",
-        serde_json::json!({ "taskId": task_id, "code": code }),
+        serde_json::json!({ "taskId": task_id, "code": code, "status": status_str }),
     );
-    Ok(code)
+    Ok(code.unwrap_or(-1) as i32)
 }
 
 /// 向指定 pi 会话发送指令（approve/reject/abort）。
@@ -344,8 +330,14 @@ pub fn send_command(
     cmd: &str,
     id: Option<String>,
 ) -> Result<(), String> {
+    if !matches!(cmd, "approve" | "reject" | "abort") {
+        return Err(format!("不支持的运行指令：{cmd}"));
+    }
+    if matches!(cmd, "approve" | "reject") && id.as_deref().is_none_or(str::is_empty) {
+        return Err("审批缺少工具调用 ID".into());
+    }
     let sender = registry
-        .remove(task_id)
+        .get(task_id)
         .ok_or_else(|| format!("没有活跃的 pi 会话：{task_id}"))?;
     let mut msg = serde_json::json!({ "cmd": cmd });
     if let Some(id) = id {
@@ -354,6 +346,38 @@ pub fn send_command(
     sender
         .send(serde_json::to_string(&msg).unwrap())
         .map_err(|e| format!("发送失败：{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_commands_do_not_unregister_the_session() {
+        let registry = PiRegistry::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.insert("task".into(), tx);
+        for id in ["first", "second"] {
+            send_command(&registry, "task", "approve", Some(id.into())).unwrap();
+            let cmd: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(cmd["id"], id);
+        }
+        send_command(&registry, "task", "abort", None).unwrap();
+        assert!(registry.get("task").is_some());
+        registry.remove("task");
+        assert!(send_command(&registry, "task", "abort", None).is_err());
+    }
+
+    #[test]
+    fn invalid_commands_and_missing_approval_ids_are_rejected() {
+        let registry = PiRegistry::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.insert("task".into(), tx);
+        assert!(send_command(&registry, "task", "close", None).is_err());
+        assert!(send_command(&registry, "task", "approve", None).is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(registry.get("task").is_some());
+    }
 }
 
 /// 用 deck 运行时压缩一段文本（会话记录 → 交接简报）。

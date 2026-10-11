@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { X, Plus, ArrowLeft, Pencil, RefreshCw, Trash2, Coins } from "lucide-react";
+import { X, Plus, ArrowLeft, Pencil, RefreshCw, Trash2, Coins, Search, Settings2, Folder, Bell, Network, Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 import {
   addModelProfile,
@@ -23,7 +24,7 @@ import {
 } from "../api";
 import type { ModelProfile, ProfileModel } from "../api";
 
-type Section = "general" | "models";
+type Section = "general" | "models" | "workspace" | "notifications";
 
 const PROVIDER_LABEL: Record<string, string> = { glm: "GLM", gpt: "GPT", custom: "自定义" };
 
@@ -60,12 +61,12 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-6 border-b border-stone-100 py-4 last:border-b-0">
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-stone-800">{label}</div>
-        {desc && <div className="mt-0.5 text-xs leading-relaxed text-stone-500">{desc}</div>}
+    <div className="settings-row">
+      <div className="settings-row-copy">
+        <div className="settings-row-label">{label}</div>
+        {desc && <div className="settings-row-description">{desc}</div>}
       </div>
-      <div className="shrink-0">{children}</div>
+      <div className="settings-row-control">{children}</div>
     </div>
   );
 }
@@ -75,25 +76,24 @@ function Toggle({
   on,
   onChange,
   label,
+  disabled = false,
 }: {
   on: boolean;
   onChange: (v: boolean) => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       role="switch"
       aria-checked={on}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!on)}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200 ${
-        on ? "bg-stone-800" : "bg-stone-300"
-      }`}
+      className={`settings-toggle ${on ? "is-on" : ""}`}
     >
       <span
-        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all duration-200 ${
-          on ? "left-[22px]" : "left-0.5"
-        }`}
+        className="settings-toggle-thumb"
       />
     </button>
   );
@@ -150,7 +150,7 @@ function ModelRow({
   const inputCls =
     "min-w-0 rounded-lg border border-transparent px-1.5 py-1 font-mono text-xs outline-none transition-colors hover:border-stone-200 focus:border-stone-400 focus:bg-white";
   return (
-    <div className="flex items-center gap-2 py-1">
+    <div className="model-catalog-fields">
       <button
         role="radio"
         aria-checked={isDefault}
@@ -214,17 +214,20 @@ function ModelRow({
 /** 全页设置（Codex 桌面端式）：左侧分区导航 + 右侧行式布局 */
 export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [section, setSection] = useState<Section>("general");
+  const [navQuery, setNavQuery] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingPreference, setSavingPreference] = useState(false);
   const present = useIsPresent();
+  const dialogRef = useDialogFocus(present, 'input[aria-label="搜索设置"]');
   useEffect(() => {
     if (!present) return;
-    const previous = document.activeElement as HTMLElement | null;
     const closeOnEscape = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); onClose(); }
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => {
       document.removeEventListener("keydown", closeOnEscape);
-      previous?.focus();
     };
   }, [onClose, present]);
 
@@ -285,23 +288,41 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   };
 
   const pickDefaultCwd = async () => {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked !== "string") return;
-    setDefaultCwd(picked);
-    await setSetting("default_cwd", picked);
-    flash("默认目录已更新");
+    try {
+      const picked = await open({ directory: true, multiple: false });
+      if (typeof picked !== "string") return;
+      await setSetting("default_cwd", picked);
+      setDefaultCwd(picked);
+      flash("默认目录已更新");
+    } catch (error) { flash(String(error)); }
   };
 
   const saveIsolation = async (v: boolean) => {
+    if (savingPreference) return;
+    const previous = isolation;
+    setSavingPreference(true);
     setIsolation(v);
-    await setSetting("worktree_isolation", v ? "on" : "off");
-    flash(v ? "任务隔离已开启" : "任务隔离已关闭");
+    try {
+      await setSetting("worktree_isolation", v ? "on" : "off");
+      flash(v ? "任务隔离已开启" : "任务隔离已关闭");
+    } catch (error) {
+      setIsolation(previous);
+      flash(String(error));
+    } finally { setSavingPreference(false); }
   };
 
   const saveNotify = async (v: boolean) => {
+    if (savingPreference) return;
+    const previous = notifyOn;
+    setSavingPreference(true);
     setNotifyOn(v);
-    await setSetting("notifications_enabled", v ? "on" : "off");
-    flash(v ? "通知已开启" : "通知已关闭");
+    try {
+      await setSetting("notifications_enabled", v ? "on" : "off");
+      flash(v ? "通知已开启" : "通知已关闭");
+    } catch (error) {
+      setNotifyOn(previous);
+      flash(String(error));
+    } finally { setSavingPreference(false); }
   };
 
   const openAdd = () => {
@@ -335,6 +356,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   };
 
   const saveProfile = async () => {
+    if (savingProfile) return;
     if (!form.api_key.trim()) {
       flash("API Key 不能为空");
       return;
@@ -347,6 +369,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       model: defaultModel,
       protocol: form.protocol,
     };
+    setSavingProfile(true);
     try {
       let saved: ModelProfile | null = null;
       if (editingId) {
@@ -376,6 +399,8 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       }
     } catch (e) {
       flash(String(e));
+    } finally {
+      setSavingProfile(false);
     }
   };
 
@@ -465,12 +490,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
   // 模型列表管理面板（编辑表单内嵌；一供多模）
   const renderModelManager = (p: ModelProfile) => (
-    <div className="rounded-xl border border-stone-200 bg-white p-3">
-      <div className="mb-2 flex items-center justify-between">
+    <div className="model-manager">
+      <div className="model-manager-heading">
         <span className="text-xs font-semibold text-stone-500" title="行首圆点选中 = 默认模型（派任务未指定时使用）">
-          模型列表（{modelCounts[p.id] ?? 0}）· 圆点选默认
+          模型列表（{modelCounts[p.id] ?? 0}）
         </span>
-        <div className="flex gap-2">
+        <div className="model-manager-actions">
           <button
             onClick={() => fetchModelsFromUpstream(p)}
             disabled={fetchingModels}
@@ -503,7 +528,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
         <div className="py-2 text-xs text-stone-400">暂无模型——手动添加，或从上游获取</div>
       )}
       {(modelLists[p.id] ?? []).map((m) => (
-        <div key={m.id} className="flex items-center gap-2">
+        <div key={m.id} className="model-manager-row">
           <ModelRow
             row={m}
             isDefault={defaultModel === m.model}
@@ -526,7 +551,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
         </div>
       ))}
 
-      <div className="mt-2 flex gap-2">
+      <div className="model-add-fields">
         <input
           value={newModelName}
           onChange={(e) => setNewModelName(e.target.value)}
@@ -562,30 +587,36 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     </div>
   );
 
-  const navItems: { key: Section; label: string }[] = [
-    { key: "general", label: "常规" },
-    { key: "models", label: "模型池" },
+  const navItems = [
+    { key: "general" as const, label: "常规", group: "个人", icon: Settings2 },
+    { key: "workspace" as const, label: "工作区", group: "个人", icon: Folder },
+    { key: "notifications" as const, label: "通知", group: "个人", icon: Bell },
+    { key: "models" as const, label: "模型池", group: "智能体", icon: Network },
   ];
+  const filteredNav = navItems.filter((item) => `${item.label} ${item.group}`.includes(navQuery.trim()));
 
   return (
-    <MotionLayer preset="scene" className="settings-page fixed inset-0 z-50 flex bg-white" role="dialog" aria-label="设置" aria-modal="true">
+    <MotionLayer ref={dialogRef} tabIndex={-1} initial={false} exit={{ opacity: 1 }} transition={{ duration: 0 }}
+      className="settings-page" role="dialog" aria-label="设置" aria-modal="true">
       {/* 左侧分区导航 */}
-      <aside className="flex w-60 shrink-0 flex-col border-r border-stone-100 bg-stone-50/60">
-        <div className="px-5 pb-3 pt-5 text-xl font-semibold tracking-tight">设置</div>
-        <nav className="flex-1 space-y-1 px-3">
-          {navItems.map((n) => (
+      <aside className="settings-sidebar">
+        <div className="settings-sidebar-heading"><span>设置</span><button className="icon-button" title="返回工作台" aria-label="返回工作台" onClick={onClose}><ArrowLeft size={18} /></button></div>
+        <label className="settings-search"><Search size={16} /><input aria-label="搜索设置" placeholder="搜索" value={navQuery} onChange={(event) => setNavQuery(event.target.value)} />
+          {navQuery && <button className="icon-button" aria-label="清除设置搜索" title="清除搜索" onClick={() => setNavQuery("")}><X size={14} /></button>}</label>
+        <nav aria-label="设置分区">
+          {filteredNav.map((n, index) => (
+            <div key={n.key}>
+            {(index === 0 || filteredNav[index - 1].group !== n.group) && <div className="settings-nav-group">{n.group}</div>}
             <button
-              key={n.key}
               onClick={() => setSection(n.key)}
-              className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
-                section === n.key
-                  ? "bg-stone-200/70 font-medium text-stone-900"
-                  : "text-stone-600 hover:bg-stone-100"
-              }`}
+              aria-current={section === n.key ? "page" : undefined}
+              className={`settings-nav-item ${section === n.key ? "is-active" : ""}`}
             >
-              {n.label}
+              <n.icon size={18} />{n.label}
             </button>
+            </div>
           ))}
+          {filteredNav.length === 0 && <div className="sidebar-empty">无匹配设置</div>}
         </nav>
         <div className="px-5 pb-4">
           <button
@@ -598,53 +629,56 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       </aside>
 
       {/* 右侧内容 */}
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        <MotionLayer key={section} preset="scene" className="mx-auto max-w-2xl px-10 py-10">
-          {section === "general" && (
+      <main className="settings-main">
+        <MotionLayer key={section} preset="scene" className="settings-content">
+          {section !== "models" && (
             <>
-              <h1 className="text-2xl font-semibold tracking-tight">常规</h1>
+              <h1>{navItems.find((item) => item.key === section)?.label}</h1>
 
-              <h2 className="mt-8 text-sm font-semibold text-stone-500">任务</h2>
-              <div className="mt-2">
+              {(section === "general" || section === "notifications") && <>
+              <h2 className="settings-section-heading">{section === "notifications" ? "通知偏好" : "任务"}</h2>
+              <div className="settings-group">
+                {section === "general" && (
                 <Row
                   label="Worktree 隔离"
                   desc="git 仓库内派发的任务在独立 worktree 分支中运行，完成后可合并或放弃"
                 >
-                  <Toggle label="Worktree 隔离" on={isolation} onChange={saveIsolation} />
-                </Row>
+                  <Toggle label="Worktree 隔离" on={isolation} onChange={saveIsolation} disabled={savingPreference} />
+                </Row>)}
                 <Row
                   label="任务完成通知"
                   desc="窗口失焦时，任务完成或需要审批会弹出系统通知"
                 >
-                  <Toggle label="任务完成通知" on={notifyOn} onChange={saveNotify} />
+                  <Toggle label="任务完成通知" on={notifyOn} onChange={saveNotify} disabled={savingPreference} />
                 </Row>
-              </div>
+              </div></>}
 
-              <h2 className="mt-8 text-sm font-semibold text-stone-500">工作区</h2>
-              <div className="mt-2">
+              {(section === "general" || section === "workspace") && <>
+              <h2 className="settings-section-heading">工作区</h2>
+              <div className="settings-group">
                 <Row
                   label="默认任务文件夹"
                   desc="在项目外启动的任务默认存储数据的位置"
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="max-w-56 truncate font-mono text-xs text-stone-500">
+                  <div className="settings-directory-control">
+                    <span className="settings-directory" title={defaultCwd}>
                       {defaultCwd || "（未设置）"}
                     </span>
                     <button
                       onClick={pickDefaultCwd}
-                      className="rounded-lg border border-stone-200 px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100"
+                      className="shrink-0 whitespace-nowrap rounded-lg border border-stone-200 px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100"
                     >
                       更改
                     </button>
                   </div>
                 </Row>
-              </div>
+              </div></>}
             </>
           )}
 
           {section === "models" && (
             <>
-              <h1 className="text-2xl font-semibold tracking-tight">模型池</h1>
+              <h1>模型池</h1>
 
               <div className="mt-4">
                 {profiles.length === 0 && (
@@ -700,35 +734,36 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   <span className="flex items-center justify-center gap-2"><Plus size={14} />添加模型配置</span>
                 </button>
               ) : (
-                <div className="mt-3 space-y-2 rounded-xl border border-stone-200 bg-stone-50/70 p-4">
+                <div className="model-profile-form">
                   {editingId && (
                     <div className="text-xs font-medium text-stone-500">
                       正在编辑：{PROVIDER_LABEL[form.provider] ?? form.provider}
                     </div>
                   )}
-                  <input
+                  <label className="settings-field"><span>供应商名称</span><input
                     value={form.label}
                     onChange={(e) => setForm({ ...form, label: e.target.value })}
                     aria-label="供应商名称"
                     placeholder="名称（可选，如「中转 · DeepSeek」）"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
-                  />
-                  <input
+                  /></label>
+                  <label className="settings-field"><span>Base URL</span><input
                     value={form.base_url}
                     onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                     placeholder="Base URL（如 https://api.deepseek.com/v1）"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 font-mono text-xs outline-none focus:border-stone-400"
-                  />
-                  <input
-                    type="password"
+                  /></label>
+                  <label className="settings-field"><span>API Key</span><div className="settings-secret-field"><input
+                    type={showKey ? "text" : "password"}
                     value={form.api_key}
                     onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                     placeholder="API Key"
                     className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
-                  />
+                  /><button className="icon-button" type="button" title={showKey ? "隐藏 API Key" : "显示 API Key"} aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
+                    onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>
                   <div>
                     <div className="mb-1 text-xs font-medium text-stone-500">上游协议</div>
-                    <div className="flex gap-2">
+                    <div className="protocol-control" role="radiogroup" aria-label="上游协议">
                       {[
                         { key: "chat", label: "Chat API" },
                         { key: "responses", label: "Responses API" },
@@ -736,12 +771,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                       ].map((opt) => (
                         <button
                           key={opt.key}
+                          role="radio"
+                          aria-checked={(form.protocol ?? "chat") === opt.key}
                           onClick={() => setForm({ ...form, protocol: opt.key })}
-                          className={`flex-1 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
-                            (form.protocol ?? "chat") === opt.key
-                              ? "border-stone-800 bg-stone-900 font-medium text-white"
-                              : "border-stone-200 text-stone-600 hover:bg-stone-100"
-                          }`}
+                          className={(form.protocol ?? "chat") === opt.key ? "is-active" : ""}
                         >
                           {opt.label}
                         </button>
@@ -752,16 +785,16 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   {editingId && editingProfile ? (
                     renderModelManager(editingProfile)
                   ) : (
-                    <div className="rounded-lg border border-dashed border-stone-200 px-3 py-2 text-xs text-stone-400">
-                      保存后可在表单里继续维护该供应商的模型列表（多模型 / 从上游获取 / 倍率）
-                    </div>
+                    null
                   )}
 
                   <div className="flex gap-2">
                     <button
                       onClick={saveProfile}
-                      className="flex-1 rounded-lg bg-stone-900 py-2 text-xs font-medium text-white hover:bg-stone-700"
+                      disabled={savingProfile}
+                      className="task-action task-action-primary disabled:opacity-40"
                     >
+                      {savingProfile && <LoaderCircle size={13} className="animate-spin" />}
                       {editingId ? "保存修改" : "添加并启用"}
                     </button>
                     <button
@@ -773,15 +806,15 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   </div>
                 </div>
               )}
-              {status && <div className="mt-2 text-xs text-emerald-600">{status}</div>}
             </>
           )}
         </MotionLayer>
+        {status && <div className="settings-feedback" role="status">{status}</div>}
 
         {/* 右上关闭 */}
         <button
           onClick={onClose}
-          className="hover-lift fixed right-6 top-6 z-10 rounded-lg border border-stone-200 bg-white p-1.5 text-stone-400 hover:text-stone-700"
+          className="icon-button settings-close"
           title="关闭设置（Esc）"
           aria-label="关闭设置"
         >

@@ -1,4 +1,5 @@
-import { memo } from "react";
+import { memo, useState } from "react";
+import { Copy, Check, AlertCircle } from "lucide-react";
 import type { AgentEvent } from "../types";
 import { AssistantText } from "./AssistantText";
 import { Disclosure } from "./Disclosure";
@@ -40,6 +41,7 @@ export const EventLine = memo(function EventLine({
       return (
         <div className="message-assistant">
           <AssistantText text={event.text} />
+          <MessageActions text={event.text} />
         </div>
       );
     case "thinking":
@@ -71,13 +73,13 @@ export const EventLine = memo(function EventLine({
     case "complete":
       return (
         <div className="activity-event flex items-center gap-1.5">
-          <IconCheckCircle size={14} className="shrink-0" />
+           {event.ok ? <IconCheckCircle size={14} className="shrink-0" /> : <IconXCircle size={14} className="shrink-0" />}
           任务{event.ok ? "完成" : "结束"}
         </div>
       );
     case "error":
       return (
-        <div className="event-error flex items-start gap-1.5 whitespace-pre-wrap text-red-600">
+        <div role="alert" className="event-error flex items-start gap-1.5 whitespace-pre-wrap text-red-600">
           <IconXCircle size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0">{event.message}</span>
         </div>
@@ -92,3 +94,22 @@ export const EventLine = memo(function EventLine({
       return null;
   }
 });
+
+function MessageActions({ text }: { text: string }) {
+  const [feedback, setFeedback] = useState<"idle" | "copied" | "failed">("idle");
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setFeedback("copied");
+    } catch { setFeedback("failed"); }
+    setTimeout(() => setFeedback("idle"), 1600);
+  };
+  const label = feedback === "copied" ? "已复制回复" : feedback === "failed" ? "复制失败，请重试" : "复制回复";
+  return (
+    <div className="message-actions">
+      <button className="icon-button" title={label} aria-label={label} onClick={copy}>
+        {feedback === "copied" ? <Check size={14} /> : feedback === "failed" ? <AlertCircle size={14} /> : <Copy size={14} />}
+      </button>
+    </div>
+  );
+}

@@ -21,10 +21,22 @@ export async function mockDesktop(page: Page, failSend = true) {
     const w = window as unknown as Record<string, unknown>;
     const calls: string[] = [];
     w.__testCalls = calls;
+    w.__testTasks = tasks;
+    const deleted: string[][] = [];
+    w.__testDeleted = deleted;
     w.__testProfileModels = profileModels;
     const requests: Record<string, unknown>[] = [];
     w.__testRequests = requests;
     w.__emit = (event: string, payload: unknown) => {
+      const value = payload as { taskId?: string; type?: string; path?: string; code?: number; event?: { type: string; id: string } };
+      const task = tasks.find((task) => task.id === value.taskId);
+      if (task) {
+        if (value.event?.type === "session_id") task.session_id = value.event.id;
+        if (value.type === "deck_session_file") task.session_id = String(value.path);
+        if (event === "task-exit") {
+          task.status = value.code === 0 ? "done" : value.code == null ? "cancelled" : "failed";
+        }
+      }
       for (const [id, listener] of listeners) {
         if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
       }
@@ -40,9 +52,25 @@ export async function mockDesktop(page: Page, failSend = true) {
       unregisterCallback: (id: number) => callbacks.delete(id),
       invoke: async (cmd: string, args: Record<string, unknown>) => {
         calls.push(cmd);
+        if (cmd === "check_harness") return { ready: true, issues: [] };
+        if (cmd === "list_collaborations") return [];
         if (cmd === "list_projects") return projects.map((project) => ({ ...project }));
         if (cmd === "list_tasks") return tasks.map((task) => ({ ...task }));
+        if (cmd === "delete_session") {
+          if (w.__testDeleteError) throw new Error(String(w.__testDeleteError));
+          const task = tasks.find((task) => task.id === args.taskId);
+          if (!task) throw new Error("任务不存在");
+          const ids = tasks.filter((item) => task.session_id
+            ? item.harness === task.harness && item.session_id === task.session_id
+            : item.id === task.id).map((item) => item.id);
+          deleted.push(ids);
+          for (let i = tasks.length - 1; i >= 0; i--) {
+            if (ids.includes(tasks[i].id)) tasks.splice(i, 1);
+          }
+          return ids;
+        }
         if (cmd === "get_default_cwd") return projects[0].dir;
+        if (cmd === "get_task_diff") return "diff --git a/src/App.tsx b/src/App.tsx\n--- a/src/App.tsx\n+++ b/src/App.tsx\n@@ -1 +1 @@\n-const layout = \"previous\";\n+const layout = \"workspace\";\n";
         if (cmd === "discover_models") return ["gpt-test", "provider/a-very-long-model-name-for-layout-checks"];
         if (cmd === "get_task_events") return [
           { type: "user_message", text: "请调整工作台布局，并验证小屏幕下的表现。" },
@@ -57,6 +85,9 @@ export async function mockDesktop(page: Page, failSend = true) {
           requests.push(args);
           const id = ++taskCount === 1 ? "new-task" : `new-task-${taskCount}`;
           const task = row(id, 0, String(args.prompt), String(args.harness));
+          task.created_at = Date.now() + taskCount;
+          task.status = "running";
+          task.session_id = args.resumeSessionId ? String(args.resumeSessionId) : id;
           tasks.unshift(task);
           return { task_id: task.id };
         }

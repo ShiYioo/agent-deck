@@ -1,6 +1,7 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Square, ChevronDown, Folder } from "lucide-react";
+import { Play, Square, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 import { useTextareaAutosize } from "../hooks/useTextareaAutosize";
@@ -32,6 +33,7 @@ export const Composer = memo(function Composer({
   placeholder,
   draftKey,
   onStop,
+  catalogVersion,
 }: {
   cwd: string;
   onCwdChange: (v: string) => void;
@@ -49,6 +51,7 @@ export const Composer = memo(function Composer({
   onSend: (text: string) => Promise<boolean>;
   draftKey: string;
   onStop: () => void;
+  catalogVersion: boolean;
   /** 任务运行中：发送将入队而非直接派发 */
   running?: boolean;
   /** 历史常用模型（按频次），动态列表按此置顶排序 */
@@ -60,6 +63,9 @@ export const Composer = memo(function Composer({
   const drafts = useRef(new Map<string, string>());
   const currentDraftKey = useRef(draftKey);
   const projectMenuRef = useRef<HTMLDivElement>(null);
+  const projectPopupRef = useRef<HTMLDivElement>(null);
+  const projectTriggerRef = useRef<HTMLButtonElement>(null);
+  const [projectPosition, setProjectPosition] = useState({ left: 12, top: 12, width: 360, maxHeight: 320 });
   useEffect(() => {
     currentDraftKey.current = draftKey;
     setText(drafts.current.get(draftKey) ?? "");
@@ -68,15 +74,17 @@ export const Composer = memo(function Composer({
   }, [draftKey]);
   // 项目菜单开关 + 当前生效项目（cwd 匹配或显式选择）
   const [projMenuOpen, setProjMenuOpen] = useState(false);
+  const [projectError, setProjectError] = useState<string | null>(null);
   useEffect(() => {
     if (!projMenuOpen) return;
     const dismiss = (e: PointerEvent) => {
-      if (!projectMenuRef.current?.contains(e.target as Node)) setProjMenuOpen(false);
+      if (!projectMenuRef.current?.contains(e.target as Node) && !projectPopupRef.current?.contains(e.target as Node)) setProjMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
         setProjMenuOpen(false);
+        projectTriggerRef.current?.focus();
       }
     };
     document.addEventListener("pointerdown", dismiss);
@@ -86,6 +94,32 @@ export const Composer = memo(function Composer({
       document.removeEventListener("keydown", onKey, true);
     };
   }, [projMenuOpen]);
+  useLayoutEffect(() => {
+    if (!projMenuOpen) return;
+    const position = () => {
+      const rect = projectTriggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const minTop = (document.querySelector(".titlebar")?.getBoundingClientRect().bottom ?? 0) + 12;
+      const width = Math.min(360, window.innerWidth - 24);
+      const above = Math.max(0, rect.top - minTop - 6);
+      const below = Math.max(0, window.innerHeight - rect.bottom - 18);
+      const useAbove = above >= below;
+      const maxHeight = Math.min(320, useAbove ? above : below);
+      const height = Math.min(projectPopupRef.current?.scrollHeight ?? 320, maxHeight);
+      setProjectPosition({
+        left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
+        top: useAbove ? Math.max(minTop, rect.top - height - 6) : rect.bottom + 6,
+        width, maxHeight,
+      });
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [projMenuOpen, projects.length]);
   const activeProject = useMemo(() => {
     if (selectedProjectId) {
       return projects.find((x) => x.id === selectedProjectId) ?? null;
@@ -207,31 +241,35 @@ export const Composer = memo(function Composer({
 
   // 动态发现真实模型列表（codex 读 desktop 状态文件、opencode 调 CLI）；
   // 失败或为空则回退静态目录
-  const [discovered, setDiscovered] = useState<string[]>([]);
   const [modelOptionsBy, setModelOptionsBy] = useState<Record<string, string[]>>({});
+  const requestedHarness = mention?.kind === "model" ? mention.agent : harness;
+  const discovered = modelOptionsBy[harness] ?? [];
   useEffect(() => {
-    for (const h of ["codex", "opencode"]) {
-      discoverModels(h)
-        .then((list) =>
-          setModelOptionsBy((prev) => ({ ...prev, [h]: list })),
-        )
-        .catch(() => {});
-    }
-  }, []);
+    if (requestedHarness !== "codex" && requestedHarness !== "opencode") return;
+    let alive = true;
+    discoverModels(requestedHarness)
+      .then((list) => {
+        if (alive) setModelOptionsBy((prev) => ({ ...prev, [requestedHarness]: list }));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [requestedHarness]);
 
   // deck 模型目录：模型池里启用档案的模型列表（value = "<profileId>:<modelId>"，
   // 无目录的档案暴露其默认模型），下拉与 @deck: 提及共用
   const [deckOptions, setDeckOptions] = useState<{ value: string; label: string; group: string }[]>([]);
   useEffect(() => {
-    if (!inTauri) return;
+    if (!inTauri || requestedHarness !== "deck" || catalogVersion) return;
     let alive = true;
     (async () => {
       try {
         const profiles = await listModelProfiles();
         const out: { value: string; label: string; group: string }[] = [];
-        for (const p of profiles.filter((x) => x.enabled)) {
+        const enabled = profiles.filter((x) => x.enabled);
+        const catalogs = await Promise.all(enabled.map((p) => listProfileModels(p.id).catch(() => [])));
+        for (const [index, p] of enabled.entries()) {
           const group = p.label || p.provider;
-          const rows = await listProfileModels(p.id).catch(() => []);
+          const rows = catalogs[index];
           if (rows.length > 0) {
             for (const r of rows) {
               out.push({ value: `${p.id}:${r.model}`, label: r.model, group });
@@ -249,37 +287,23 @@ export const Composer = memo(function Composer({
     return () => {
       alive = false;
     };
-  }, [harness]);
-  useEffect(() => {
-    setDiscovered([]);
-    if (!MODEL_CATALOG[harness]) {
-      setDiscovered([]);
-      return;
-    }
-    let alive = true;
-    discoverModels(harness)
-      .then((models) => alive && setDiscovered(models))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [harness]);
+  }, [requestedHarness, catalogVersion]);
 
   /** 各 harness 的权限模式目录（mode 字段按 harness 有不同取值） */
   const MODE_CATALOG: Record<string, { value: string; label: string }[]> = {
     zcode: [
-      { value: "yolo", label: "全自动" },
+      { value: "yolo", label: "完全访问" },
       { value: "build", label: "编辑前确认" },
-      { value: "edit", label: "edit" },
+      { value: "edit", label: "允许编辑" },
       { value: "plan", label: "只读规划" },
     ],
     codex: [
-      { value: "full", label: "全自动（无沙箱）" },
+      { value: "full", label: "完全访问" },
       { value: "write", label: "沙箱内写入" },
       { value: "readonly", label: "只读" },
     ],
     opencode: [
-      { value: "default", label: "全部权限（build）" },
+      { value: "default", label: "完全访问" },
       { value: "plan", label: "只读规划（plan）" },
     ],
   };
@@ -305,26 +329,37 @@ export const Composer = memo(function Composer({
       {/* 项目/目录行：未选 → 整行安静「选择项目」；已选 → chip 显示名称 */}
       <div ref={projectMenuRef} className="composer-project-row">
         <button
+          ref={projectTriggerRef}
           onClick={() => setProjMenuOpen((v) => !v)}
           className="composer-project-button"
           title={cwd || "选择项目"}
           aria-expanded={projMenuOpen}
           aria-haspopup="dialog"
+          aria-label="选择项目"
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              setProjMenuOpen(true);
+              requestAnimationFrame(() => projectPopupRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+            }
+          }}
         >
-          <IconFolder size={14} className="shrink-0" />
-          {activeProject ? (
-            <span className="truncate font-medium">{activeProject.name}</span>
-          ) : cwd ? (
-            <span className="truncate">{projectName(cwd)}</span>
-          ) : (
-            <span>选择项目</span>
-          )}
-          <ChevronDown size={12} className="shrink-0" />
+          <Plus size={20} />
+          <span className="sr-only">{activeProject?.name ?? projectName(cwd)}</span>
         </button>
 
-        <AnimatePresence>
+        {createPortal(<AnimatePresence>
         {projMenuOpen && (
-          <MotionLayer preset="menu" role="dialog" aria-label="选择项目" className="project-menu">
+          <MotionLayer ref={projectPopupRef} preset="menu" role="dialog" aria-label="选择项目" className="project-menu" style={projectPosition}
+            onKeyDown={(e) => {
+              if (e.target instanceof HTMLInputElement || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+              const buttons = Array.from(projectPopupRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+              if (!buttons.length) return;
+              e.preventDefault();
+              const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+              const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 : (index + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+              buttons[next].focus();
+            }}>
             <div className="border-b border-stone-100 px-3 py-1.5 text-[10px] text-stone-400">
               项目
             </div>
@@ -334,7 +369,8 @@ export const Composer = memo(function Composer({
                 onClick={() => {
                   onProjectSelect(pj.id, pj.dir);
                   onCwdChange(pj.dir);
-                  setProjMenuOpen(false);
+                   setProjMenuOpen(false);
+                   projectTriggerRef.current?.focus();
                 }}
                 className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${
                   activeProject?.id === pj.id
@@ -361,21 +397,28 @@ export const Composer = memo(function Composer({
                   setProjMenuOpen(false);
                   return;
                 }
-                const picked = await open({ directory: true, multiple: false });
-                if (typeof picked === "string") {
-                  onCwdChange(picked);
-                  onProjectSelect(null, "");
+                try {
+                  const picked = await open({ directory: true, multiple: false });
+                  if (typeof picked === "string") {
+                    onCwdChange(picked);
+                    onProjectSelect(null, "");
+                  }
+                  setProjectError(null);
+                  setProjMenuOpen(false);
+                  projectTriggerRef.current?.focus();
+                } catch (error) {
+                  setProjectError(String(error));
                 }
-                setProjMenuOpen(false);
               }}
               className="flex w-full items-center gap-2 border-t border-stone-100 px-3 py-2 text-left text-xs text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-40"
             >
               <IconFolder size={13} className="shrink-0 text-stone-400" />
               浏览文件夹…
             </button>
+            {projectError && <div className="px-3 py-2 text-xs text-red-600" role="alert">{projectError}</div>}
           </MotionLayer>
         )}
-        </AnimatePresence>
+        </AnimatePresence>, document.body)}
       </div>
 
       <div className="relative">
@@ -491,7 +534,7 @@ export const Composer = memo(function Composer({
               send();
             }
           }}
-           rows={2}
+           rows={1}
            aria-label="消息"
           placeholder={placeholder ?? "随心输入"}
            className="composer-input"
@@ -499,9 +542,8 @@ export const Composer = memo(function Composer({
       </div>
 
        <div className="composer-toolbar">
-         <Folder size={15} className="composer-context-icon" />
-
         {/* harness 下拉：身份色信号点 */}
+        <div className="composer-agent-control">
         <Dropdown
           value={harness}
           onChange={onHarnessChange}
@@ -513,11 +555,13 @@ export const Composer = memo(function Composer({
             { value: "opencode", label: "OpenCode" },
           ]}
           title="选择 harness"
+          displayLabel={harness === "deck" ? "AgentDeck" : harness === "codex" ? "Codex" : harness === "zcode" ? "ZCode" : "OpenCode"}
         />
+        </div>
 
         {/* codex/opencode/deck：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
         {(MODEL_CATALOG[harness] || harness === "deck") && (
-          <Dropdown
+          <div className="composer-model-control"><Dropdown
             value={model}
             onChange={onModelChange}
             options={[
@@ -553,22 +597,23 @@ export const Composer = memo(function Composer({
                   : undefined
             }
             title="模型"
-          />
+          /></div>
         )}
 
         {/* 权限模式：zcode/codex/opencode 各自目录 */}
         {MODE_CATALOG[harness] && (
-          <Dropdown
+          <div className={`composer-permission-control ${["yolo", "full", "default"].includes(mode) ? "is-elevated" : ""}`}><Dropdown
             value={mode}
             onChange={onModeChange}
             options={MODE_CATALOG[harness]}
             title="权限模式"
-          />
+            icon={["yolo", "full", "default"].includes(mode) ? <ShieldAlert size={14} /> : <ShieldCheck size={14} />}
+          /></div>
         )}
 
         {/* deck 运行时：工具审批开关（approved = 执行前经 UI 审批） */}
         {harness === "deck" && (
-          <Dropdown
+          <div className={`composer-permission-control ${permission === "auto" ? "is-elevated" : ""}`}><Dropdown
             value={permission}
             onChange={onPermissionChange}
             options={[
@@ -576,10 +621,9 @@ export const Composer = memo(function Composer({
               { value: "approved", label: "工具需审批" },
             ]}
             title="工具审批"
-          />
+            icon={permission === "auto" ? <ShieldAlert size={14} /> : <ShieldCheck size={14} />}
+          /></div>
         )}
-
-        <span className="flex-1" />
 
         {running && (
           <span className="typing-dots mr-1 flex items-center" aria-label="运行中">
@@ -596,7 +640,7 @@ export const Composer = memo(function Composer({
            title={running && !text.trim() ? "停止" : running ? "加入队列" : "发送"}
            aria-label={running && !text.trim() ? "停止" : running ? "加入队列" : "发送"}
          >
-           {running && !text.trim() ? <Square size={13} fill="currentColor" /> : <ArrowUp size={18} />}
+           {running && !text.trim() ? <Square size={12} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
         </button>
       </div>
 

@@ -69,6 +69,34 @@ pub(crate) fn render_conversation(events: &[String]) -> String {
     lines.join("\n")
 }
 
+pub(crate) fn assistant_text(events: &[String]) -> String {
+    let mut messages = Vec::new();
+    for raw in events {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        if v.get("type").and_then(|x| x.as_str()) == Some("assistant_message") {
+            let text = field(&v, "text");
+            if !text.is_empty() {
+                messages.push(text);
+            }
+            continue;
+        }
+        let Some(message) = v.get("message").filter(|m| m.get("role").and_then(|x| x.as_str()) == Some("assistant")) else {
+            continue;
+        };
+        let text = message.get("content").and_then(|c| c.as_array()).map(|items| {
+            items.iter().filter(|c| c.get("type").and_then(|x| x.as_str()) == Some("text"))
+                .filter_map(|c| c.get("text").and_then(|x| x.as_str()))
+                .collect::<String>()
+        }).unwrap_or_default();
+        if !text.is_empty() {
+            messages.push(text);
+        }
+    }
+    messages.join("\n")
+}
+
 // ── AI 交接（pi 运行时压缩） ────────────────────────────────
 
 /// AI 交接 prompt 组装：原始任务 + AI 简报 + 会话尾部原文 + 接手指令。

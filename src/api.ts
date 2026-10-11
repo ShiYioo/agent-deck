@@ -1,9 +1,56 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentEvent, TaskRow } from "./types";
+import type { AgentEvent, PiEvent, TaskRow } from "./types";
+import { normalizeAgentEvents } from "./types";
+import { applyTaskUpdates } from "./taskState";
 
 /** 是否运行在 Tauri 窗口内。纯浏览器（vite 预览）下 IPC 桥不存在。 */
 export const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export type HarnessHealth = { ready: boolean; issues: string[] };
+export type Collaboration = {
+  id: string;
+  source_task_id: string;
+  mentor: string;
+  worker: string;
+  status: string;
+  phase: string;
+  round: number;
+  max_rounds: number;
+  current_task_id: string | null;
+  task_ids: string[];
+  error: string | null;
+};
+
+export async function startCollaboration(params: {
+  sourceTaskId: string;
+  mentor: string;
+  worker: string;
+  maxRounds: number;
+}): Promise<Collaboration> {
+  if (!inTauri) browserStub("协作");
+  return invoke("start_collaboration", {
+    sourceTaskId: params.sourceTaskId,
+    mentor: params.mentor,
+    worker: params.worker,
+    maxRounds: params.maxRounds,
+  });
+}
+
+export async function cancelCollaboration(id: string): Promise<void> {
+  if (!inTauri) browserStub("停止协作");
+  await invoke("cancel_collaboration", { id });
+}
+
+export async function listCollaborations(): Promise<Collaboration[]> {
+  if (!inTauri) return [];
+  return invoke("list_collaborations");
+}
+
+export async function checkHarness(harness: string): Promise<HarnessHealth> {
+  if (!inTauri) return { ready: false, issues: ["浏览器预览未连接桌面运行器"] };
+  return invoke<HarnessHealth>("check_harness", { harness });
+}
 
 function browserStub(label: string): never {
   throw new Error(`${label} 仅在桌面应用内可用（请用 pnpm tauri dev 启动）`);
@@ -32,6 +79,11 @@ export async function deleteTask(taskId: string): Promise<void> {
   await invoke("delete_task", { taskId });
 }
 
+export async function deleteSession(taskId: string): Promise<string[]> {
+  if (!inTauri) browserStub("删除会话");
+  return invoke<string[]>("delete_session", { taskId });
+}
+
 export async function cancelTask(taskId: string): Promise<void> {
   if (!inTauri) browserStub("终止任务");
   // deck 任务走 pi 会话的协作式中断；CLI 任务走进程组强杀
@@ -49,7 +101,13 @@ export async function listTasks(limit = 50): Promise<TaskRow[]> {
 
 export async function getTaskEvents(taskId: string): Promise<AgentEvent[]> {
   if (!inTauri) return [];
-  return await invoke<AgentEvent[]>("get_task_events", { taskId });
+  const events = await invoke<(PiEvent | AgentEvent)[]>("get_task_events", { taskId });
+  const updates = events.flatMap(normalizeAgentEvents).map((event, key) => ({
+    taskId, item: { event, key },
+  }));
+  return applyTaskUpdates({
+    harness: "", cwd: "", prompt: "", mode: null, events: [], running: false, exitCode: null,
+  }, updates).events.map((item) => item.event);
 }
 
 export async function getTaskDiff(taskId: string): Promise<string> {
@@ -265,7 +323,20 @@ export async function buildSmartHandoffPrompt(taskId: string): Promise<string> {
 }
 
 /** 动态发现 harness 的真实模型列表（codex 读 desktop 状态、opencode 调 CLI） */
+const modelDiscovery = new Map<string, { expires: number; request: Promise<string[]> }>();
+
 export async function discoverModels(harness: string): Promise<string[]> {
   if (!inTauri) return [];
-  return await invoke<string[]>("discover_models", { harness });
+  const cached = modelDiscovery.get(harness);
+  if (cached && cached.expires > Date.now()) return cached.request;
+  const entry = { expires: Number.POSITIVE_INFINITY, request: invoke<string[]>("discover_models", { harness }) };
+  modelDiscovery.set(harness, entry);
+  try {
+    const models = await entry.request;
+    entry.expires = Date.now() + 60_000;
+    return models;
+  } catch (error) {
+    if (modelDiscovery.get(harness) === entry) modelDiscovery.delete(harness);
+    throw error;
+  }
 }

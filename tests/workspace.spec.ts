@@ -7,13 +7,13 @@ test("groups projects once, searches, collapses, and restores drafts", async ({ 
   await mockDesktop(page);
   await page.goto("/");
   await expect(page.locator(".project-group")).toHaveCount(2);
-  await expect(page.locator(".thread-item")).toHaveCount(3);
+  await expect(page.locator(".session-item")).toHaveCount(3);
   await page.getByRole("button", { name: "搜索聊天", exact: true }).click();
   await page.getByRole("textbox", { name: "搜索聊天" }).fill("补充");
-  await expect(page.locator(".thread-item")).toHaveCount(1);
+  await expect(page.locator(".session-item")).toHaveCount(1);
   await page.getByRole("textbox", { name: "搜索聊天" }).press("Escape");
   await page.locator(".project-toggle").first().click();
-  await expect(page.locator(".thread-item")).toHaveCount(1);
+  await expect(page.locator(".session-item")).toHaveCount(1);
   await page.locator(".project-toggle").first().click();
   await page.getByRole("textbox", { name: "消息" }).fill("新聊天的草稿");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();

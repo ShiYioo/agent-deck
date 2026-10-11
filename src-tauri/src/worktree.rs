@@ -18,8 +18,13 @@ pub struct WorktreePaths {
 }
 
 fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let out = command.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()

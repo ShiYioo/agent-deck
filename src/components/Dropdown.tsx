@@ -1,9 +1,9 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 
-import { IconCheck, IconChevronDown, IconSearch } from "./icons";
+import { Check, ChevronDown, Search } from "lucide-react";
 
 export type DropdownOption = {
   value: string;
@@ -23,6 +23,9 @@ export function Dropdown({
   searchable = false,
   ghost = false,
   groupBy,
+  icon,
+  iconOnly = false,
+  displayLabel,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -36,6 +39,9 @@ export function Dropdown({
   ghost?: boolean;
   /** 分组函数：返回该选项的组名（如 provider 名），按出现顺序分组 */
   groupBy?: (value: string, label: string) => string;
+  icon?: ReactNode;
+  iconOnly?: boolean;
+  displayLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -53,7 +59,7 @@ export function Dropdown({
   }, [open]);
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: PointerEvent) => {
       if (!rootRef.current?.contains(e.target as Node) && !menuRef.current?.contains(e.target as Node)) {
         setOpen(false);
       }
@@ -65,10 +71,10 @@ export function Dropdown({
         triggerRef.current?.focus();
       }
     };
-    document.addEventListener("mousedown", onDown);
+    document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey, true);
     return () => {
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey, true);
     };
   }, [open]);
@@ -78,15 +84,16 @@ export function Dropdown({
     const update = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
+      const minTop = (document.querySelector(".titlebar")?.getBoundingClientRect().bottom ?? 0) + 12;
       const width = Math.min(280, window.innerWidth - 24);
       const height = Math.min(menuRef.current?.scrollHeight ?? 320, 320);
-      const above = rect.top - 12;
-      const below = window.innerHeight - rect.bottom - 12;
+      const above = Math.max(0, rect.top - minTop - 6);
+      const below = Math.max(0, window.innerHeight - rect.bottom - 18);
       const useAbove = above >= height || above >= below;
-      const available = Math.max(80, useAbove ? above : below);
+      const available = useAbove ? above : below;
       setPosition({
         left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
-        top: useAbove ? Math.max(12, rect.top - Math.min(height, available) - 6) : rect.bottom + 6,
+        top: useAbove ? Math.max(minTop, rect.top - Math.min(height, available) - 6) : rect.bottom + 6,
         width,
         maxHeight: Math.min(320, available),
       });
@@ -98,7 +105,11 @@ export function Dropdown({
       focusOnOpen.current = false;
     }
     window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
   }, [open, query, options.length]);
 
   const filtered = useMemo(() => {
@@ -130,7 +141,7 @@ export function Dropdown({
         title={title}
         disabled={disabled}
         onClick={() => { focusOnOpen.current = false; setOpen((v) => !v); }}
-        className={`dropdown-trigger ${ghost ? "text-stone-400" : ""}`}
+        className={`dropdown-trigger ${iconOnly ? "icon-button dropdown-icon-trigger" : ""} ${ghost ? "text-stone-400" : ""}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -149,13 +160,14 @@ export function Dropdown({
             style={{ backgroundColor: dotColor }}
           />
         )}
-        <span className="max-w-40 truncate font-medium">
-          {current?.label ?? value}
-        </span>
-        <IconChevronDown
+        {icon}
+        {!iconOnly && <span className="max-w-40 truncate">
+          {displayLabel ?? current?.label ?? value}
+        </span>}
+        {!iconOnly && <ChevronDown
           size={12}
           className={`text-stone-400 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
-        />
+        />}
       </button>
 
       {createPortal(<AnimatePresence>
@@ -172,7 +184,7 @@ export function Dropdown({
           {searchable && (
             <div className="border-b border-stone-100 p-2">
               <div className="flex items-center gap-2 rounded-lg bg-stone-100 px-2 py-1.5">
-                <IconSearch size={13} className="shrink-0 text-stone-400" />
+                <Search size={13} className="shrink-0 text-stone-400" />
                 <input
                   autoFocus
                   value={query}
@@ -232,7 +244,7 @@ export function Dropdown({
             {o.tag}
           </span>
         )}
-        {selected && <IconCheck size={13} className="shrink-0 text-emerald-600" />}
+         {selected && <Check size={13} className="shrink-0 text-stone-600" />}
       </button>
     );
   }

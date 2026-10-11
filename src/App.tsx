@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelLeft, SquarePen, Copy, Check, ArrowDown, GitBranch } from "lucide-react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PanelLeft, SquarePen, ArrowDown, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
@@ -10,8 +10,9 @@ import {
 } from "@tauri-apps/plugin-notification";
 import {
   buildSmartHandoffPrompt,
+  cancelCollaboration,
   cancelTask,
-  deleteTask,
+  deleteSession,
   discardTaskWorktree,
   listProjects as listProjectsApi,
   mergeTaskWorktree,
@@ -22,20 +23,24 @@ import {
   invokePiCommand,
   inTauri,
   listTasks,
+  listCollaborations,
   runLogin,
   setSetting,
   startTask,
+  startCollaboration,
 } from "./api";
+import type { Collaboration } from "./api";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
-import { piEventToAgentEvent } from "./types";
-import { Sidebar, projectName, HARNESS_ACCENT, directoryKey } from "./components/Sidebar";
+import { normalizeAgentEvents } from "./types";
+import { applyTaskUpdates, type LogItem, type TaskUpdate } from "./taskState";
+import { groupSessions, sessionKey } from "./sessions";
+import { Sidebar, projectName, directoryKey } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
 import { Composer } from "./components/Composer";
-import { EventLine } from "./components/EventLine";
-import { DiffModal } from "./components/DiffModal";
-import { SettingsPage } from "./components/SettingsPage";
-import { CreateProjectModal } from "./components/CreateProjectModal";
 import { TitleBar } from "./components/TitleBar";
+import { RuntimeStatus } from "./components/RuntimeStatus";
+import { NavigationRail } from "./components/NavigationRail";
+import { Dropdown } from "./components/Dropdown";
 import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
 import { useFrameQueue } from "./hooks/useFrameQueue";
 import { useAutoScroll } from "./hooks/useAutoScroll";
@@ -47,14 +52,11 @@ import {
   IconStop,
 } from "./components/icons";
 
-type LogItem = { event: AgentEvent; key: number };
 const emptyEvents: LogItem[] = [];
-type TaskUpdate = {
-  taskId: string;
-  item?: LogItem;
-  running?: boolean;
-  todos?: LiveTask["todos"];
-};
+const EventLine = lazy(() => import("./components/EventLine").then((module) => ({ default: module.EventLine })));
+const DiffModal = lazy(() => import("./components/DiffModal").then((module) => ({ default: module.DiffModal })));
+const SettingsPage = lazy(() => import("./components/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+const CreateProjectModal = lazy(() => import("./components/CreateProjectModal").then((module) => ({ default: module.CreateProjectModal })));
 
 export default function App() {
   const { enabled: motionEnabled } = useMotionPolicy();
@@ -66,28 +68,111 @@ export default function App() {
   const [cwd, setCwd] = useState("");
 
   // 运行态与历史
-  const [live, setLive] = useState<Record<string, LiveTask>>({});
+  const [live, setLiveState] = useState<Record<string, LiveTask>>({});
+  const liveRef = useRef(live);
+  const pendingUpdates = useRef(new Map<string, TaskUpdate[]>());
+  const deletedTasks = useRef(new Set<string>());
+  const deletingTasks = useRef(new Set<string>());
+  const listenersReady = useRef<Promise<unknown>>(Promise.resolve());
+  const setLive = useCallback((update: (prev: Record<string, LiveTask>) => Record<string, LiveTask>) => {
+    const next = update(liveRef.current);
+    for (const id of Object.keys(next)) {
+      const pending = pendingUpdates.current.get(id);
+      if (pending) {
+        next[id] = applyTaskUpdates(next[id], pending);
+        pendingUpdates.current.delete(id);
+      }
+    }
+    liveRef.current = next;
+    setLiveState(next);
+  }, []);
   const [history, setHistory] = useState<TaskRow[]>([]);
+  const sidebarCache = useRef<{ history: TaskRow[]; tasks: TaskRow[] }>({ history: [], tasks: [] });
+  const sidebarTasks = useMemo(() => {
+    const cached = sidebarCache.current;
+    let changed = cached.history !== history;
+    const tasks = history.map((task, index) => {
+      const session = live[task.id]?.sessionId ?? task.session_id;
+      const status = live[task.id]?.status ?? task.status;
+      const previous = cached.tasks[index];
+      if (cached.history === history && previous?.session_id === session && previous.status === status) return previous;
+      changed = true;
+      return session === task.session_id && status === task.status ? task : { ...task, session_id: session, status };
+    });
+    if (!changed) return cached.tasks;
+    sidebarCache.current = { history, tasks };
+    return tasks;
+  }, [history, live]);
   const [historyEvents, setHistoryEvents] = useState<Record<string, AgentEvent[]>>({});
+  const [loadingEvents, setLoadingEvents] = useState<Set<string>>(new Set());
+  const eventRequests = useRef(new Set<string>());
   const [selected, setSelected] = useState<string | null>(null);
 
   // diff 弹层
   const [diff, setDiff] = useState<{ taskId: string; text: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionInfo, setActionInfo] = useState<string | null>(null);
 
   // 待审批的工具调用（deck 运行时 approved 模式）
-  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [approvals, setApprovals] = useState<Record<string, ApprovalRequest>>({});
+  const approval = selected ? approvals[selected] : undefined;
+  const clearApproval = useCallback((taskId: string) => {
+    setApprovals((prev) => {
+      const next = { ...prev };
+      delete next[taskId];
+      return next;
+    });
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [busyHandoff, setBusyHandoff] = useState(false);
+  const [collaborations, setCollaborations] = useState<Collaboration[]>([]);
+  const [mentor, setMentor] = useState("codex");
+  const [worker, setWorker] = useState("zcode");
+  const [maxRounds, setMaxRounds] = useState(2);
+  const [busyCollaboration, setBusyCollaboration] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
-  const closeSettings = useCallback(() => setSettingsOpen(false), []);
-  const openCreateProject = useCallback(() => setCreateProjectOpen(true), []);
-  const closeCreateProject = useCallback(() => setCreateProjectOpen(false), []);
+  const [sidebarView, setSidebarView] = useState<"projects" | "recent">("projects");
+  const [searchRequest, setSearchRequest] = useState(0);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const settingsLauncher = useRef<HTMLElement | null>(null);
+  const projectLauncher = useRef<HTMLElement | null>(null);
+  const openSettings = useCallback(() => {
+    settingsLauncher.current = document.activeElement as HTMLElement | null;
+    setSettingsOpen(true);
+  }, []);
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    requestAnimationFrame(() => settingsLauncher.current?.focus());
+  }, []);
+  const openCreateProject = useCallback(() => {
+    projectLauncher.current = document.activeElement as HTMLElement | null;
+    setSettingsOpen(false);
+    setCreateProjectOpen(true);
+  }, []);
+  const closeCreateProject = useCallback(() => {
+    setCreateProjectOpen(false);
+    requestAnimationFrame(() => projectLauncher.current?.focus());
+  }, []);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+  const toggleSidebar = useCallback(() => setSidebarOpen((value) => !value), []);
+  const showProjects = useCallback(() => {
+    setSettingsOpen(false);
+    setSidebarView("projects");
+    setSidebarOpen(true);
+  }, []);
+  const showRecent = useCallback(() => {
+    setSettingsOpen(false);
+    setSidebarView("recent");
+    setSidebarOpen(true);
+  }, []);
+  const searchChats = useCallback(() => {
+    setSettingsOpen(false);
+    setSidebarOpen(true);
+    setSearchRequest((value) => value + 1);
+  }, []);
   const closeDiff = useCallback(() => setDiff(null), []);
   const chooseProject = useCallback((id: string | null) => {
     setSelectedProjectId(id);
@@ -126,13 +211,13 @@ export default function App() {
   }, [newChat, settingsOpen, createProjectOpen, diff]);
 
   const refreshHistory = useCallback(() => {
-    listTasks().then(setHistory).catch(() => {});
-    listProjectsApi().then(setProjects).catch(() => {});
+    listTasks(Number.MAX_SAFE_INTEGER).then((rows) => setHistory(rows.filter((row) => !deletedTasks.current.has(row.id))))
+      .catch((e) => setActionError(`加载会话失败：${String(e)}`));
+    listProjectsApi().then(setProjects).catch((e) => setActionError(`加载项目失败：${String(e)}`));
+    listCollaborations().then(setCollaborations).catch((e) => setActionError(`加载协作记录失败：${String(e)}`));
   }, []);
 
   // 事件监听里读取最新 live 用的镜像
-  const liveRef = useRef(live);
-  liveRef.current = live;
   const sessionIds = useRef(new Map<string, string>());
   const { enqueue: enqueueUpdate, flush: flushUpdates } = useFrameQueue<TaskUpdate>((batch) => {
     const groups = new Map<string, TaskUpdate[]>();
@@ -145,21 +230,13 @@ export default function App() {
       const next = { ...prev };
       let changed = false;
       for (const [id, updates] of groups) {
+        if (deletedTasks.current.has(id)) continue;
         const task = prev[id];
-        if (!task) continue;
-        const appended: LogItem[] = [];
-        let running = task.running;
-        let todos = task.todos;
-        let sessionId = task.sessionId;
-        for (const update of updates) {
-          if (update.item) {
-            appended.push(update.item);
-            if (update.item.event.type === "session_id") sessionId = update.item.event.id;
-          }
-          if (update.running !== undefined) running = update.running;
-          if (update.todos !== undefined) todos = update.todos;
+        if (!task) {
+          pendingUpdates.current.set(id, [...(pendingUpdates.current.get(id) ?? []), ...updates]);
+          continue;
         }
-        next[id] = { ...task, running, todos, sessionId, events: appended.length ? [...task.events, ...appended] : task.events };
+        next[id] = applyTaskUpdates(task, updates);
         changed = true;
       }
       return changed ? next : prev;
@@ -183,44 +260,69 @@ export default function App() {
   }, []);
 
   // 把排队消息作为续接任务派发（复用原 harness/cwd/mode 与会话）
+  const dispatchTask = useCallback(async (
+    params: Parameters<typeof startTask>[0],
+    previous?: LiveTask,
+    queued?: string[],
+  ) => {
+    await listenersReady.current;
+    const taskId = await startTask(params);
+    // The backend may create a worktree, so its resolved directory is authoritative.
+    const rows = await listTasks(Number.MAX_SAFE_INTEGER).catch((e) => {
+      setActionError(`任务已启动，但刷新历史失败：${String(e)}`);
+      return [];
+    });
+    if (rows.length) setHistory(rows.filter((row) => !deletedTasks.current.has(row.id)));
+    const taskCwd = rows.find((row) => row.id === taskId)?.cwd ?? params.cwd;
+    setLive((prev) => ({
+      ...prev,
+      [taskId]: {
+        harness: params.harness, cwd: taskCwd, prompt: params.prompt,
+        mode: params.mode, model: params.model, permission: params.permission,
+        projectId: params.projectId, sessionId: params.resumeSessionId ?? undefined,
+        events: [
+          ...(previous?.events ?? []),
+          { event: { type: "user_message", text: params.prompt }, key: nextKey() },
+        ],
+        running: true, status: "running", exitCode: null, queued,
+      },
+    }));
+    setSelected(taskId);
+    setHarness(params.harness);
+    setModel(params.model ?? "");
+    setMode(params.mode ?? "default");
+    setPermission(params.permission ?? "auto");
+    setCwd(taskCwd);
+    refreshHistory();
+    return taskId;
+  }, [refreshHistory, setLive]);
+
   const flushQueued = useCallback(
-    (task: LiveTask, text: string) => {
-      startTask({
+    (task: LiveTask, text: string, sourceId: string) => {
+      if (deletedTasks.current.has(sourceId) || deletingTasks.current.has(sourceId)) return;
+      dispatchTask({
         harness: task.harness,
         cwd: task.cwd,
         prompt: text,
         mode: task.mode,
-        model: null,
-        permission: "auto",
+        model: task.model ?? null,
+        permission: task.permission ?? "auto",
+        projectId: task.projectId,
         resumeSessionId: task.sessionId ?? null,
-      })
-        .then((taskId) => {
-          setLive((prev) => ({
-            ...prev,
-            [taskId]: {
-              harness: task.harness,
-              cwd: task.cwd,
-              prompt: text,
-              mode: task.mode,
-              events: [],
-              running: true,
-              exitCode: null,
-              sessionId: task.sessionId,
-            },
-          }));
-          setSelected(taskId);
-          setTimeout(refreshHistory, 200);
-        })
+      }, task, task.queued?.slice(1))
+        .then(() => setLive((prev) => prev[sourceId] ? ({
+          ...prev, [sourceId]: { ...prev[sourceId], queued: [] },
+        }) : prev))
         .catch((e) => setActionError(String(e)));
     },
-    [refreshHistory],
+    [dispatchTask, setLive],
   );
 
   // 工作目录：启动时取默认（设置里的 default_cwd，否则家目录）
   useEffect(() => {
     getDefaultCwd()
       .then((d) => setCwd((cur) => cur || d))
-      .catch(() => {});
+      .catch((e) => setActionError(`加载工作目录失败：${String(e)}`));
   }, []);
 
   useEffect(() => {
@@ -229,15 +331,22 @@ export default function App() {
     const unlisteners: Promise<UnlistenFn>[] = [
       listen<{ taskId: string; event: AgentEvent }>("task-event", (e) => {
         const { taskId, event } = e.payload;
+        if (deletedTasks.current.has(taskId)) return;
         if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
         enqueueUpdate({ taskId, item: { event, key: nextKey() } });
       }),
-      listen<{ taskId: string; code: number | null }>("task-exit", (e) => {
+      listen<{ taskId: string; code: number | null; status?: TaskRow["status"] }>("task-exit", (e) => {
         const { taskId, code } = e.payload;
+        if (deletedTasks.current.has(taskId)) return;
+        enqueueUpdate({
+          taskId, running: false, exitCode: code,
+          status: e.payload.status ?? (code === 0 ? "done" : code === null ? "cancelled" : "failed"),
+        });
         flushUpdates();
         const current = liveRef.current[taskId];
         const task = current ? { ...current, sessionId: sessionIds.current.get(taskId) ?? current.sessionId } : undefined;
         sessionIds.current.delete(taskId);
+        clearApproval(taskId);
         if (task) {
           notify(
             code === 0 ? "AgentDeck · 任务完成" : "AgentDeck · 任务结束",
@@ -246,18 +355,9 @@ export default function App() {
           // 队列续发：成功且有会话 → 取队首消息作为续接派发（抄 VK 队列消息）
           if (code === 0 && task.queued && task.queued.length > 0 && task.sessionId) {
             const [next] = task.queued;
-            flushQueued(task, next);
-            setLive((prev) => ({
-              ...prev,
-              [taskId]: { ...prev[taskId], queued: prev[taskId].queued?.slice(1) },
-            }));
+            flushQueued(task, next, taskId);
           }
         }
-        setLive((prev) => {
-          const t = prev[taskId];
-          if (!t) return prev;
-          return { ...prev, [taskId]: { ...t, running: false, exitCode: code } };
-        });
         setTimeout(refreshHistory, 300);
       }),
       // deck（pi 运行时）事件：归一化到统一渲染管道；退出由 task-exit 之外的
@@ -265,14 +365,15 @@ export default function App() {
       listen<Record<string, unknown>>("pi-event", (e) => {
         const payload = e.payload as { taskId?: string } & Record<string, unknown>;
         const taskId = payload.taskId;
-        if (!taskId) return;
+        if (!taskId || deletedTasks.current.has(taskId)) return;
         // 审批请求：单独呈现在操作区
         if (payload.type === "deck_approval_request") {
-          setApproval({
+          setApprovals((prev) => ({ ...prev, [taskId]: {
+            taskId,
             id: String(payload.id ?? ""),
             tool: String(payload.tool ?? "tool"),
             args: (payload.args as Record<string, unknown>) ?? {},
-          });
+          } }));
           notify(
             "AgentDeck · 需要审批",
             `Agent 请求执行工具：${payload.tool ?? "tool"}`,
@@ -280,18 +381,25 @@ export default function App() {
           return;
         }
         if (payload.type === "deck_approval_decided") {
-          setApproval(null);
+          clearApproval(taskId);
         }
         if (payload.type === "deck_todo_updated" && Array.isArray(payload.todos)) {
           const todos = payload.todos as { content: string; status: string }[];
           enqueueUpdate({ taskId, todos });
         }
-        const mapped = piEventToAgentEvent(payload as never);
+        const mapped = normalizeAgentEvents(payload as never);
+        for (const event of mapped) {
+          if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
+          enqueueUpdate({ taskId, item: { event, key: nextKey() } });
+        }
         const running = payload.type === "deck_run_end" ? false : payload.type === "deck_run_start" ? true : undefined;
-        if (mapped || running !== undefined) enqueueUpdate({ taskId, item: mapped ? { event: mapped, key: nextKey() } : undefined, running });
+        if (running !== undefined) enqueueUpdate({
+          taskId, running,
+          status: running ? "running" : payload.status === "cancelled" ? "cancelled" : payload.ok === false ? "failed" : "done",
+        });
         if (payload.type === "deck_run_end") {
           flushUpdates();
-          setApproval(null);
+          clearApproval(taskId);
           setTimeout(refreshHistory, 300);
         }
       }),
@@ -302,11 +410,20 @@ export default function App() {
           setDiff({ taskId, text });
         }
       }),
+      listen<Collaboration>("collaboration-update", (event) => {
+        setCollaborations((previous) => [
+          event.payload,
+          ...previous.filter((item) => item.id !== event.payload.id),
+        ]);
+        refreshHistory();
+      }),
     ];
+    listenersReady.current = Promise.all(unlisteners);
+    listenersReady.current.catch((e) => setActionError(`监听运行事件失败：${String(e)}`));
     return () => {
-      unlisteners.forEach((p) => p.then((un) => un()));
+      unlisteners.forEach((p) => p.then((un) => un()).catch(() => {}));
     };
-  }, [refreshHistory, enqueueUpdate, flushUpdates]);
+  }, [refreshHistory, enqueueUpdate, flushUpdates, clearApproval, flushQueued, notify]);
 
   // 发送：@ 智能体唤醒（可并行）；选中已完成任务且有会话 ID → 续接；否则开新任务
   const handleSend = useCallback(
@@ -354,26 +471,48 @@ export default function App() {
       const routeFresh = atTarget !== null;
       const useHarness = routeFresh ? (atTarget as string) : harness;
       const routeModel = routeFresh ? atModel : model.trim() || null;
-      // deck 执行器的 key 已在设置面板持久化（SQLite），Rust 侧自行读取
-      const canResume =
-        !routeFresh &&
-        !!row &&
-        !!row.session_id &&
-        row.status !== "running" &&
-        // @ 同一家且在运行的情况已在上面排队处理
-        true;
+      const resumeSource: LiveTask | undefined = runningTask ?? (row ? {
+        harness: row.harness, cwd: row.cwd, prompt: row.prompt,
+        mode: row.mode, model: row.model,
+        permission: row.harness === "deck" ? row.mode : permission,
+        projectId: row.project_id,
+        sessionId: row.session_id ?? undefined, running: row.status === "running",
+        exitCode: row.exit_code,
+        events: (historyEvents[selected!] ?? []).map((event) => ({ event, key: nextKey() })),
+      } : undefined);
+      const canResume = !routeFresh && !!resumeSource?.sessionId && !resumeSource.running
+        && resumeSource.harness === useHarness
+        && directoryKey(resumeSource.cwd) === directoryKey(cwd || ".");
+      // 跨 harness 续聊：会话句柄互不相认，自动走接力（压缩上一会话 → 简报注入新家）
+      const crossHarness = !routeFresh && !!resumeSource?.sessionId && !resumeSource.running
+        && resumeSource.harness !== useHarness
+        && directoryKey(resumeSource.cwd) === directoryKey(cwd || ".");
       // 记住这次的工作目录，下次启动作为默认
-      const useCwd = routeFresh ? cwd || "." : canResume ? row.cwd : cwd || ".";
+      const useCwd = canResume ? resumeSource!.cwd : cwd || ".";
       if (!routeFresh && cwd.trim()) {
         setSetting("default_cwd", cwd.trim()).catch(() => {});
       }
       try {
-        const taskId = await startTask({
-          harness: canResume ? row.harness : useHarness,
+        const previous = canResume ? resumeSource : undefined;
+        if (previous && !runningTask && selected) {
+          previous.events = (await getTaskEvents(selected)).map((event) => ({ event, key: nextKey() }));
+        }
+        // 跨 harness：先压缩上一会话成接力简报，失败则中止发送（错误可见）
+        let promptToSend = text;
+        if (crossHarness) {
+          setActionInfo(`正在压缩上一会话，接力到 ${useHarness}…`);
+          try {
+            promptToSend = await buildSmartHandoffPrompt(selected!);
+          } finally {
+            setActionInfo(null);
+          }
+        }
+        await dispatchTask({
+          harness: canResume ? resumeSource!.harness : useHarness,
           cwd: useCwd,
-          prompt: text,
+          prompt: promptToSend,
           mode: canResume
-            ? row.mode
+            ? resumeSource!.mode
             : useHarness === "deck"
               ? null
               : useHarness === "zcode"
@@ -381,39 +520,16 @@ export default function App() {
                 : mode === "default"
                   ? null
                   : mode,
-          model: canResume ? row.model : routeModel,
-          permission: canResume ? null : permission,
-          resumeSessionId: canResume ? row.session_id : null,
+          model: routeModel,
+          permission,
+          resumeSessionId: canResume ? resumeSource!.sessionId! : null,
           projectId:
             selectedProjectId ??
             projects.find(
               (p) => p.dir.split("\\").join("/") === (useCwd || "").split("\\").join("/"),
             )?.id ??
             null,
-        });
-        setLive((prev) => ({
-          ...prev,
-          [taskId]: {
-            harness: canResume ? row.harness : useHarness,
-            cwd: useCwd,
-            prompt: text,
-            mode: canResume
-              ? row.mode
-              : useHarness === "deck"
-                ? null
-                : useHarness === "zcode"
-                  ? mode
-                  : mode === "default"
-                    ? null
-                    : mode,
-            events: [],
-            running: true,
-            exitCode: null,
-            sessionId: canResume ? row.session_id ?? undefined : undefined,
-          },
-        }));
-        setSelected(taskId);
-        setTimeout(refreshHistory, 200);
+        }, previous);
         return true;
       } catch (e) {
         setActionError(String(e));
@@ -432,6 +548,8 @@ export default function App() {
       refreshHistory,
       selectedProjectId,
       projects,
+      dispatchTask,
+      historyEvents,
     ],
   );
 
@@ -440,12 +558,22 @@ export default function App() {
   historyEventsRef.current = historyEvents;
   const viewTask = useCallback(async (taskId: string) => {
     setSelected(taskId);
-    if (liveRef.current[taskId] || historyEventsRef.current[taskId]) return;
+    if (liveRef.current[taskId] || historyEventsRef.current[taskId] || eventRequests.current.has(taskId)) return;
+    eventRequests.current.add(taskId);
+    setLoadingEvents((previous) => new Set(previous).add(taskId));
     try {
       const events = await getTaskEvents(taskId);
+      if (deletedTasks.current.has(taskId)) return;
       setHistoryEvents((prev) => ({ ...prev, [taskId]: events }));
-    } catch {
-      setHistoryEvents((prev) => ({ ...prev, [taskId]: [] }));
+    } catch (e) {
+      setActionError(`加载对话失败：${String(e)}`);
+    } finally {
+      eventRequests.current.delete(taskId);
+      setLoadingEvents((previous) => {
+        const next = new Set(previous);
+        next.delete(taskId);
+        return next;
+      });
     }
   }, []);
 
@@ -468,6 +596,7 @@ export default function App() {
         setHarness(row.harness);
         setMode(row.mode ?? "default");
         setModel(row.model ?? "");
+        if (row.harness === "deck") setPermission(row.mode === "approved" ? "approved" : "auto");
       }
       setActionError(null);
       if (window.innerWidth <= 760) setSidebarOpen(false);
@@ -478,6 +607,11 @@ export default function App() {
 
   const selectedRow = selected ? history.find((t) => t.id === selected) : undefined;
   const selectedLive = selected ? live[selected] : undefined;
+  const selectedConversation = useMemo(() => selected
+    ? groupSessions(sidebarTasks).find((session) => session.turns.some((turn) => turn.id === selected))
+    : undefined, [sidebarTasks, selected]);
+  const conversationKey = selectedConversation?.turns[0].id ?? selected ?? "new";
+  const conversationTitle = selectedConversation?.turns[0].prompt ?? selectedRow?.prompt ?? selectedLive?.prompt ?? "聊天";
   // 条目携带稳定 key：live 用追加时分配的递增 key，回放用序号。
   // LogPanel 超 500 条折叠后 key 不漂移，避免每条新事件全列表重渲染。
   const selectedEvents = useMemo<LogItem[]>(
@@ -493,8 +627,9 @@ export default function App() {
   );
   const selectedRunning = selectedLive?.running ?? selectedRow?.status === "running";
   const selectedSession = selectedLive?.sessionId ?? selectedRow?.session_id ?? null;
-  const selectedCanResume = !!selectedRow && !!selectedSession && !selectedRunning;
+   const selectedCanResume = !!selectedSession && !selectedRunning;
   const selectedHarness = selectedRow?.harness ?? selectedLive?.harness ?? harness;
+  const selectedStatus = selectedLive?.status ?? selectedRow?.status;
   const hasAuthError = selectedEvents.some(
     ({ event: e }) => e.type === "error" && e.kind === "auth",
   );
@@ -514,19 +649,47 @@ export default function App() {
     };
   }, [diffTaskId, selectedRunning]);
 
-  const handleDeleteTask = useCallback(
-    (id: string) => {
-      deleteTask(id).catch((e) => setActionError(String(e)));
-      setHistory((prev) => prev.filter((t) => t.id !== id));
-      setHistoryEvents((prev) => {
-        if (!(id in prev)) return prev;
+  const handleDeleteSession = useCallback(
+    async (id: string) => {
+      const row = sidebarTasks.find((task) => task.id === id);
+      if (!row || deletedTasks.current.has(id) || deletingTasks.current.has(id)) return;
+      const ids = sidebarTasks.filter((task) => sessionKey(task) === sessionKey(row)).map((task) => task.id);
+      for (const taskId of ids) deletingTasks.current.add(taskId);
+      setActionError(null);
+      try {
+        const removed = await deleteSession(id);
+        for (const taskId of removed) {
+          deletedTasks.current.add(taskId);
+          if (!ids.includes(taskId)) ids.push(taskId);
+        }
+      } catch (e) {
+        for (const taskId of ids) deletingTasks.current.delete(taskId);
+        setActionError(String(e));
+        return;
+      }
+      const removed = new Set(ids);
+      for (const taskId of ids) {
+        deletedTasks.current.add(taskId);
+        deletingTasks.current.delete(taskId);
+        clearApproval(taskId);
+        sessionIds.current.delete(taskId);
+        pendingUpdates.current.delete(taskId);
+      }
+      setLive((prev) => {
         const next = { ...prev };
-        delete next[id];
+        for (const taskId of ids) delete next[taskId];
         return next;
       });
-      setSelected((cur) => (cur === id ? null : cur));
+      setHistory((prev) => prev.filter((t) => !removed.has(t.id)));
+      setHistoryEvents((prev) => {
+        const next = { ...prev };
+        for (const taskId of ids) delete next[taskId];
+        return next;
+      });
+      setDiff((cur) => cur && removed.has(cur.taskId) ? null : cur);
+      setSelected((cur) => (cur && removed.has(cur) ? null : cur));
     },
-    [],
+    [clearApproval, setLive, sidebarTasks],
   );
 
 
@@ -539,7 +702,7 @@ export default function App() {
       if (diff || settingsOpen || approval) return; // 弹层/审批有自己的 Esc 语义
       if (!selectedRunning || !selected) return;
       e.preventDefault();
-      cancelTask(selected).catch(() => {});
+      cancelTask(selected).catch((e) => setActionError(String(e)));
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -555,7 +718,7 @@ export default function App() {
     setActionError(null);
     try {
       const briefing = await buildSmartHandoffPrompt(selectedRow.id);
-      const taskId = await startTask({
+      await dispatchTask({
         harness: target,
         cwd: selectedRow.cwd,
         prompt: briefing,
@@ -563,25 +726,30 @@ export default function App() {
         model: null,
         permission: "auto",
         resumeSessionId: null,
+        projectId: selectedRow.project_id,
       });
-      setLive((prev) => ({
-        ...prev,
-        [taskId]: {
-          harness: target,
-          cwd: selectedRow.cwd,
-          prompt: `（接力自 ${selectedRow.harness}）${selectedRow.prompt}`,
-          mode: null,
-          events: [],
-          running: true,
-          exitCode: null,
-        },
-      }));
-      setSelected(taskId);
-      setTimeout(refreshHistory, 200);
     } catch (e) {
       setActionError(String(e));
     } finally {
       setBusyHandoff(false);
+    }
+  };
+
+  const startGuidedCollaboration = async () => {
+    if (!selectedRow || busyCollaboration) return;
+    setBusyCollaboration(true);
+    setActionError(null);
+    try {
+      await startCollaboration({
+        sourceTaskId: selectedRow.id,
+        mentor,
+        worker,
+        maxRounds,
+      });
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setBusyCollaboration(false);
     }
   };
 
@@ -604,7 +772,11 @@ export default function App() {
 
   return (
     <div className="app-viewport">
-      <TitleBar />
+      <TitleBar onToggleSidebar={toggleSidebar} />
+      <div className="desktop-body">
+      <NavigationRail view={sidebarView} settingsOpen={settingsOpen}
+        onProjects={showProjects} onRecent={showRecent} onSearch={searchChats}
+        onCreateProject={openCreateProject} onSettings={openSettings} />
       <div className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
       <AnimatePresence initial={false}>
         {sidebarOpen && <MotionLayer key="sidebar-scrim" className="sidebar-scrim-holder">
@@ -614,12 +786,13 @@ export default function App() {
           initial={motionEnabled ? { width: 0, opacity: 0, x: -12 } : false}
           animate={{ width: "auto", opacity: 1, x: 0 }}
           exit={{ width: 0, opacity: motionEnabled ? 0 : 1, x: motionEnabled ? -12 : 0 }}>
-          <Sidebar tasks={history} projects={projects} selectedId={selected} onSelect={handleSelect}
-            onDelete={handleDeleteTask}
+          <Sidebar tasks={sidebarTasks} projects={projects} selectedId={selected} onSelect={handleSelect}
+            onDelete={handleDeleteSession}
             onNew={newChat} onSettings={openSettings} onCreateProject={openCreateProject}
-            onCollapse={closeSidebar} />
+            onCollapse={closeSidebar} view={sidebarView} searchRequest={searchRequest} />
         </MotionLayer>}
       </AnimatePresence>
+      <Suspense fallback={<div className="overlay-loading" role="status">正在加载…</div>}>
       <AnimatePresence>
       {createProjectOpen && (
         <CreateProjectModal
@@ -633,19 +806,36 @@ export default function App() {
         />
       )}
       </AnimatePresence>
+      </Suspense>
 
       <main className={`workspace-main ${selected === null ? "is-new" : ""}`}>
         <header className="workspace-header">
           {!sidebarOpen && <button className="icon-button" title="展开侧栏" aria-label="展开侧栏" onClick={() => setSidebarOpen(true)}><PanelLeft size={18} /></button>}
-          <span className="workspace-title">{selected ? selectedRow?.prompt ?? selectedLive?.prompt ?? "聊天" : "新聊天"}</span>
+          <Folder size={17} className="workspace-folder" />
+          <span className="workspace-title">{selected ? conversationTitle : "新聊天"}</span>
           <div className="workspace-header-actions">
-            <span className="workspace-project"><GitBranch size={14} />{projectName(selectedRow?.cwd ?? cwd)}</span>
+            {selected && <Dropdown value="" title="聊天操作" icon={<Ellipsis size={18} />} iconOnly
+              options={[
+                { value: "copy", label: "复制会话" },
+                { value: "new", label: "新聊天" },
+                { value: "delete", label: "删除会话" },
+              ]}
+              onChange={(action) => {
+                if (action === "new") newChat();
+                else if (action === "delete" && selected) void handleDeleteSession(selected);
+                else void navigator.clipboard.writeText(eventsToText(selectedEvents)).catch((error) => setActionError(`复制失败：${String(error)}`));
+              }} />}
+            {selected && <button className={`icon-button ${detailsOpen ? "is-active" : ""}`}
+              title="执行详情" aria-label="执行详情" aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen((value) => !value)}><ListChecks size={18} /></button>}
+            {selected && canShowDiff && <button className="icon-button" title="查看 Diff" aria-label="查看 Diff" onClick={showDiff}><FileDiff size={17} /></button>}
             <button className="icon-button" title="新聊天" aria-label="新聊天" onClick={() => newChat()}><SquarePen size={17} /></button>
           </div>
         </header>
         {selected === null ? (
           // New chats share the same composer as active conversations.
           <MotionLayer preset="scene"
+            initial={false}
             key="empty"
             className="new-chat-heading"
           >
@@ -655,10 +845,11 @@ export default function App() {
         ) : (
           // ── 任务详情视图 ──
           <MotionLayer preset="scene"
-            key={`task-${selected}`}
+            key={`session-${conversationKey}`}
             className="task-view flex min-h-0 flex-1 flex-col"
           >
-            <div className="flex items-center gap-2 border-b border-stone-200/70 px-6 py-3 text-sm">
+            <div className="task-controls" hidden={!detailsOpen && selectedStatus !== "failed" && !collaborations.some((item) => item.source_task_id === selected && item.status === "running")}>
+            <div className="task-metadata">
               <button
                 onClick={() => setSelected(null)}
                 className="rounded-md p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700"
@@ -668,8 +859,7 @@ export default function App() {
               </button>
               <HarnessIcon harness={selectedHarness} size={16} rounded />
               <span
-                className="font-mono text-xs"
-                style={{ color: HARNESS_ACCENT[selectedHarness] }}
+                className="text-xs text-stone-600"
               >
                 {selectedHarness}
               </span>
@@ -678,7 +868,7 @@ export default function App() {
               </span>
               {selectedLive?.todos && selectedLive.todos.length > 0 && (
                 <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
-                  ☐ {selectedLive.todos.filter((t) => t.status === "completed").length}
+                  <ListChecks size={13} className="inline-block mr-1" />{selectedLive.todos.filter((t) => t.status === "completed").length}
                   /{selectedLive.todos.length}
                   {selectedLive.todos.find((t) => t.status === "in_progress") && (
                     <span className="ml-1.5 text-stone-400">
@@ -690,7 +880,7 @@ export default function App() {
               <span className="flex-1" />
               {selectedRunning && (
                 <button
-                  onClick={() => selected && cancelTask(selected).catch(() => {})}
+                   onClick={stopSelected}
                   className="flex items-center gap-1.5 rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 transition-colors hover:bg-red-50"
                 >
                   <IconStop size={13} />
@@ -700,62 +890,49 @@ export default function App() {
               <span className="text-xs text-stone-400">
                 {selectedRunning
                   ? "运行中…"
-                  : selectedRow?.status === "done"
-                    ? "已完成"
-                    : selectedRow?.status === "cancelled"
-                      ? "已取消"
-                      : "已结束"}
+                   : selectedStatus === "done"
+                     ? "已完成"
+                     : selectedStatus === "cancelled"
+                       ? "已取消"
+                       : selectedStatus === "failed"
+                         ? "运行失败"
+                         : "已结束"}
               </span>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 px-6 pt-2 text-xs">
-                {!selectedRunning && selectedRow?.status === "failed" && (
+            <div className="task-actions">
+                 {!selectedRunning && selectedStatus === "failed" && selectedRow && (
                   <button
                     onClick={() => {
                       const r = selectedRow;
                       setActionError(null);
-                      startTask({
+                      dispatchTask({
                         harness: r.harness,
                         cwd: r.cwd,
                         prompt: r.prompt,
                         mode: r.mode,
                         model: r.model,
-                        permission: null,
+                        permission: selectedLive?.permission ?? (r.harness === "deck" ? r.mode : permission),
                         resumeSessionId: r.session_id,
+                        projectId: r.project_id,
                       })
-                        .then((taskId) => {
-                          setLive((prev) => ({
-                            ...prev,
-                            [taskId]: {
-                              harness: r.harness,
-                              cwd: r.cwd,
-                              prompt: r.prompt,
-                              mode: r.mode,
-                              events: [],
-                              running: true,
-                              exitCode: null,
-                              sessionId: r.session_id ?? undefined,
-                            },
-                          }));
-                          setSelected(taskId);
-                          setTimeout(refreshHistory, 200);
-                        })
                         .catch((e) => setActionError(String(e)));
                     }}
-                    className="rounded-full border border-stone-200 px-3 py-1 text-stone-600 transition-colors hover:bg-stone-100"
-                  >
-                    ↻ 重试
+                     className="task-action"
+                   >
+                     <RotateCcw size={13} />重试
                   </button>
                 )}
                 {hasAuthError && !selectedRunning && (
                   <button
                     onClick={() =>
-                      runLogin(selectedRow?.harness ?? "zcode").catch(() => {})
+                       (selectedHarness === "deck" ? Promise.resolve(setSettingsOpen(true)) : runLogin(selectedHarness))
+                         .catch((e) => setActionError(String(e)))
                     }
                     className="flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-100"
                   >
                     <IconKey size={13} />
-                    唤起登录
+                     {selectedHarness === "deck" ? "检查模型配置" : "唤起登录"}
                   </button>
                 )}
                 {canShowDiff && (
@@ -780,7 +957,7 @@ export default function App() {
                           setActionError(String(e));
                         }
                       }}
-                      className="rounded-full bg-emerald-600 px-3 py-1 font-medium text-white transition-colors hover:bg-emerald-500"
+                       className="task-action task-action-primary"
                     >
                       合并到主分支
                     </button>
@@ -820,7 +997,7 @@ export default function App() {
                         onClick={() => handoff(h)}
                         disabled={busyHandoff}
                         className="flex items-center gap-1.5 rounded-full border px-3 py-1 transition-colors hover:bg-stone-100 disabled:opacity-50"
-                        style={{ borderColor: HARNESS_ACCENT[h], color: HARNESS_ACCENT[h] }}
+                         style={{ borderColor: "var(--border)", color: "var(--text-2)" }}
                       >
                         <HarnessIcon harness={h} size={12} />
                         用 {h === "deck" ? "AgentDeck Agent" : h} 接力
@@ -838,6 +1015,43 @@ export default function App() {
               </Disclosure>
             )}
 
+            {!selectedRunning && selectedRow && (
+              <Disclosure className="handoff-section mx-6 mt-2" title="互相指导">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <label>指导方
+                    <select aria-label="指导方" value={mentor} onChange={(e) => setMentor(e.target.value)}>
+                      {["zcode", "codex", "opencode"].filter((item) => item !== worker)
+                        .map((item) => <option key={item} value={item}>{item}</option>)}
+                    </select>
+                  </label>
+                  <label>执行方
+                    <select aria-label="执行方" value={worker} onChange={(e) => setWorker(e.target.value)}>
+                      {["zcode", "codex", "opencode"].filter((item) => item !== mentor)
+                        .map((item) => <option key={item} value={item}>{item}</option>)}
+                    </select>
+                  </label>
+                  <label>最多执行轮数
+                    <select aria-label="最多执行轮数" value={maxRounds} onChange={(e) => setMaxRounds(Number(e.target.value))}>
+                      {[1, 2, 3].map((round) => <option key={round} value={round}>{round}</option>)}
+                    </select>
+                  </label>
+                  <button onClick={startGuidedCollaboration} disabled={busyCollaboration}
+                    className="rounded-full border px-3 py-1 disabled:opacity-50">
+                    {busyCollaboration ? "启动中…" : "开始指导协作"}
+                  </button>
+                </div>
+              </Disclosure>
+            )}
+            {collaborations.filter((item) => item.source_task_id === selected).map((item) => (
+              <div key={item.id} className="mx-6 mt-2 flex flex-wrap items-center gap-2 text-xs">
+                <span>{item.mentor} 指导 {item.worker} · {item.phase} · 第 {item.round}/{item.max_rounds} 轮 · {item.status}</span>
+                {item.current_task_id && <button onClick={() => viewTask(item.current_task_id!)}>查看当前阶段</button>}
+                {item.error && <span className="text-red-700">{item.error}</span>}
+                {item.status === "running" && <button onClick={() => cancelCollaboration(item.id).catch((e) => setActionError(String(e)))}>停止协作</button>}
+              </div>
+            ))}
+            </div>
+
             {/* 审批卡片：deck 运行时 approved 模式的工具授权 */}
             {approval && selectedRunning && (
               <div className="anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
@@ -850,21 +1064,19 @@ export default function App() {
                 <div className="mt-2 flex items-center gap-2">
                   <button
                     onClick={() =>
-                      selected &&
-                      invokePiCommand(selected, "approve", approval.id).finally(() =>
-                        setApproval(null),
-                      )
+                      invokePiCommand(approval.taskId, "approve", approval.id)
+                        .then(() => clearApproval(approval.taskId))
+                        .catch((e) => setActionError(String(e)))
                     }
-                    className="rounded-full bg-emerald-600 px-3.5 py-1 font-medium text-white transition-colors hover:bg-emerald-500"
+                     className="task-action task-action-primary"
                   >
                     允许
                   </button>
                   <button
                     onClick={() =>
-                      selected &&
-                      invokePiCommand(selected, "reject", approval.id).finally(() =>
-                        setApproval(null),
-                      )
+                      invokePiCommand(approval.taskId, "reject", approval.id)
+                        .then(() => clearApproval(approval.taskId))
+                        .catch((e) => setActionError(String(e)))
                     }
                     className="rounded-full border border-red-300 px-3.5 py-1 font-medium text-red-600 transition-colors hover:bg-red-50"
                   >
@@ -875,13 +1087,15 @@ export default function App() {
               </div>
             )}
 
-            <LogPanel key={selected} events={selectedEvents} running={selectedRunning} />
+            <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning} loading={!!selected && loadingEvents.has(selected)} />
           </MotionLayer>
         )}
 
         {/* 底部输入卡：始终可见。运行中发送 = 入队（结束后自动续发） */}
         <m.div className="composer-dock" layout={motionEnabled ? "position" : false} layoutDependency={selected === null}>
           {actionError && <div className="action-error" role="alert">{actionError}</div>}
+          {actionInfo && <div className="action-info">{actionInfo}</div>}
+          <RuntimeStatus harness={harness} refreshKey={settingsOpen} onSettings={openSettings} />
           {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
             <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
               <span className="text-stone-400">已排队（结束后自动续发）：</span>
@@ -905,17 +1119,18 @@ export default function App() {
                         };
                       })
                     }
-                    className="text-stone-400 hover:text-red-500"
-                    title="移除"
-                  >
-                    ✕
+                     className="queue-remove"
+                     title="移除"
+                     aria-label={`移除排队消息 ${i + 1}`}
+                   >
+                     <X size={12} />
                   </button>
                 </span>
               ))}
             </div>
           )}
           <Composer
-            draftKey={selected ?? "new"}
+            draftKey={conversationKey}
             onStop={stopSelected}
             cwd={cwd}
             onCwdChange={setCwd}
@@ -929,6 +1144,7 @@ export default function App() {
             model={model}
             onModelChange={setModel}
             permission={permission}
+            catalogVersion={settingsOpen}
             onPermissionChange={setPermission}
             onSend={handleSend}
             running={selectedRunning}
@@ -943,6 +1159,7 @@ export default function App() {
           />
         </m.div>
 
+        <Suspense fallback={<div className="overlay-loading" role="status">正在加载…</div>}>
         <AnimatePresence>
         {diff && selectedRow && (
           <DiffModal
@@ -957,7 +1174,9 @@ export default function App() {
         )}
         {settingsOpen && <SettingsPage key="settings" onClose={closeSettings} />}
         </AnimatePresence>
+        </Suspense>
       </main>
+      </div>
       </div>
     </div>
   );
@@ -990,46 +1209,24 @@ function eventsToText(events: { event: AgentEvent }[]): string {
 }
 
 /** Bounded message DOM with user-controlled, frame-coalesced scroll following. */
-function LogPanel({
+const LogPanel = memo(function LogPanel({
   events,
   running,
+  loading,
 }: {
   events: { event: AgentEvent; key: number }[];
   running: boolean;
+  loading: boolean;
 }) {
   const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
-  const [copied, setCopied] = useState(false);
 
   const overflow = events.length - MAX_RENDER;
   const visible = overflow > 0 ? events.slice(overflow) : events;
   void overflow;
 
-  const copyAll = async () => {
-    const text = eventsToText(events);
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {}
-  };
-
   return (
     <div className="relative min-h-0 flex-1 flex flex-col">
-      <div className="flex items-center justify-between px-6 pt-2 text-[10px] text-stone-400">
-        <span>
-          {overflow > 0
-            ? `前 ${overflow} 条已折叠（完整记录在数据库中）`
-             : ""}
-        </span>
-        <button
-          onClick={copyAll}
-          className="icon-button"
-          title={copied ? "已复制" : "复制会话"}
-          aria-label={copied ? "已复制" : "复制会话"}
-        >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
-      </div>
+      {overflow > 0 && <div className="log-overflow-note">前 {overflow} 条已折叠（完整记录在数据库中）</div>}
       <div
         ref={viewportRef}
         onScroll={onScroll}
@@ -1040,7 +1237,7 @@ function LogPanel({
       <div ref={contentRef} className="log-content">
       {events.length === 0 && (
         <div className="py-10 text-center text-stone-400">
-          {running ? (
+          {loading ? <span role="status">正在加载对话…</span> : running ? (
             <span className="typing-dots inline-flex items-center">
               <span />
               <span />
@@ -1051,12 +1248,14 @@ function LogPanel({
           )}
         </div>
       )}
+      <Suspense fallback={<div className="content-loading" role="status">正在加载对话…</div>}>
       {visible.map(({ event, key }) => (
         <EventLine
           key={key}
           event={event}
         />
       ))}
+      </Suspense>
       </div>
       </div>
       <AnimatePresence>
@@ -1075,7 +1274,7 @@ function LogPanel({
       </AnimatePresence>
     </div>
   );
-}
+});
 
 let eventKey = 0;
 const nextKey = () => eventKey++;

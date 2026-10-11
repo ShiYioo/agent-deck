@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
+import { useDialogFocus } from "../hooks/useDialogFocus";
+import { FolderOpen, LoaderCircle } from "lucide-react";
 
 import { createProject } from "../api";
 import { IconClose, IconFolder } from "./icons";
@@ -18,16 +20,18 @@ export function CreateProjectModal({
   const [name, setName] = useState("");
   const [dir, setDir] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const submitting = useRef(false);
   const nameRef = useRef<HTMLInputElement | null>(null);
   const present = useIsPresent();
+  const dialogRef = useDialogFocus(present, 'input[aria-label="项目名称"]');
   useEffect(() => {
     if (!present) return;
-    const previous = document.activeElement as HTMLElement | null;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); onClose(); }
     };
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("keydown", onKey); previous?.focus(); };
+    return () => { document.removeEventListener("keydown", onKey); };
   }, [onClose, present]);
 
   const pickFolder = async () => {
@@ -38,6 +42,7 @@ export function CreateProjectModal({
   };
 
   const create = async () => {
+    if (submitting.current) return;
     if (!name.trim()) {
       setError("请输入项目名称");
       return;
@@ -46,34 +51,42 @@ export function CreateProjectModal({
       setError("请选择源文件夹");
       return;
     }
+    submitting.current = true;
+    setSaving(true);
+    setError(null);
     try {
       await createProject(name.trim(), dir.trim());
       onCreated(dir.trim());
       onClose();
     } catch (e) {
       setError(String(e));
+    } finally {
+      submitting.current = false;
+      setSaving(false);
     }
   };
 
   return (
     <MotionLayer
-      className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-6"
+      className="modal-backdrop"
       onClick={onClose}
     >
       <MotionLayer preset="dialog"
-        className="w-full max-w-md rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="dialog-panel"
         role="dialog"
         aria-modal="true"
         aria-label="创建项目"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-3">
-          <span className="text-sm font-semibold">创建项目</span>
+        <div className="dialog-heading">
+          <span>创建项目</span>
           <button
              onClick={onClose}
              title="关闭"
              aria-label="关闭"
-            className="hover-lift rounded p-1 text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+            className="icon-button"
           >
             <IconClose size={15} />
           </button>
@@ -88,7 +101,6 @@ export function CreateProjectModal({
               onChange={(e) => setName(e.target.value)}
               placeholder="项目名称"
               aria-label="项目名称"
-              autoFocus
               className="min-w-0 flex-1 text-sm outline-none placeholder:text-stone-400"
             />
           </div>
@@ -96,35 +108,34 @@ export function CreateProjectModal({
           <span className="text-xs font-medium text-stone-600">源文件夹</span>
           <button
             onClick={pickFolder}
-            className="flex w-full flex-col items-center gap-2 rounded-lg border border-dashed border-stone-300 bg-stone-50/60 px-4 py-6 text-sm text-stone-500 transition-colors hover:bg-stone-100"
+            className="folder-picker"
           >
             <span className="flex items-center gap-1.5">
-              在此电脑上添加文件夹
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="m6 9 6 6 6-6" />
-              </svg>
+              <FolderOpen size={16} />
+              {dir ? "更改文件夹" : "选择文件夹"}
             </span>
             {dir && (
-              <span className="font-mono text-xs text-stone-700">{dir}</span>
+              <span className="max-w-full break-all font-mono text-xs text-stone-700">{dir}</span>
             )}
           </button>
 
-          {error && <div className="text-xs text-red-600">{error}</div>}
+          {error && <div className="text-xs text-red-600" role="alert">{error}</div>}
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-4">
           <button
             onClick={onClose}
-            className="rounded-full px-4 py-1.5 text-sm text-stone-600 hover:bg-stone-100"
+            className="task-action"
           >
             取消
           </button>
           <button
             onClick={create}
-            disabled={!name.trim() || !dir.trim()}
-            className="rounded-full bg-stone-900 px-4 py-1.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-40"
+            disabled={saving || !name.trim() || !dir.trim()}
+            className="task-action task-action-primary disabled:opacity-40"
           >
-            创建项目
+            {saving && <LoaderCircle size={13} className="animate-spin" />}
+            {saving ? "正在创建…" : "创建项目"}
           </button>
         </div>
       </MotionLayer>

@@ -2,7 +2,7 @@
 
 一个桌面「多 harness 指挥台」：用统一的界面驱动 **ZCode（GLM）**、**Codex（GPT）** 等无头编码 agent——派任务、看日志、续会话，全部在一个窗口完成。
 
-各家的 CLI 保持原生（GLM 在 ZCode 里被调教得最好，GPT 在 Codex 里同理），Agent Deck 只做编排层：把每家 CLI 的无头模式包成统一的适配器。
+Agent Deck 提供两类运行器：`deck` 使用 pi SDK 执行模型请求和编码工具；ZCode、Codex、OpenCode 保留原生 CLI，通过适配器接入同一套消息、退出状态和持久化管道。
 
 ## 功能（M1）
 
@@ -10,6 +10,11 @@
 - 实时日志流：消息、思考、工具调用、结果统一渲染
 - 会话续接：自动提取 session id，一键继续上次任务
 - 任务取消、退出码、鉴权失败识别（后续弹出登录引导）
+- 流式回复、可见的上游错误、运行器健康检查与工具审批
+- 续聊保留前文与模型/权限配置，排队消息逐轮续发
+- 三端会话接力及任意方向的指导协作：先制定方案、执行、独立验收，按反馈返工并保存各阶段记录
+
+运行协议、状态管理与测试边界见 [docs/RUNTIME.md](docs/RUNTIME.md)。
 
 ## 架构
 
@@ -39,10 +44,14 @@
 
 ```bash
 pnpm install          # 安装前端依赖
+pnpm test:runtime     # 真实 sidecar + 本地模拟模型服务（不使用实际 API Key）
+pnpm test:ui          # 消息流、续聊、错误反馈、审批及响应式回归
 pnpm tauri dev        # 启动开发模式（前端热重载）
 pnpm tauri build      # 打包 NSIS 安装包
 cargo test            # 运行 Rust 适配器单元测试（在 src-tauri/ 下）
 ```
+
+`pnpm dev` 仅提供浏览器界面预览，没有 Tauri IPC，不会执行真实任务。界面会显示运行器未连接；真实对话请使用 `pnpm tauri dev`。`deck` 需在设置里启用至少一个有效模型配置；CLI 运行器需先安装对应 CLI 并完成登录。
 
 ## Roadmap
 

@@ -11,6 +11,7 @@
     "bundle:sidecar": "node agent/build.mjs",
     "preview": "vite preview",
     "test:ui": "playwright test",
+    "test:runtime": "node --test agent/runtime.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

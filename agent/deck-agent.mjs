@@ -41,6 +41,9 @@ let currentModel = null; // 当前底层 provider（glm/gpt）
 let pendingApproval = null; // { resolve, info: {id, tool, args} }
 let currentCwd = null;
 let firstRun = true;
+let abortRequested = false;
+let activeRun = null;
+let sessionKey = null;
 
 // 模型自治：启用的配置档案（随 run/summarize 指令下发，按顺序降级）
 let modelProfiles = [];
@@ -179,8 +182,13 @@ function buildModelsJson(profiles) {
 /** 从声明式配置建 runtime，并解析默认模型（providerId/modelId 寻址） */
 async function createRuntimeForProfile(p) {
   const modelsFile = path.join(os.tmpdir(), `deck-models-${process.pid}.json`);
-  fs.writeFileSync(modelsFile, JSON.stringify(buildModelsJson([p])));
-  const runtime = await ModelRuntime.create({ modelsPath: modelsFile, refreshOnCreate: false });
+  fs.writeFileSync(modelsFile, JSON.stringify(buildModelsJson([p])), { mode: 0o600 });
+  let runtime;
+  try {
+    runtime = await ModelRuntime.create({ modelsPath: modelsFile, refreshOnCreate: false });
+  } finally {
+    fs.rmSync(modelsFile, { force: true });
+  }
   const rows = profileModelRows(p);
   const defaultId =
     (rows.find((r) => r.id === p.model) ?? rows[0] ?? { id: p.model }).id ||
@@ -212,7 +220,7 @@ function profileModelRows(p) {
 
 
 /** deck 自持工具集（抄 OpenCode 工具形态）：读/写/改/命令/搜索/定位/列表 */
-function buildTools(mode) {
+function buildTools(mode, cwd) {
   const factories = [
     m_createReadTool,
     m_createWriteTool,
@@ -225,13 +233,13 @@ function buildTools(mode) {
   let tools = [];
   for (const f of factories) {
     try {
-      const t = f?.();
+      const t = f?.(cwd);
       if (t) tools.push(t);
     } catch {
       /* 逐个容错 */
     }
   }
-  if (tools.length === 0) tools = [...createCodingTools()];
+  if (tools.length === 0) tools = [...createCodingTools(cwd)];
   // 委派工具：互调是 deck 运行时的一等能力；switch_model：模型自治；
   // webfetch/todo_write/list_models：向 ZCode(45 契约)/OpenCode 看齐的自持能力
   tools = [
@@ -246,14 +254,14 @@ function buildTools(mode) {
   return mode === "approved" ? tools.map(wrapWithGate) : tools;
 }
 
-async function ensureSessionForProfile(p, { cwd, mode, resumeFile } = {}) {
+async function ensureSessionForProfile(p, { cwd, mode, resumeFile, toolsEnabled = true } = {}) {
   const rows = profileModelRows(p);
   const resolved = await createRuntimeForProfile(p);
   if (!p.key) {
     throw new Error(`配置 ${p.provider} 缺少 API Key`);
   }
-  const want = JSON.stringify([p.id, p.key, p.baseUrl, p.protocol, rows, cwd, mode, resumeFile ?? null]);
-  if (session && currentModel === want) return session;
+  const want = JSON.stringify([p.id, p.key, p.baseUrl, p.protocol, rows, cwd, mode, resumeFile ?? null, toolsEnabled]);
+  if (session && sessionKey === want) return session;
 
   if (session) {
     try {
@@ -263,16 +271,14 @@ async function ensureSessionForProfile(p, { cwd, mode, resumeFile } = {}) {
   }
 
   currentCwd = cwd || process.cwd();
-  // 续接：任务上次会话文件存在则打开（完整上下文继续），否则新会话
+  // A missing resume handle is an error, not a silent loss of conversation.
   let sessionManager;
-  if (resumeFile && fs.existsSync(resumeFile)) {
-    try {
-      sessionManager = SessionManager.open(resumeFile, undefined, currentCwd);
-    } catch {
-      sessionManager = undefined;
-    }
+  if (resumeFile) {
+    if (!fs.existsSync(resumeFile)) throw new Error(`续聊会话文件不存在：${resumeFile}`);
+    sessionManager = SessionManager.open(resumeFile, undefined, currentCwd);
   }
   // createAgentSession 返回 { session, extensionsResult } 包装，必须解包
+  const tools = toolsEnabled ? buildTools(mode, currentCwd) : [];
   const created = await createAgentSession({
     cwd: currentCwd,
     model: resolved.model,
@@ -280,8 +286,9 @@ async function ensureSessionForProfile(p, { cwd, mode, resumeFile } = {}) {
     // 模型目录：该供应商下配置的全部模型（切换/循环的基础）
     scopedModels: resolved.scoped,
     sessionManager,
-    customTools: buildTools(mode),
-    noTools: undefined,
+    customTools: tools,
+    tools: tools.map((tool) => tool.name),
+    noTools: toolsEnabled ? "builtin" : "all",
   });
   session = created?.session;
   if (!session || typeof session.subscribe !== "function") {
@@ -289,7 +296,8 @@ async function ensureSessionForProfile(p, { cwd, mode, resumeFile } = {}) {
       `会话创建失败：返回了非会话对象（${created?.error ?? created?.message ?? typeof created}）`,
     );
   }
-  currentModel = want;
+  sessionKey = want;
+  currentModel = p.provider;
   // 上报会话 ID 与恢复句柄（持久化到任务记录，支撑续接语义）
   try {
     const sid = session.sessionId ?? session.id;
@@ -322,11 +330,17 @@ async function ensureSessionForProfile(p, { cwd, mode, resumeFile } = {}) {
 function wrapWithGate(tool) {
   return {
     ...tool,
-    execute: async (toolCallId, args, signal, onUpdate) => {
+    execute: async (toolCallId, args, signal, onUpdate, ctx) => {
       const id = toolCallId || randomUUID();
+      if (signal?.aborted || abortRequested) throw new Error("Operation aborted");
       const approved = await new Promise((resolve) => {
+        const onAbort = () => resolve(false);
+        signal?.addEventListener("abort", onAbort, { once: true });
         pendingApproval = {
-          resolve,
+          resolve: (value) => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve(value);
+          },
           info: { id, tool: tool.name ?? "tool", args },
         };
         emit({
@@ -343,15 +357,20 @@ function wrapWithGate(tool) {
           isError: true,
         };
       }
-      return tool.execute(toolCallId, args, signal, onUpdate);
+      if (signal?.aborted || abortRequested) throw new Error("Operation aborted");
+      return tool.execute(toolCallId, args, signal, onUpdate, ctx);
     },
   };
 }
 
 // ── 委派工具：pi agent 原生调用 zcode/codex CLI（互调语义） ────────
 
-function runHeadless(program, args, cwd, timeoutMs = 10 * 60 * 1000) {
+function runHeadless(program, args, cwd, timeoutMs = 10 * 60 * 1000, signal) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ code: -1, out: "", errTail: "委派已取消" });
+      return;
+    }
     const options = {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, NO_COLOR: "1" },
@@ -373,20 +392,39 @@ function runHeadless(program, args, cwd, timeoutMs = 10 * 60 * 1000) {
 
     let out = "";
     let errTail = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const kill = () => {
+      if (process.platform === "win32" && child.pid) {
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true, stdio: "ignore",
+        });
+        killer.on("error", () => child.kill());
+      } else child.kill();
+    };
+    const onAbort = () => {
+      kill();
+      finish({ code: -1, out, errTail: "委派已取消" });
+    };
     const timer = setTimeout(() => {
-      child.kill();
-      resolve({ code: -1, out, errTail: `委派超时（${timeoutMs / 60000} 分钟）` });
+      kill();
+      finish({ code: -1, out, errTail: `委派超时（${timeoutMs / 60000} 分钟）` });
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (d) => (out += d.toString()));
     child.stderr.on("data", (d) => (errTail = (d.toString() + errTail).slice(0, 1500)));
     child.on("error", (e) => {
-      clearTimeout(timer);
-      resolve({ code: -1, out, errTail: e.message });
+      finish({ code: -1, out, errTail: e.message });
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, out, errTail });
+      finish({ code: code ?? -1, out, errTail });
     });
   });
 }
@@ -557,11 +595,13 @@ const DELEGATE_TOOLS = [
       },
       required: ["prompt"],
     },
-    execute: async (_id, args) => {
+    execute: async (_id, args, signal) => {
       const r = await runHeadless(
         "zcode",
         ["--json", "--mode", "yolo", "-p", String(args?.prompt ?? "")],
         args?.cwd || currentCwd,
+        undefined,
+        signal,
       );
       const text = extractFinalText(r.out);
       const ok = r.code === 0 && !/invalid token|unauthorized/i.test(r.errTail);
@@ -585,11 +625,13 @@ const DELEGATE_TOOLS = [
       },
       required: ["prompt"],
     },
-    execute: async (_id, args) => {
+    execute: async (_id, args, signal) => {
       const r = await runHeadless(
         "codex",
         ["exec", "--json", "--skip-git-repo-check", String(args?.prompt ?? "")],
         args?.cwd || currentCwd,
+        undefined,
+        signal,
       );
       const text = extractFinalText(r.out);
       const ok = r.code === 0;
@@ -645,24 +687,27 @@ const SWITCH_MODEL_TOOL = {
 async function handle(msg) {
   switch (msg.cmd) {
     case "run": {
-      modelProfiles = Array.isArray(msg.profiles) ? msg.profiles : [];
+      abortRequested = false;
+      modelProfiles = normalizeProfiles(msg.profiles);
       if (modelProfiles.length === 0) {
         deckEvent("error", {
           message: "模型池为空——请到设置面板添加并启用至少一个模型配置",
         });
+        deckEvent("run_end", { ok: false, status: "failed" });
         break;
       }
 
       // 模型自治：按启用顺序执行，失败（额度/认证/网络）自动降级到下一个配置
       let lastErr = null;
       let succeeded = false;
-      for (let i = 0; i < modelProfiles.length; i++) {
+      let resumeFile = msg.resumeSessionFile;
+      for (let i = 0; i < modelProfiles.length && !abortRequested; i++) {
         const p = modelProfiles[i];
         try {
           const s = await ensureSessionForProfile(p, {
             cwd: msg.cwd,
             mode: msg.mode === "approved" ? "approved" : "auto",
-            resumeFile: i === 0 ? msg.resumeSessionFile : undefined,
+            resumeFile,
           });
           if (i === 0 && msg.resumeSessionFile) firstRun = false; // 续接：纪律已在历史里
           deckEvent("run_start", { model: p.provider });
@@ -670,19 +715,42 @@ async function handle(msg) {
           const promptText = firstRun
             ? buildUniversalPrompt(msg.cwd, msg.memories) + "\n\n==== 任务 ====\n" + msg.prompt
             : msg.prompt;
+          if (abortRequested) break;
           await s.prompt(promptText);
+          if (s.sessionFile) {
+            resumeFile = s.sessionFile;
+            deckEvent("session_file", { path: s.sessionFile });
+          }
+          if (abortRequested) break;
           firstRun = false;
           // stopReason=error（如 401 令牌过期）：把上游错误显式上报，而不是静默收尾
           if (s.messages?.length) {
             const lastAssistant = [...s.messages].reverse().find((m) => m.role === "assistant");
-            if (lastAssistant?.stopReason === "error" && lastAssistant.errorMessage) {
-              throw new Error(String(lastAssistant.errorMessage).slice(0, 300));
+            if (lastAssistant?.stopReason === "aborted") {
+              abortRequested = true;
+              break;
+            }
+            if (lastAssistant?.stopReason === "error") {
+              // 上游错误体（如 429: {"error":{"message":"余额不足…"}}）提取人话再抛
+              const raw = String(lastAssistant.errorMessage || "模型请求失败，未提供详细错误");
+              const m = raw.match(/^\d+:\s*([\s\S]*)$/);
+              const body = m ? m[1].trim() : raw;
+              let friendly = body;
+              try {
+                const v = JSON.parse(body);
+                const message = v?.error?.message ?? v?.message;
+                friendly = typeof message === "string" ? message : body;
+              } catch {}
+              throw new Error(friendly.slice(0, 300));
             }
           }
           succeeded = true;
-          deckEvent("run_end");
+          deckEvent("run_end", { ok: true, status: "done" });
           break;
         } catch (err) {
+          if (abortRequested) break;
+          resumeFile = session?.sessionFile ?? resumeFile;
+          if (resumeFile) firstRun = false;
           lastErr = err;
           const reason = String(err?.message ?? err).slice(0, 160);
           deckEvent("status", { text: `${p.provider} 执行失败：${reason}` });
@@ -693,17 +761,20 @@ async function handle(msg) {
           }
         }
       }
-      if (!succeeded && lastErr) {
+      if (abortRequested) {
+        deckEvent("run_end", { ok: false, status: "cancelled" });
+      } else if (!succeeded && lastErr) {
         deckEvent("error", {
           message: `所有已启用模型均失败：${String(lastErr?.message ?? lastErr)}`,
         });
+        deckEvent("run_end", { ok: false, status: "failed" });
       }
       break;
     }
     case "summarize": {
       // 会话压缩：把交接记录压成结构化简报（AI 交接的核心步骤）
       try {
-        modelProfiles = Array.isArray(msg.profiles) ? msg.profiles : [];
+        modelProfiles = normalizeProfiles(msg.profiles);
         if (modelProfiles.length === 0) {
           throw new Error("模型池为空——请到设置面板添加并启用模型配置");
         }
@@ -712,6 +783,7 @@ async function handle(msg) {
         const s = await ensureSessionForProfile(p, {
           cwd: msg.cwd || process.cwd(),
           mode: "auto",
+          toolsEnabled: false,
         });
         let last = "";
         let active = true;
@@ -759,6 +831,7 @@ async function handle(msg) {
         const s = await ensureSessionForProfile(p, {
           cwd: msg.cwd || process.cwd(),
           mode: "auto",
+          toolsEnabled: false,
         });
         await s.prompt(
           "你现在是记忆抽取子代理。分析下面的会话记录，提取值得跨任务持久保存的记忆：" +
@@ -789,20 +862,22 @@ async function handle(msg) {
       break;
     }
     case "approve": {
-      if (pendingApproval?.resolve) {
+      if (pendingApproval?.resolve && pendingApproval.info.id === msg.id) {
         deckEvent("approval_decided", { id: msg.id, approved: true });
         pendingApproval.resolve(true);
       }
       break;
     }
     case "reject": {
-      if (pendingApproval?.resolve) {
+      if (pendingApproval?.resolve && pendingApproval.info.id === msg.id) {
         deckEvent("approval_decided", { id: msg.id, approved: false });
         pendingApproval.resolve(false);
       }
       break;
     }
     case "abort": {
+      abortRequested = true;
+      pendingApproval?.resolve(false);
       try {
         await session?.abort?.();
       } catch {}
@@ -829,8 +904,29 @@ rl.on("line", (line) => {
     deckEvent("error", { message: "无法解析的指令行" });
     return;
   }
-  Promise.resolve(handle(msg)).catch((err) =>
-    deckEvent("error", { message: String(err?.message ?? err) }),
-  );
+  if (["run", "summarize", "memorize"].includes(msg.cmd)) {
+    if (activeRun) {
+      deckEvent("status", { text: "运行中，拒绝重复启动" });
+      return;
+    }
+    activeRun = Promise.resolve(handle(msg))
+      .catch((err) => deckEvent("error", { message: String(err?.message ?? err) }))
+      .finally(() => { activeRun = null; });
+  } else {
+    Promise.resolve(handle(msg)).catch((err) =>
+      deckEvent("error", { message: String(err?.message ?? err) }),
+    );
+  }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", async () => {
+  await activeRun;
+  await session?.dispose?.();
+  process.exit(0);
+});
+
+function normalizeProfiles(profiles) {
+  return (Array.isArray(profiles) ? profiles : []).map((p) => ({
+    ...p,
+    baseUrl: p.base_url ?? p.baseUrl,
+  }));
+}

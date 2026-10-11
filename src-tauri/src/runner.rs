@@ -74,8 +74,9 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     harness: Harness,
     store: &Store,
     stream: Option<R>,
-) {
-    let Some(stream) = stream else { return };
+) -> bool {
+    let Some(stream) = stream else { return false };
+    let mut failed = false;
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
     loop {
@@ -89,6 +90,12 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                     continue;
                 }
                 for event in harness.parse_line(trimmed) {
+                    if matches!(
+                        &event,
+                        AgentEvent::Error { .. } | AgentEvent::Complete { ok: false }
+                    ) {
+                        failed = true;
+                    }
                     if let AgentEvent::SessionId { id } = &event {
                         let _ = store.set_session_id(task_id, id);
                     }
@@ -100,6 +107,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             }
         }
     }
+    failed
 }
 
 /// 主循环：并行读 stdout/stderr，结束后回写退出码并通知前端。
@@ -114,33 +122,49 @@ pub async fn stream_loop(
 ) {
     let app2 = app.clone();
     let task_id2 = task_id.clone();
-    let out_reader = async {
-        read_stream(&app2, &task_id2, harness, &store, stdout).await;
-    };
-    let err_reader = async {
-        read_stream(&app, &task_id, harness, &store, stderr).await;
-    };
-    tokio::join!(out_reader, err_reader);
+    let out_reader = async { read_stream(&app2, &task_id2, harness, &store, stdout).await };
+    let err_reader = async { read_stream(&app, &task_id, harness, &store, stderr).await };
+    let (out_failed, err_failed) = tokio::join!(out_reader, err_reader);
 
     // 两个流都关闭后，把子进程从任务表取出并等待退出码
     // （注意：MutexGuard 不能跨 await，必须先 take 再 wait）
-    let mut child = {
+    let (mut child, cancelled) = {
         let mut guard = match registry.0.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        guard.get_mut(&task_id).and_then(|task| task.child.take())
+        match guard.get_mut(&task_id) {
+            Some(task) => (task.child.take(), task.cancelled),
+            None => (None, false),
+        }
     };
     let code = match child.as_mut() {
         Some(c) => c.wait().await.ok().and_then(|s| s.code()),
         None => None,
     };
 
-    let status = match code {
-        Some(0) => "done",
-        Some(_) => "failed",
-        None => "cancelled",
+    let status = terminal_status(code, cancelled, out_failed || err_failed);
+    let code = if cancelled {
+        None
+    } else if status == "failed" {
+        Some(code.filter(|c| *c != 0).unwrap_or(1))
+    } else {
+        code
     };
+    if status == "failed" && !out_failed && !err_failed {
+        let event = AgentEvent::Error {
+            kind: "other".into(),
+            message: format!(
+                "{} 异常退出（退出码 {}），请检查运行输出",
+                harness.name(),
+                code.unwrap_or(-1)
+            ),
+        };
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = store.append_event(&task_id, &json);
+        }
+        emit_task_event(&app, &task_id, &event);
+    }
     store.finish_task(&task_id, status, code.map(|c| c as i64));
 
     // 任务表清账：条目残留会让注册表随任务数无限增长
@@ -150,6 +174,29 @@ pub async fn stream_loop(
 
     let _ = app.emit(
         "task-exit",
-        serde_json::json!({ "taskId": task_id, "code": code }),
+        serde_json::json!({ "taskId": task_id, "code": code, "status": status }),
     );
+}
+
+fn terminal_status(code: Option<i32>, cancelled: bool, failed: bool) -> &'static str {
+    if cancelled {
+        "cancelled"
+    } else if code == Some(0) && !failed {
+        "done"
+    } else {
+        "failed"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_and_protocol_errors_override_process_exit_codes() {
+        assert_eq!(terminal_status(Some(0), false, false), "done");
+        assert_eq!(terminal_status(Some(0), false, true), "failed");
+        assert_eq!(terminal_status(Some(1), true, true), "cancelled");
+        assert_eq!(terminal_status(None, false, false), "failed");
+    }
 }

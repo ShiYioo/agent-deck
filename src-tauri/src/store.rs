@@ -115,12 +115,17 @@ impl Store {
                  created_at  INTEGER NOT NULL,
                  finished_at INTEGER
              );
-             CREATE TABLE IF NOT EXISTS task_events (
+              CREATE TABLE IF NOT EXISTS task_events (
                  task_id TEXT NOT NULL,
                  seq     INTEGER NOT NULL,
                  event   TEXT NOT NULL,
                  PRIMARY KEY (task_id, seq)
-             );
+              );
+              CREATE TABLE IF NOT EXISTS collaborations (
+                  id TEXT PRIMARY KEY,
+                  data TEXT NOT NULL,
+                  updated_at INTEGER NOT NULL
+              );
              CREATE TABLE IF NOT EXISTS settings (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -248,6 +253,30 @@ impl Store {
         stmt.execute(params![task_id, event_json])
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn save_collaboration(&self, id: &str, data: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "INSERT INTO collaborations (id, data, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+            params![id, data, Self::now_millis()],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_collaboration(&self, id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.query_row("SELECT data FROM collaborations WHERE id = ?1", params![id], |row| row.get(0))
+            .optional().map_err(|e| e.to_string())
+    }
+
+    pub fn list_collaborations(&self) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let mut stmt = conn.prepare("SELECT data FROM collaborations ORDER BY updated_at DESC")
+            .map_err(|e| e.to_string())?;
+        stmt.query_map([], |row| row.get(0)).map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
     pub fn list_tasks(&self, limit: i64) -> Result<Vec<TaskRow>, String> {
@@ -433,6 +462,39 @@ impl Store {
             return Err(format!("任务不存在：{id}"));
         }
         Ok(())
+    }
+
+    pub fn session_tasks(&self, task_id: &str) -> Result<Vec<TaskRow>, String> {
+        let row = self
+            .get_task(task_id)?
+            .ok_or_else(|| format!("unknown task: {task_id}"))?;
+        if let Some(session) = row.session_id.as_deref().filter(|s| !s.is_empty()) {
+            Ok(self
+                .list_tasks(i64::MAX)?
+                .into_iter()
+                .filter(|turn| {
+                    turn.harness == row.harness && turn.session_id.as_deref() == Some(session)
+                })
+                .collect())
+        } else {
+            Ok(vec![row])
+        }
+    }
+
+    pub fn delete_tasks(&self, ids: &[String]) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for id in ids {
+            tx.execute("DELETE FROM task_events WHERE task_id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+            let changed = tx
+                .execute("DELETE FROM tasks WHERE id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err(format!("任务不存在：{id}"));
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn delete_project(&self, id: &str) -> Result<(), String> {
@@ -947,5 +1009,44 @@ mod tests {
     fn unknown_task_returns_none() {
         let store = Store::in_memory().unwrap();
         assert!(store.get_task("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn session_deletion_removes_all_turns_but_keeps_other_sessions_and_harnesses() {
+        let store = Store::in_memory().unwrap();
+        for (id, harness, session) in [
+            ("first", "deck", Some("shared.jsonl")),
+            ("second", "deck", Some("shared.jsonl")),
+            ("other", "codex", Some("shared.jsonl")),
+            ("separate", "deck", Some("other.jsonl")),
+            ("no-session", "deck", None),
+            ("empty-session", "deck", Some("")),
+        ] {
+            store.create_task(id, harness, ".", id, None, None, None).unwrap();
+            if let Some(session) = session {
+                store.set_session_id(id, session).unwrap();
+            }
+            store.append_event(id, "{}").unwrap();
+        }
+        assert_eq!(store.session_tasks("no-session").unwrap().len(), 1);
+        assert_eq!(store.session_tasks("empty-session").unwrap().len(), 1);
+        let ids = store.session_tasks("second").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        store.delete_tasks(&ids).unwrap();
+        for id in ["first", "second"] {
+            assert!(store.get_task(id).unwrap().is_none());
+            assert_eq!(store.get_event_count(id).unwrap(), 0);
+        }
+        assert_eq!(store.list_tasks(i64::MAX).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn bulk_deletion_rolls_back_when_any_task_is_missing() {
+        let store = Store::in_memory().unwrap();
+        store.create_task("first", "deck", ".", "first", None, None, None).unwrap();
+        store.append_event("first", "{}").unwrap();
+        assert!(store.delete_tasks(&["first".into(), "missing".into()]).is_err());
+        assert!(store.get_task("first").unwrap().is_some());
+        assert_eq!(store.get_event_count("first").unwrap(), 1);
     }
 }

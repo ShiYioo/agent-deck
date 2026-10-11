@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useIsPresent } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 import { IconClose } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
@@ -41,6 +42,7 @@ export function DiffModal({
   const modelLabel =
     model ?? (harness === "deck" && mode ? mode.toUpperCase() : null);
   const present = useIsPresent();
+  const dialogRef = useDialogFocus(present);
   // Esc 关闭（标准弹层键盘预期）
   useEffect(() => {
     if (!present) return;
@@ -58,16 +60,18 @@ export function DiffModal({
 
   return (
     <MotionLayer
-      className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/30 p-6"
+      className="modal-backdrop"
       onClick={onClose}
     >
       <MotionLayer preset="dialog"
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog" aria-modal="true" aria-label="Git Diff"
-        className="flex h-full w-full max-w-4xl flex-col rounded-xl border border-stone-200 bg-white shadow-[var(--shadow-2)]"
+        className="dialog-panel diff-panel"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-stone-100 px-4 py-2">
-          <div className="flex items-center gap-2 text-sm font-medium">
+        <div className="flex items-start justify-between gap-2 border-b border-stone-100 px-4 py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm font-medium">
             <span>Git Diff</span>
             {harness && (
               <span className="flex items-center gap-1.5 rounded-full bg-stone-100 px-2.5 py-0.5 text-xs font-normal text-stone-600">
@@ -93,8 +97,9 @@ export function DiffModal({
           </div>
           <button
             onClick={onClose}
-            className="hover-lift rounded p-1 text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+            className="icon-button"
             title="关闭"
+            aria-label="关闭"
           >
             <IconClose size={15} />
           </button>
