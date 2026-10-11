@@ -284,11 +284,13 @@ export default function App() {
         events: [
           ...(previous?.events ?? []),
           // 接力轮次注入的简报不透出，与入库事件一致（徽标行见 EventLine）
+          // ts = 派发时刻：complete 的工作耗时以此为起点
           {
             event: {
               type: "user_message",
               text: params.prompt,
               hidden: params.relay === true,
+              ts: Date.now(),
             },
             key: nextKey(),
           },
@@ -1198,9 +1200,49 @@ export default function App() {
 /** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
 const MAX_RENDER = 500;
 
+/** 耗时派生：思考块运行结束回填思考秒数；complete 回填本轮工作秒数 */
+function decorateTiming(events: LogItem[]): LogItem[] {
+  const out = events.map(({ event, key }) => ({
+    key,
+    event: { ...event } as AgentEvent & { ts?: number; durationMs?: number },
+  }));
+  // 思考运行：连续 thinking（流式快照同属一段），结束于首个非 thinking 事件
+  let thinkStart: number | null = null;
+  let thinkLast = -1;
+  let turnStart: number | null = null;
+  const flushThinking = () => {
+    if (thinkStart !== null && thinkLast >= 0) {
+      const last = out[thinkLast].event as AgentEvent & { ts?: number; durationMs?: number };
+      if (last.ts && last.ts > thinkStart) last.durationMs = last.ts - thinkStart;
+    }
+    thinkStart = null;
+    thinkLast = -1;
+  };
+  for (const item of out) {
+    const ev = item.event;
+    if (ev.type === "thinking") {
+      if (thinkStart === null && ev.ts) thinkStart = ev.ts;
+      if (ev.ts) thinkLast = out.indexOf(item);
+      continue;
+    }
+    flushThinking();
+    if (ev.type === "user_message" && !ev.hidden) {
+      turnStart = ev.ts ?? null;
+    } else if (ev.type === "complete") {
+      // 一轮的工作耗时：本轮 user_message → complete 的真实间隔
+      if (turnStart !== null && ev.ts && ev.ts > turnStart) {
+        ev.durationMs = ev.ts - turnStart;
+      }
+      turnStart = null;
+    }
+  }
+  // 思考延伸到末尾（仍在流式）不回填：结束后才提供
+  return out.map(({ event, key }) => ({ event: event as AgentEvent, key }));
+}
+
 /** 折叠的读类工具连调（read/grep/find/ls）：一行摘要，展开看逐次 */
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "view"]);
-type LogEntry = { event: AgentEvent; key: number };
+type LogEntry = LogItem;
 type DisplayGroup =
   | { kind: "single"; item: LogEntry }
   | { kind: "run"; tool: string; items: LogEntry[] };
@@ -1272,7 +1314,8 @@ const LogPanel = memo(function LogPanel({
   const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
 
   const overflow = events.length - MAX_RENDER;
-  const visible = overflow > 0 ? events.slice(overflow) : events;
+  const decorated = useMemo(() => decorateTiming(events), [events]);
+  const visible = overflow > 0 ? decorated.slice(overflow) : decorated;
   void overflow;
 
   return (

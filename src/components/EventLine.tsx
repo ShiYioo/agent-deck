@@ -55,7 +55,10 @@ export const EventLine = memo(function EventLine({
       );
     case "thinking":
       return (
-        <Disclosure className="activity-event" title={<><IconSparkle size={13} /><span>思考</span></>}>
+        <Disclosure
+          className="activity-event"
+          title={<><IconSparkle size={13} /><span>思考{event.durationMs ? ` · ${(event.durationMs / 1000).toFixed(1)} 秒` : ""}</span></>}
+        >
           <pre>{event.text}</pre>
         </Disclosure>
       );
@@ -84,6 +87,7 @@ export const EventLine = memo(function EventLine({
         <div className="activity-event flex items-center gap-1.5">
            {event.ok ? <IconCheckCircle size={14} className="shrink-0" /> : <IconXCircle size={14} className="shrink-0" />}
           任务{event.ok ? "完成" : "结束"}
+          {event.durationMs ? ` · 工作 ${Math.round(event.durationMs / 1000)} 秒` : ""}
         </div>
       );
     case "error":

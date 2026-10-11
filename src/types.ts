@@ -3,13 +3,16 @@ export type AgentEvent =
   | { type: "session_id"; id: string }
   | { type: "user_message"; text: string; hidden?: boolean }
   | { type: "assistant_message"; text: string; streamId?: string; streaming?: boolean }
-  | { type: "thinking"; text: string; streamId?: string; streaming?: boolean }
+  | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
   | { type: "tool_use"; tool: string; detail: string }
   | { type: "tool_result"; tool: string; ok: boolean; detail: string }
   | { type: "status"; text: string }
-  | { type: "complete"; ok: boolean }
+  | { type: "complete"; ok: boolean; durationMs?: number }
   | { type: "error"; kind: string; message: string }
   | { type: "raw"; line: string };
+
+/** 统一事件可携带入库时间戳（ms，Rust append_event 统一打点），用于思考/轮次耗时 */
+export type TimedAgentEvent = AgentEvent & { ts?: number };
 
 /** deck-agent sidecar 的 pi 事件（结构化，Rust 原样入库） */
 export type PiEvent = {
@@ -131,22 +134,26 @@ export function normalizeAgentEvents(ev: PiEvent | AgentEvent): AgentEvent[] {
     "session_id", "user_message", "assistant_message", "thinking", "tool_use",
     "tool_result", "status", "complete", "error", "raw",
   ]);
-  if (nativeTypes.has(ev.type)) return [ev as AgentEvent];
+  // 思考/轮次耗时的数据源：每个事件都带到达时刻（入库事件自带 ts，实时流补当前时刻）
+  type Timed = AgentEvent & { ts?: number };
+  const stamp = (e: Timed): AgentEvent =>
+    ({ ...e, ts: e.ts ?? (ev as Timed).ts ?? Date.now() }) as unknown as AgentEvent;
+  if (nativeTypes.has(ev.type)) return [stamp(ev as AgentEvent)];
   const mapped = piEventToAgentEvent(ev as PiEvent);
-  const result = mapped ? [mapped] : [];
+  const result = mapped ? [stamp(mapped)] : [];
   const message = (ev as PiEvent).message as {
     role?: string; timestamp?: number; stopReason?: string; errorMessage?: string;
     content?: { type?: string; thinking?: string }[];
   } | undefined;
   if (message?.role === "assistant") {
     const thinking = (message.content ?? []).filter((c) => c.type === "thinking").map((c) => c.thinking ?? "").join("");
-    if (thinking) result.unshift({
+    if (thinking) result.unshift(stamp({
       type: "thinking", text: thinking,
       streamId: String(message.timestamp ?? "thinking"),
       streaming: ev.type === "message_update",
-    });
+    }));
     if (ev.type === "message_end" && message.stopReason === "error" && message.errorMessage && mapped?.type !== "error") {
-      result.push(errorEvent(message.errorMessage));
+      result.push(stamp(errorEvent(message.errorMessage)));
     }
   }
   return result;

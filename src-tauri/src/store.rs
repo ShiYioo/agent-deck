@@ -261,6 +261,18 @@ impl Store {
 
     pub fn append_event(&self, task_id: &str, event_json: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        // 入库统一携带 ingest 时间戳（ms）：思考/轮次耗时的数据源。
+        // 事件自带 ts（pi timestamp）则保留；解析失败原样入库。
+        let stamped = serde_json::from_str::<serde_json::Value>(event_json)
+            .map(|mut v| {
+                if v.get("ts").is_none() {
+                    if let Ok(obj) = v.as_object_mut().ok_or(()) {
+                        obj.insert("ts".into(), serde_json::json!(Self::now_millis()));
+                    }
+                }
+                v.to_string()
+            })
+            .unwrap_or_else(|_| event_json.to_string());
         // 热路径（每条事件一次）：prepare_cached 避免逐条重复编译 SQL
         let mut stmt = conn
             .prepare_cached(
@@ -268,7 +280,7 @@ impl Store {
                  SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2 FROM task_events WHERE task_id = ?1",
             )
             .map_err(|e| e.to_string())?;
-        stmt.execute(params![task_id, event_json])
+        stmt.execute(params![task_id, stamped])
             .map_err(|e| e.to_string())?;
         Ok(())
     }
