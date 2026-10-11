@@ -24,7 +24,8 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, String> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
-    let out = command.args(args)
+    let out = command
+        .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()

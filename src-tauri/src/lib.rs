@@ -1,6 +1,6 @@
+mod collaboration;
 mod diff_watch;
 mod executors;
-mod collaboration;
 mod handoff;
 mod pi_session;
 mod runner;
@@ -162,9 +162,20 @@ async fn start_task(
     project_id: Option<String>,
 ) -> Result<TaskStartInfo, String> {
     start_task_impl(
-        app, registry, store, pi_registry, harness, cwd, prompt, mode, model,
-        permission, resume_session_id, project_id,
-    ).await
+        app,
+        registry,
+        store,
+        pi_registry,
+        harness,
+        cwd,
+        prompt,
+        mode,
+        model,
+        permission,
+        resume_session_id,
+        project_id,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -191,8 +202,8 @@ pub(crate) async fn start_task_impl(
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
-        let deck_project = project_id
-            .or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
+        let deck_project =
+            project_id.or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
         // 模型池：启用的配置档案按创建顺序构成自治链（sidecar 内自动降级）
         let profiles: Vec<pi_session::ModelProfileParam> = store
             .list_model_profiles(true)?
@@ -316,8 +327,8 @@ pub(crate) async fn start_task_impl(
         .as_ref()
         .map(|w| w.dir.to_string_lossy().to_string())
         .unwrap_or_else(|| cwd.clone());
-    let cli_project = project_id
-        .or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
+    let cli_project =
+        project_id.or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
     store.create_task(
         &task_id,
         harness.name(),
@@ -430,7 +441,10 @@ async fn get_task_events(
     conversation_events(&store, &task_id)
 }
 
-pub(crate) fn conversation_events(store: &Store, task_id: &str) -> Result<Vec<serde_json::Value>, String> {
+pub(crate) fn conversation_events(
+    store: &Store,
+    task_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     let row = store
         .get_task(task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
@@ -723,7 +737,9 @@ async fn discover_models(harness: String) -> Vec<String> {
         "codex" => discover_codex_models(),
         "opencode" => discover_opencode_models(),
         _ => Vec::new(),
-    }).await.unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 const CODEX_MODEL_FALLBACK: &[&str] = &["gpt-5.1-codex", "gpt-5.1", "o4-mini"];
@@ -769,7 +785,9 @@ fn discover_codex_models() -> Vec<String> {
 fn discover_opencode_models() -> Vec<String> {
     // opencode 是 .cmd 垫片，Windows 下须经 cmd /C
     let mut command = std::process::Command::new("cmd");
-    command.args(["/C", "opencode", "models"]).stdin(Stdio::null());
+    command
+        .args(["/C", "opencode", "models"])
+        .stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1240,7 +1258,9 @@ pub fn run() {
             app.manage(store);
             // Git maintenance must not delay window creation.
             if let Some(root) = cleanup_root {
-                tauri::async_runtime::spawn_blocking(move || worktree::prune_stale(Path::new(&root)));
+                tauri::async_runtime::spawn_blocking(move || {
+                    worktree::prune_stale(Path::new(&root))
+                });
             }
             Ok(())
         })

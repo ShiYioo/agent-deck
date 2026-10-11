@@ -261,22 +261,31 @@ impl Store {
             "INSERT INTO collaborations (id, data, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
             params![id, data, Self::now_millis()],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn get_collaboration(&self, id: &str) -> Result<Option<String>, String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
-        conn.query_row("SELECT data FROM collaborations WHERE id = ?1", params![id], |row| row.get(0))
-            .optional().map_err(|e| e.to_string())
+        conn.query_row(
+            "SELECT data FROM collaborations WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     pub fn list_collaborations(&self) -> Result<Vec<String>, String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
-        let mut stmt = conn.prepare("SELECT data FROM collaborations ORDER BY updated_at DESC")
+        let mut stmt = conn
+            .prepare("SELECT data FROM collaborations ORDER BY updated_at DESC")
             .map_err(|e| e.to_string())?;
-        stmt.query_map([], |row| row.get(0)).map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        stmt.query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub fn list_tasks(&self, limit: i64) -> Result<Vec<TaskRow>, String> {
@@ -517,6 +526,9 @@ impl Store {
 
     // ── 项目记忆（deck 任务完成后自动抽取，同项目召回） ──────
 
+    /// 记忆写入路径：自动抽取已按运行契约暂缓（docs/RUNTIME.md），
+    /// 保留方法与注入链路，恢复抽取时直接接线。
+    #[allow(dead_code)]
     pub fn add_memory(&self, cwd: &str, content: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let id = format!(
@@ -1022,7 +1034,9 @@ mod tests {
             ("no-session", "deck", None),
             ("empty-session", "deck", Some("")),
         ] {
-            store.create_task(id, harness, ".", id, None, None, None).unwrap();
+            store
+                .create_task(id, harness, ".", id, None, None, None)
+                .unwrap();
             if let Some(session) = session {
                 store.set_session_id(id, session).unwrap();
             }
@@ -1030,7 +1044,12 @@ mod tests {
         }
         assert_eq!(store.session_tasks("no-session").unwrap().len(), 1);
         assert_eq!(store.session_tasks("empty-session").unwrap().len(), 1);
-        let ids = store.session_tasks("second").unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>();
+        let ids = store
+            .session_tasks("second")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect::<Vec<_>>();
         assert_eq!(ids.len(), 2);
         store.delete_tasks(&ids).unwrap();
         for id in ["first", "second"] {
@@ -1043,9 +1062,15 @@ mod tests {
     #[test]
     fn bulk_deletion_rolls_back_when_any_task_is_missing() {
         let store = Store::in_memory().unwrap();
-        store.create_task("first", "deck", ".", "first", None, None, None).unwrap();
+        store
+            .create_task("first", "deck", ".", "first", None, None, None)
+            .unwrap();
         store.append_event("first", "{}").unwrap();
-        assert!(store.delete_tasks(&["first".into(), "missing".into()]).is_err());
+        assert!(
+            store
+                .delete_tasks(&["first".into(), "missing".into()])
+                .is_err()
+        );
         assert!(store.get_task("first").unwrap().is_some());
         assert_eq!(store.get_event_count("first").unwrap(), 1);
     }

@@ -82,14 +82,23 @@ pub(crate) fn assistant_text(events: &[String]) -> String {
             }
             continue;
         }
-        let Some(message) = v.get("message").filter(|m| m.get("role").and_then(|x| x.as_str()) == Some("assistant")) else {
+        let Some(message) = v
+            .get("message")
+            .filter(|m| m.get("role").and_then(|x| x.as_str()) == Some("assistant"))
+        else {
             continue;
         };
-        let text = message.get("content").and_then(|c| c.as_array()).map(|items| {
-            items.iter().filter(|c| c.get("type").and_then(|x| x.as_str()) == Some("text"))
-                .filter_map(|c| c.get("text").and_then(|x| x.as_str()))
-                .collect::<String>()
-        }).unwrap_or_default();
+        let text = message
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|c| c.get("type").and_then(|x| x.as_str()) == Some("text"))
+                    .filter_map(|c| c.get("text").and_then(|x| x.as_str()))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
         if !text.is_empty() {
             messages.push(text);
         }

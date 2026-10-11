@@ -348,38 +348,6 @@ pub fn send_command(
         .map_err(|e| format!("发送失败：{e}"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn approval_commands_do_not_unregister_the_session() {
-        let registry = PiRegistry::default();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        registry.insert("task".into(), tx);
-        for id in ["first", "second"] {
-            send_command(&registry, "task", "approve", Some(id.into())).unwrap();
-            let cmd: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
-            assert_eq!(cmd["id"], id);
-        }
-        send_command(&registry, "task", "abort", None).unwrap();
-        assert!(registry.get("task").is_some());
-        registry.remove("task");
-        assert!(send_command(&registry, "task", "abort", None).is_err());
-    }
-
-    #[test]
-    fn invalid_commands_and_missing_approval_ids_are_rejected() {
-        let registry = PiRegistry::default();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        registry.insert("task".into(), tx);
-        assert!(send_command(&registry, "task", "close", None).is_err());
-        assert!(send_command(&registry, "task", "approve", None).is_err());
-        assert!(rx.try_recv().is_err());
-        assert!(registry.get("task").is_some());
-    }
-}
-
 /// 用 deck 运行时压缩一段文本（会话记录 → 交接简报）。
 /// spawn 独立 sidecar 进程，等待 summarize_result 事件；失败返回 Err 由调用方回退。
 pub async fn pi_summarize_text(
@@ -463,4 +431,36 @@ pub async fn pi_summarize_text(
         }
     }
     Err("sidecar 在返回结果前退出".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_commands_do_not_unregister_the_session() {
+        let registry = PiRegistry::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.insert("task".into(), tx);
+        for id in ["first", "second"] {
+            send_command(&registry, "task", "approve", Some(id.into())).unwrap();
+            let cmd: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(cmd["id"], id);
+        }
+        send_command(&registry, "task", "abort", None).unwrap();
+        assert!(registry.get("task").is_some());
+        registry.remove("task");
+        assert!(send_command(&registry, "task", "abort", None).is_err());
+    }
+
+    #[test]
+    fn invalid_commands_and_missing_approval_ids_are_rejected() {
+        let registry = PiRegistry::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.insert("task".into(), tx);
+        assert!(send_command(&registry, "task", "close", None).is_err());
+        assert!(send_command(&registry, "task", "approve", None).is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(registry.get("task").is_some());
+    }
 }

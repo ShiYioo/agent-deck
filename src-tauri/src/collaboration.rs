@@ -1,20 +1,22 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::{executors::Harness, handoff, pi_session, Store, TaskRegistry};
+use crate::{Store, TaskRegistry, executors::Harness, handoff, pi_session};
 
 fn same_directory(left: &str, right: &str) -> Result<bool, String> {
     let left = std::fs::canonicalize(left).map_err(|e| format!("工作目录不可用：{e}"))?;
     let right = std::fs::canonicalize(right).map_err(|e| format!("工作目录不可用：{e}"))?;
     #[cfg(windows)]
     {
-        Ok(left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy()))
+        Ok(left
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy()))
     }
     #[cfg(not(windows))]
     {
@@ -41,7 +43,10 @@ pub struct Collaboration {
 pub struct CollaborationRegistry(Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>);
 
 fn publish(app: &AppHandle, store: &Store, run: &Collaboration) -> Result<(), String> {
-    store.save_collaboration(&run.id, &serde_json::to_string(run).map_err(|e| e.to_string())?)?;
+    store.save_collaboration(
+        &run.id,
+        &serde_json::to_string(run).map_err(|e| e.to_string())?,
+    )?;
     let _ = app.emit("collaboration-update", run);
     Ok(())
 }
@@ -64,25 +69,30 @@ pub fn validate_pair(mentor: &str, worker: &str, max_rounds: u32) -> Result<(), 
 
 pub fn review_approved(text: &str) -> bool {
     // Only a standalone protocol record is a verdict, never a quoted example.
-    text.lines().rev().find(|line| !line.trim().is_empty()).is_some_and(|line| {
-        serde_json::from_str::<serde_json::Value>(line.trim())
-            .ok()
-            .is_some_and(|v| v.get("agent_deck_verdict").and_then(|v| v.as_str()) == Some("approved"))
-    })
+    text.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| {
+            serde_json::from_str::<serde_json::Value>(line.trim())
+                .ok()
+                .is_some_and(|v| {
+                    v.get("agent_deck_verdict").and_then(|v| v.as_str()) == Some("approved")
+                })
+        })
 }
 
 fn cancel_child(app: &AppHandle, id: &str) {
     let _ = crate::cancel_task(app.state::<TaskRegistry>(), id.to_string());
-    let _ = pi_session::send_command(
-        &app.state::<pi_session::PiRegistry>(), id, "abort", None,
-    );
+    let _ = pi_session::send_command(&app.state::<pi_session::PiRegistry>(), id, "abort", None);
 }
 
 #[tauri::command]
 pub fn list_collaborations(store: State<'_, Store>) -> Result<Vec<Collaboration>, String> {
-    store.list_collaborations()?.into_iter().map(|raw| {
-        serde_json::from_str(&raw).map_err(|e| format!("协作记录损坏：{e}"))
-    }).collect()
+    store
+        .list_collaborations()?
+        .into_iter()
+        .map(|raw| serde_json::from_str(&raw).map_err(|e| format!("协作记录损坏：{e}")))
+        .collect()
 }
 
 #[tauri::command]
@@ -92,8 +102,13 @@ pub fn cancel_collaboration(
     registry: State<'_, CollaborationRegistry>,
     id: String,
 ) -> Result<(), String> {
-    let cancelled = registry.0.lock().map_err(|_| "collaboration registry poisoned")?
-        .get(&id).cloned().ok_or("协作已结束或已中断")?;
+    let cancelled = registry
+        .0
+        .lock()
+        .map_err(|_| "collaboration registry poisoned")?
+        .get(&id)
+        .cloned()
+        .ok_or("协作已结束或已中断")?;
     cancelled.store(true, Ordering::SeqCst);
     if let Some(raw) = store.get_collaboration(&id)? {
         let run: Collaboration = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -133,11 +148,16 @@ pub async fn start_collaboration(
             return Err(format!("未找到 {harness}，请先安装并登录"));
         }
     }
-    let mut active = registry.0.lock().map_err(|_| "collaboration registry poisoned")?;
+    let mut active = registry
+        .0
+        .lock()
+        .map_err(|_| "collaboration registry poisoned")?;
     for raw in store.list_collaborations()? {
         let previous: Collaboration = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
         if previous.status == "running" {
-            let previous_source = store.get_task(&previous.source_task_id)?.ok_or("源任务不存在")?;
+            let previous_source = store
+                .get_task(&previous.source_task_id)?
+                .ok_or("源任务不存在")?;
             if same_directory(&source.cwd, &previous_source.cwd)? {
                 return Err("该工作目录已有协作运行中".into());
             }
@@ -192,7 +212,9 @@ async fn stage(
     if cancelled.load(Ordering::SeqCst) {
         return Err("协作已停止".into());
     }
-    let source = store.get_task(&run.source_task_id)?.ok_or("源任务已被删除")?;
+    let source = store
+        .get_task(&run.source_task_id)?
+        .ok_or("源任务已被删除")?;
     let task = crate::start_task_impl(
         app.clone(),
         app.state::<TaskRegistry>(),
@@ -206,7 +228,8 @@ async fn stage(
         Some("auto".into()),
         None,
         Some(run.source_task_id.clone()),
-    ).await?;
+    )
+    .await?;
     run.current_task_id = Some(task.task_id.clone());
     run.task_ids.push(task.task_id.clone());
     if let Err(error) = publish(app, store, run) {
@@ -220,7 +243,10 @@ async fn stage(
         let row = store.get_task(&task.task_id)?.ok_or("阶段任务已被删除")?;
         if row.status != "running" {
             if row.status != "done" {
-                return Err(format!("{} 阶段 {}：{}", run.phase, row.status, task.task_id));
+                return Err(format!(
+                    "{} 阶段 {}：{}",
+                    run.phase, row.status, task.task_id
+                ));
             }
             let events = store.get_events(&task.task_id, 0, i64::MAX)?;
             let text = handoff::assistant_text(&events);
@@ -234,30 +260,60 @@ async fn stage(
 }
 
 async fn run_flow(
-    app: &AppHandle, store: &Store, run: &mut Collaboration, cancelled: &AtomicBool,
+    app: &AppHandle,
+    store: &Store,
+    run: &mut Collaboration,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let source = store.get_task(&run.source_task_id)?.ok_or("源任务不存在")?;
     let events = crate::conversation_events(store, &source.id)?
-        .into_iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        .into_iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
     let context = handoff::convo_tail(&handoff::render_conversation(&events), 24_000);
     let mentor = run.mentor.clone();
     let worker = run.worker.clone();
-    let mentor_mode = if mentor == "codex" { "readonly" } else { "plan" };
+    let mentor_mode = if mentor == "codex" {
+        "readonly"
+    } else {
+        "plan"
+    };
     let worker_mode = if worker == "codex" { "write" } else { "build" };
-    let goal = format!("原始任务：{}\n会话记录（可能截断，须核对实际文件）：\n{context}", source.prompt);
-    let plan = stage(app, store, run, cancelled, &mentor, mentor_mode, format!(
-        "你是 {worker} 的指导方。只检查文件，不修改文件，不委派其他智能体。\n\
+    let goal = format!(
+        "原始任务：{}\n会话记录（可能截断，须核对实际文件）：\n{context}",
+        source.prompt
+    );
+    let plan = stage(
+        app,
+        store,
+        run,
+        cancelled,
+        &mentor,
+        mentor_mode,
+        format!(
+            "你是 {worker} 的指导方。只检查文件，不修改文件，不委派其他智能体。\n\
          根据任务和工作目录现状，给出明确的实施步骤、边界、风险和可执行验收标准。\n{goal}"
-    )).await?;
+        ),
+    )
+    .await?;
     let mut instructions = plan.clone();
     for round in 1..=run.max_rounds {
         run.round = round;
         run.phase = "executing".into();
-        let result = stage(app, store, run, cancelled, &worker, worker_mode, format!(
-            "你是执行方，由 {mentor} 指导。只在当前目录工作，保留已有改动，不再委派。\n\
+        let result = stage(
+            app,
+            store,
+            run,
+            cancelled,
+            &worker,
+            worker_mode,
+            format!(
+                "你是执行方，由 {mentor} 指导。只在当前目录工作，保留已有改动，不再委派。\n\
              按指导实施并验证；遇到冲突说明原因，报告修改文件、测试结果和未完成项。\n\
              {goal}\n指导/返工要求：\n{instructions}"
-        )).await?;
+            ),
+        )
+        .await?;
         run.phase = "reviewing".into();
         let review = stage(app, store, run, cancelled, &mentor, mentor_mode, format!(
             "你是 {worker} 的验收方。只检查文件，不修改、不委派。核对实际 diff 和验收证据，\
@@ -295,10 +351,18 @@ mod tests {
 
     #[test]
     fn review_requires_final_structured_verdict() {
-        assert!(review_approved("Verified\n{\"agent_deck_verdict\":\"approved\"}\n"));
+        assert!(review_approved(
+            "Verified\n{\"agent_deck_verdict\":\"approved\"}\n"
+        ));
         assert!(!review_approved("approved"));
-        assert!(!review_approved("Example: {\"agent_deck_verdict\":\"approved\"}"));
-        assert!(!review_approved("{\"agent_deck_verdict\":\"approved\"}\nNeeds changes"));
-        assert!(!review_approved("{\"agent_deck_verdict\":\"changes_requested\"}"));
+        assert!(!review_approved(
+            "Example: {\"agent_deck_verdict\":\"approved\"}"
+        ));
+        assert!(!review_approved(
+            "{\"agent_deck_verdict\":\"approved\"}\nNeeds changes"
+        ));
+        assert!(!review_approved(
+            "{\"agent_deck_verdict\":\"changes_requested\"}"
+        ));
     }
 }
