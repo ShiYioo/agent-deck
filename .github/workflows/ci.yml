@@ -3,7 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    # 纯文档/提交信息改动不触发 CI
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   pull_request:
+
+# 同分支新推送取消还在跑的旧 CI（省排队和重复计算）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
