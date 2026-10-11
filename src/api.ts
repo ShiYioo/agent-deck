@@ -78,6 +78,43 @@ export async function startTask(params: {
   return task_id;
 }
 
+export type TurnFileChange = {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  added: number | null;
+  removed: number | null;
+  binary: boolean;
+  diff: string;
+};
+
+export type TurnArtifact = {
+  path: string;
+  kind: "image" | "archive" | "sheet" | "doc" | "pdf" | "other";
+  size: number;
+};
+
+export type TurnArtifacts = {
+  files: TurnFileChange[];
+  artifacts: TurnArtifact[];
+  base_dir: string;
+};
+
+/** 轮次产出：改动文件（+/-行、diff、可撤销）与生成工件 */
+export async function getTurnArtifacts(taskId: string): Promise<TurnArtifacts> {
+  return await invoke<TurnArtifacts>("get_turn_artifacts", { taskId });
+}
+
+/** 撤销单文件改动（未跟踪 = 删除新文件；跟踪 = 还原到 HEAD） */
+export async function undoTaskFile(taskId: string, path: string): Promise<void> {
+  await invoke("undo_task_file", { taskId, path });
+}
+
+/** 用系统默认程序打开工件 */
+export async function openArtifact(path: string, reveal = false): Promise<void> {
+  if (!inTauri) browserStub("打开工件");
+  await invoke("open_artifact", { path, reveal });
+}
+
 export async function deleteTask(taskId: string): Promise<void> {
   if (!inTauri) browserStub("删除会话");
   await invoke("delete_task", { taskId });

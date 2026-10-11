@@ -20,6 +20,9 @@ import {
   getSetting,
   getTaskDiff,
   getTaskEvents,
+  getTurnArtifacts,
+  undoTaskFile,
+  openArtifact,
   invokePiCommand,
   inTauri,
   listTasks,
@@ -46,6 +49,7 @@ import { useFrameQueue } from "./hooks/useFrameQueue";
 import { useAutoScroll } from "./hooks/useAutoScroll";
 import { Disclosure } from "./components/Disclosure";
 import { ToolIcon } from "./components/EventLine";
+import { TurnArtifactsPanel } from "./components/TurnArtifacts";
 import {
   IconBack,
   IconKey,
@@ -645,6 +649,43 @@ export default function App() {
    const selectedCanResume = !!selectedSession && !selectedRunning;
   const selectedHarness = selectedRow?.harness ?? selectedLive?.harness ?? harness;
   const selectedStatus = selectedLive?.status ?? selectedRow?.status;
+  // 轮次产出：任务结束后拉取改动文件与生成工件
+  const [turnArtifacts, setTurnArtifacts] = useState<{
+    taskId: string;
+    data: Awaited<ReturnType<typeof getTurnArtifacts>>;
+  } | null>(null);
+  const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const artifactsTaskRef = useRef<string | null>(null);
+  const fetchTurnArtifacts = useCallback(async (taskId: string) => {
+    if (artifactsTaskRef.current === taskId) return;
+    artifactsTaskRef.current = taskId;
+    setArtifactsLoading(true);
+    try {
+      const data = await getTurnArtifacts(taskId);
+      setTurnArtifacts({ taskId, data });
+    } catch {
+      setTurnArtifacts(null);
+    } finally {
+      setArtifactsLoading(false);
+    }
+  }, []);
+  const refreshTurnArtifacts = useCallback(() => {
+    if (selected) {
+      artifactsTaskRef.current = null;
+      fetchTurnArtifacts(selected);
+    }
+  }, [selected, fetchTurnArtifacts]);
+
+  useEffect(() => {
+    // 完成或失败的任务展示产出；运行中清掉旧面板
+    if (!selected || selectedRunning || !["done", "failed"].includes(selectedStatus ?? "")) {
+      setTurnArtifacts(null);
+      artifactsTaskRef.current = null;
+      return;
+    }
+    if (turnArtifacts?.taskId !== selected) fetchTurnArtifacts(selected);
+  }, [selected, selectedRunning, selectedStatus, turnArtifacts, fetchTurnArtifacts]);
+
   const hasAuthError = selectedEvents.some(
     ({ event: e }) => e.type === "error" && e.kind === "auth",
   );
@@ -663,6 +704,38 @@ export default function App() {
       invoke("diff_watch_stop", { taskId: diffTaskId }).catch(() => {});
     };
   }, [diffTaskId, selectedRunning]);
+
+  const handleViewFileDiff = useCallback(
+    (file: { diff: string }) => {
+      if (!selected) return;
+      setDiff({ taskId: selected, text: file.diff });
+    },
+    [selected],
+  );
+
+  const handleUndoFile = useCallback(
+    (file: { path: string }) => {
+      if (!selected) return;
+      undoTaskFile(selected, file.path)
+        .then(refreshTurnArtifacts)
+        .catch((e) => setActionError(String(e)));
+    },
+    [selected, refreshTurnArtifacts],
+  );
+
+  const handleOpenArtifact = useCallback((path: string, reveal: boolean) => {
+    openArtifact(path, reveal).catch((e) => setActionError(String(e)));
+  }, []);
+
+  const artifactsFooter = selected ? (
+    <TurnArtifactsPanel
+      data={turnArtifacts?.taskId === selected ? turnArtifacts.data : null}
+      loading={artifactsLoading}
+      onViewDiff={handleViewFileDiff}
+      onUndo={handleUndoFile}
+      onOpen={handleOpenArtifact}
+    />
+  ) : null;
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
@@ -1102,7 +1175,7 @@ export default function App() {
               </div>
             )}
 
-            <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning} loading={!!selected && loadingEvents.has(selected)} />
+            <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning} loading={!!selected && loadingEvents.has(selected)} footer={artifactsFooter} />
           </MotionLayer>
         )}
 
@@ -1346,10 +1419,12 @@ const LogPanel = memo(function LogPanel({
   events,
   running,
   loading,
+  footer,
 }: {
   events: { event: AgentEvent; key: number }[];
   running: boolean;
   loading: boolean;
+  footer?: React.ReactNode;
 }) {
   const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
 
@@ -1419,6 +1494,7 @@ const LogPanel = memo(function LogPanel({
         );
       })}
       </Suspense>
+      {footer}
       </div>
       </div>
       <AnimatePresence>

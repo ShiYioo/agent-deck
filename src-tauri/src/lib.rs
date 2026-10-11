@@ -750,6 +750,356 @@ async fn build_smart_handoff_prompt(
     ))
 }
 
+// ── 轮次产出面板：改动文件（+/-行、diff、撤销）与生成工件 ──
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TurnFileChange {
+    pub path: String,
+    /// added | modified | deleted
+    pub status: String,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+    pub binary: bool,
+    pub diff: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TurnArtifact {
+    pub path: String,
+    /// image | archive | sheet | doc | pdf | other
+    pub kind: String,
+    pub size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TurnArtifacts {
+    pub files: Vec<TurnFileChange>,
+    pub artifacts: Vec<TurnArtifact>,
+    /// git 操作的工作目录（worktree 任务的隔离目录）
+    pub base_dir: String,
+}
+
+const TURN_DIFF_CAP: usize = 60_000;
+
+fn artifact_kind(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    let ext = ext.as_str();
+    Some(match ext {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => "image",
+        "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "xz" | "bz2" => "archive",
+        "xlsx" | "xls" | "csv" => "sheet",
+        "docx" | "doc" | "pptx" | "ppt" => "doc",
+        "pdf" => "pdf",
+        _ => return None,
+    })
+}
+
+fn turn_git(dir: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .creation_flags(0x0800_0000)
+        .output()
+        .ok()
+}
+
+fn turn_git_ok(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = turn_git(dir, args)?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// status --porcelain 行 → (xy, path)；处理 R 重命名的 "new -> old" 与引号
+fn parse_porcelain(line: &str) -> Option<(String, String)> {
+    if line.len() < 4 {
+        return None;
+    }
+    let xy = line[..2].to_string();
+    let mut path = line[3..].trim().to_string();
+    if path.starts_with('"') && path.ends_with('"') {
+        path = path[1..path.len() - 1].to_string();
+    }
+    if path.contains(" -> ") {
+        let (a, _) = path.split_once(" -> ").unwrap();
+        path = a.trim().to_string();
+    }
+    Some((xy, path))
+}
+
+#[tauri::command]
+fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnArtifacts, String> {
+    use std::collections::BTreeMap;
+    let row = store
+        .get_task(&task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let dir = row.worktree_dir.clone().unwrap_or_else(|| row.cwd.clone());
+    let dir_path = std::path::Path::new(&dir);
+    if !dir_path.is_dir() {
+        return Err(format!("任务目录不存在：{dir}"));
+    }
+    // 非 git 目录：扫描任务开始后新建/修改的文件（浅层，跳过依赖与隐藏目录）
+    if turn_git_ok(dir_path, &["rev-parse", "--is-inside-work-tree"])
+        .map(|s| s.trim() != "true")
+        .unwrap_or(true)
+    {
+        let started = row.created_at - 5_000; // 容忍时钟偏差
+        let mut artifacts: Vec<TurnArtifact> = Vec::new();
+        let skip = |name: &str| {
+            matches!(
+                name,
+                "node_modules" | "target" | "dist" | "build" | "__pycache__" | ".venv" | "vendor"
+            ) || name.starts_with('.')
+        };
+        let mut stack = vec![dir_path.to_path_buf()];
+        let mut visited = 0usize;
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                visited += 1;
+                if visited > 5000 {
+                    return Ok(TurnArtifacts {
+                        files: Vec::new(),
+                        artifacts,
+                        base_dir: dir,
+                    });
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let p = entry.path();
+                if p.is_dir() {
+                    if !skip(&name) {
+                        stack.push(p);
+                    }
+                    continue;
+                }
+                if skip(&name) {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                if modified < started {
+                    continue;
+                }
+                let rel = p
+                    .strip_prefix(dir_path)
+                    .map(|x| x.to_string_lossy().to_string())
+                    .unwrap_or(name.clone());
+                if let Some(kind) = artifact_kind(&rel) {
+                    artifacts.push(TurnArtifact {
+                        path: rel,
+                        kind: kind.to_string(),
+                        size: meta.len(),
+                    });
+                }
+            }
+        }
+        artifacts.sort_by(|a, b| a.path.cmp(&b.path));
+        return Ok(TurnArtifacts {
+            files: Vec::new(),
+            artifacts,
+            base_dir: dir,
+        });
+    }
+
+    // 1) status --porcelain：改动全集（含未跟踪）
+    let status_out = turn_git_ok(dir_path, &["status", "--porcelain"]).unwrap_or_default();
+    let entries: Vec<(String, String)> = status_out
+        .lines()
+        .filter_map(parse_porcelain)
+        .filter(|(_, path)| !path.is_empty() && !path.starts_with(".git/"))
+        .collect();
+
+    // 2) numstat（跟踪文件 vs HEAD）：path → (added, removed, binary)
+    let numstat_out = turn_git_ok(dir_path, &["diff", "--numstat", "HEAD"]).unwrap_or_default();
+    let mut numstat: BTreeMap<String, (Option<u64>, Option<u64>)> = BTreeMap::new();
+    for line in numstat_out.lines() {
+        let mut parts = line.split('\t');
+        let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let added = if a == "-" {
+            None
+        } else {
+            a.parse::<u64>().ok()
+        };
+        let removed = if r == "-" {
+            None
+        } else {
+            r.parse::<u64>().ok()
+        };
+        numstat.insert(p.to_string(), (added, removed));
+    }
+
+    // 3) 逐文件：状态、行数、diff 文本（cap）
+    let mut files = Vec::new();
+    let mut artifacts = Vec::new();
+    for (xy, path) in &entries {
+        let untracked = xy.starts_with("??");
+        let deleted = xy.contains('D');
+        let full = dir_path.join(path);
+        let (added, removed, binary) = if untracked {
+            match std::fs::read(full) {
+                Ok(bytes) => {
+                    let bin = bytes.contains(&0);
+                    (
+                        if bin {
+                            None
+                        } else {
+                            Some(bytes.iter().filter(|&&b| b == b'\n').count() as u64 + 1)
+                        },
+                        Some(0),
+                        bin,
+                    )
+                }
+                Err(_) => (None, Some(0), false),
+            }
+        } else {
+            let (a, r) = numstat.get(path).copied().unwrap_or((None, None));
+            (a, r, a.is_none() && r.is_none())
+        };
+
+        let diff = if deleted {
+            String::new()
+        } else {
+            let text = if untracked {
+                turn_git(dir_path, &["diff", "--no-index", "--", "/dev/null", path])
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            } else {
+                turn_git_ok(dir_path, &["diff", "HEAD", "--unified=3", "--", path])
+            }
+            .unwrap_or_default();
+            text.chars().take(TURN_DIFF_CAP).collect()
+        };
+
+        let status = if untracked {
+            "added"
+        } else if deleted {
+            "deleted"
+        } else {
+            "modified"
+        };
+
+        if let Some(kind) = artifact_kind(path) {
+            let size = std::fs::metadata(dir_path.join(path))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            artifacts.push(TurnArtifact {
+                path: path.clone(),
+                kind: kind.to_string(),
+                size,
+            });
+        }
+
+        files.push(TurnFileChange {
+            path: path.clone(),
+            status: status.to_string(),
+            added,
+            removed,
+            binary,
+            diff,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    artifacts.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(TurnArtifacts {
+        files,
+        artifacts,
+        base_dir: dir,
+    })
+}
+
+/// 撤销单文件改动：未跟踪 = 删除新文件；跟踪 = 还原到 HEAD。破坏性操作由前端二次确认。
+#[tauri::command]
+fn undo_task_file(store: State<'_, Store>, task_id: String, path: String) -> Result<(), String> {
+    let row = store
+        .get_task(&task_id)?
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let dir = row.worktree_dir.clone().unwrap_or_else(|| row.cwd.clone());
+    let dir_path = std::path::Path::new(&dir);
+    if !dir_path.is_dir() {
+        return Err(format!("任务目录不存在：{dir}"));
+    }
+    let safe = path.replace('"', "");
+    let status_out =
+        turn_git_ok(dir_path, &["status", "--porcelain", "--", &safe]).ok_or("git status 失败")?;
+    let untracked = status_out
+        .lines()
+        .next()
+        .map(|l| l.starts_with("??"))
+        .unwrap_or(false);
+    let out = if untracked {
+        turn_git(dir_path, &["clean", "-f", "--", &safe])
+    } else {
+        turn_git(dir_path, &["checkout", "HEAD", "--", &safe])
+    };
+    match out {
+        Some(o) if o.status.success() => Ok(()),
+        Some(o) => Err(format!(
+            "撤销失败：{}",
+            String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .next()
+                .unwrap_or("未知错误")
+        )),
+        None => Err("无法执行 git".into()),
+    }
+}
+
+/// 用系统默认程序打开工件；reveal = 在文件夹中显示。
+#[tauri::command]
+fn open_artifact(path: String, reveal: bool) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    let full = if p.is_absolute() {
+        path.clone()
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        cwd.join(p).display().to_string()
+    };
+    if !std::path::Path::new(&full).exists() {
+        return Err(format!("文件不存在：{full}"));
+    }
+    if reveal {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("explorer")
+                .raw_arg(format!("/select,\"{full}\""))
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(windows))]
+        let _ = reveal;
+    } else {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", &full])
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        // 本项目仅分发 Windows（NSIS）；非 Windows 无操作
+    }
+    Ok(())
+}
+
 /// 前端 → Rust：向 pi 会话发审批/中止指令。
 #[tauri::command]
 fn pi_command(
@@ -1398,6 +1748,9 @@ pub fn run() {
             check_harness,
             cancel_task,
             delete_task,
+            get_turn_artifacts,
+            undo_task_file,
+            open_artifact,
             delete_session,
             list_tasks,
             get_task_events,
