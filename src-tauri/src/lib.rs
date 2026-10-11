@@ -898,9 +898,17 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         let skip = |name: &str| {
             matches!(
                 name,
-                "node_modules" | "target" | "dist" | "build" | "__pycache__" | ".venv" | "vendor"
+                "node_modules"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | "__pycache__"
+                    | ".venv"
+                    | "vendor"
+                    | "worktrees"
             ) || name.starts_with('.')
         };
+        let mut files: Vec<TurnFileChange> = Vec::new();
         let mut stack = vec![dir_path.to_path_buf()];
         let mut visited = 0usize;
         while let Some(d) = stack.pop() {
@@ -941,6 +949,27 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
                     .strip_prefix(dir_path)
                     .map(|x| x.to_string_lossy().to_string())
                     .unwrap_or(name.clone());
+                // 指定产出的普通文件也要展示：非 git 无基线，任务期内新建 = 本轮产出
+                if files.len() < 50 {
+                    let bytes = std::fs::read(&p).unwrap_or_default();
+                    let binary = bytes.contains(&0);
+                    let (added, removed) = if binary {
+                        (None, None)
+                    } else {
+                        (
+                            Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1),
+                            Some(0),
+                        )
+                    };
+                    files.push(TurnFileChange {
+                        path: rel.clone(),
+                        status: "added".into(),
+                        added,
+                        removed,
+                        binary,
+                        diff: String::new(),
+                    });
+                }
                 if let Some(kind) = artifact_kind(&rel) {
                     artifacts.push(TurnArtifact {
                         path: rel,
@@ -951,8 +980,9 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
             }
         }
         artifacts.sort_by(|a, b| a.path.cmp(&b.path));
+        files.sort_by(|a, b| a.path.cmp(&b.path));
         return Ok(TurnArtifacts {
-            files: Vec::new(),
+            files,
             artifacts,
             base_dir: dir,
         });
