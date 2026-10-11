@@ -380,6 +380,7 @@ pub async fn pi_summarize_text(
         .map_err(|e| format!("启动 deck-agent 失败：{e}"))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take().ok_or("no stderr")?;
 
     let cmd = serde_json::json!({
         "cmd": "summarize",
@@ -393,6 +394,28 @@ pub async fn pi_summarize_text(
         .map_err(|e| e.to_string())?;
     stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
     drop(stdin); // 关 stdin 促使 sidecar 处理完后可退出
+
+    // stderr 并发收集（崩溃原因），逐行镜像到 dev 控制台便于诊断
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut tail = String::new();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf).to_string();
+                    eprintln!("[deck-debug][summarize] {}", line.trim_end());
+                    tail.push_str(&line);
+                    if tail.chars().count() > 2000 {
+                        tail = tail.chars().skip(tail.chars().count() - 2000).collect();
+                    }
+                }
+            }
+        }
+        tail
+    });
 
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -430,7 +453,30 @@ pub async fn pi_summarize_text(
             }
         }
     }
-    Err("sidecar 在返回结果前退出".into())
+    // 走到这 = stdout EOF 仍未见结果：带上退出码与 stderr 尾部，让崩溃可见
+    let exit_note = match child.wait().await {
+        Ok(status) => format!("exit_code={}", status.code().unwrap_or(-1)),
+        Err(e) => format!("wait failed: {e}"),
+    };
+    let err_tail = stderr_task
+        .await
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Err(format!(
+        "sidecar 在返回结果前退出（{exit_note}）{}",
+        if err_tail.is_empty() {
+            String::new()
+        } else {
+            format!("：{}", err_tail.chars().take(400).collect::<String>())
+        }
+    ))
 }
 
 #[cfg(test)]

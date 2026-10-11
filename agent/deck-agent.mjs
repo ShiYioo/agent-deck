@@ -809,6 +809,11 @@ async function handle(msg) {
         );
         active = false;
         un();
+        // 上游错误（401/429/超时）在 pi 里是 stopReason=error 的空回复，必须显式失败
+        const lastAssistant = [...(s.messages ?? [])].reverse().find((m) => m.role === "assistant");
+        if (lastAssistant?.stopReason === "error" && lastAssistant.errorMessage) {
+          throw new Error(String(lastAssistant.errorMessage).slice(0, 300));
+        }
         deckEvent("summarize_result", { text: last });
       } catch (err) {
         deckEvent("summarize_error", { message: String(err?.message ?? err) });
@@ -858,7 +863,7 @@ async function handle(msg) {
       break;
     }
     case "close": {
-      process.exit(0);
+      process.stdout.write("", () => process.exit(0));
       break;
     }
     case "approve": {
@@ -920,8 +925,11 @@ rl.on("line", (line) => {
 });
 process.stdin.on("end", async () => {
   await activeRun;
-  await session?.dispose?.();
-  process.exit(0);
+  try {
+    await session?.dispose?.();
+  } catch {}
+  // stdout 是异步管道：等缓冲排空再退出，否则最后一条结果行会被截断丢失
+  process.stdout.write("", () => process.exit(0));
 });
 
 function normalizeProfiles(profiles) {
