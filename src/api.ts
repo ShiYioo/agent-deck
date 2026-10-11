@@ -68,6 +68,10 @@ export async function startTask(params: {
   permission: string | null;
   resumeSessionId: string | null;
   projectId?: string | null;
+  /** 会话根 id：接力/续接轮次继承（跨 harness 归同一会话） */
+  conversationId?: string | null;
+  /** 接力轮次：注入的简报不作为用户消息展示 */
+  relay?: boolean;
 }): Promise<string> {
   if (!inTauri) browserStub("派任务");
   const { task_id } = await invoke<{ task_id: string }>("start_task", params);

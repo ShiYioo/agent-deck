@@ -1,7 +1,7 @@
 /** 与 Rust 侧 AgentEvent 严格对应的统一事件模型 */
 export type AgentEvent =
   | { type: "session_id"; id: string }
-  | { type: "user_message"; text: string }
+  | { type: "user_message"; text: string; hidden?: boolean }
   | { type: "assistant_message"; text: string; streamId?: string; streaming?: boolean }
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean }
   | { type: "tool_use"; tool: string; detail: string }
@@ -78,11 +78,14 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
     };
   }
   if (t === "tool_execution_start") {
-    return {
-      type: "tool_use",
-      tool: String(ev.toolName ?? "tool"),
-      detail: JSON.stringify(ev.args ?? {}, null, 2),
-    };
+    const tool = String(ev.toolName ?? "tool");
+    const args = ev.args as Record<string, unknown> | undefined;
+    // bash 命令透明：展示命令本身而非 JSON 包装，长度放宽保证可读
+    const detail =
+      tool === "bash" && typeof args?.command === "string"
+        ? String(args.command).slice(0, 800)
+        : JSON.stringify(args ?? {}, null, 2).slice(0, 400);
+    return { type: "tool_use", tool, detail };
   }
   if (t === "tool_execution_end") {
     const out = ev.result as { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
@@ -166,6 +169,8 @@ export type TaskRow = {
   model: string | null;
   project_id: string | null;
   session_id: string | null;
+  /** 会话根任务 id：接力/续接轮次继承（跨 harness 归同一会话） */
+  conversation_id: string | null;
   base_branch: string | null;
   worktree_dir: string | null;
   status: "running" | "done" | "failed" | "cancelled";

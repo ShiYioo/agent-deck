@@ -62,6 +62,8 @@ pub struct TaskRow {
     pub session_id: Option<String>,
     pub base_branch: Option<String>,
     pub worktree_dir: Option<String>,
+    /// 会话根任务 id：接力/续接轮次继承，跨 harness 归同一会话（空 = 旧数据，按 session 分组）
+    pub conversation_id: Option<String>,
     /// running | done | failed | cancelled
     pub status: String,
     pub exit_code: Option<i64>,
@@ -169,6 +171,7 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_branch TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_commit TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_dir TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN conversation_id TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN protocol TEXT", []);
@@ -217,6 +220,21 @@ impl Store {
                 project_id,
                 Self::now_millis()
             ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// 标记任务所属会话（根任务 id）；接力/续接轮次继承根会话。
+    pub fn set_task_conversation(
+        &self,
+        task_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "UPDATE tasks SET conversation_id = ?2 WHERE id = ?1",
+            params![task_id, conversation_id],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -292,7 +310,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
@@ -310,10 +328,11 @@ impl Store {
                     base_branch: row.get(7)?,
                     worktree_dir: row.get(8)?,
                     session_id: row.get(9)?,
-                    status: row.get(10)?,
-                    exit_code: row.get(11)?,
-                    created_at: row.get(12)?,
-                    finished_at: row.get(13)?,
+                    conversation_id: row.get(10)?,
+                    status: row.get(11)?,
+                    exit_code: row.get(12)?,
+                    created_at: row.get(13)?,
+                    finished_at: row.get(14)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -326,7 +345,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, status, exit_code,
                         created_at, finished_at
                  FROM tasks WHERE id = ?1",
             )
@@ -343,10 +362,11 @@ impl Store {
                 base_branch: row.get(7)?,
                 worktree_dir: row.get(8)?,
                 session_id: row.get(9)?,
-                status: row.get(10)?,
-                exit_code: row.get(11)?,
-                created_at: row.get(12)?,
-                finished_at: row.get(13)?,
+                conversation_id: row.get(10)?,
+                status: row.get(11)?,
+                exit_code: row.get(12)?,
+                created_at: row.get(13)?,
+                finished_at: row.get(14)?,
             })
         })
         .optional()

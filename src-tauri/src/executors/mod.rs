@@ -143,6 +143,9 @@ pub enum AgentEvent {
     },
     UserMessage {
         text: String,
+        /// 接力注入的简报/内置提示词：入库留档但 UI 不展示
+        #[serde(default)]
+        hidden: bool,
     },
     AssistantMessage {
         text: String,

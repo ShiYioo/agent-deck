@@ -112,19 +112,28 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                     let status = state.get("status").and_then(Value::as_str).unwrap_or("");
                     match status {
                         "pending" | "running" => {
-                            let detail = state
-                                .get("title")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                                .unwrap_or_else(|| {
-                                    truncate(
-                                        &state
-                                            .get("input")
-                                            .map(Value::to_string)
-                                            .unwrap_or_default(),
-                                        160,
-                                    )
-                                });
+                            // bash 命令透明：展示命令本身而非 JSON/标题
+                            let detail = if tool == "bash" {
+                                state
+                                    .pointer("/input/command")
+                                    .and_then(Value::as_str)
+                                    .map(|s| truncate(s, 800))
+                                    .unwrap_or_else(|| "bash".into())
+                            } else {
+                                state
+                                    .get("title")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| {
+                                        truncate(
+                                            &state
+                                                .get("input")
+                                                .map(Value::to_string)
+                                                .unwrap_or_default(),
+                                            160,
+                                        )
+                                    })
+                            };
                             events.push(AgentEvent::ToolUse { tool, detail });
                         }
                         "completed" => {

@@ -6,6 +6,8 @@ export type SessionGroup = {
 };
 
 export function sessionKey(task: TaskRow): string {
+  // 会话根 id 跨 harness 传递：接力/续接轮次与原会话同组
+  if (task.conversation_id) return JSON.stringify(["conv", task.conversation_id]);
   return JSON.stringify(task.session_id
     ? [task.harness, "session", task.session_id]
     : [task.harness, "task", task.id]);

@@ -47,7 +47,10 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
                 });
             match role {
                 "user" => collect_block_events(events, content, |events, text| {
-                    events.push(AgentEvent::UserMessage { text });
+                    events.push(AgentEvent::UserMessage {
+                        text,
+                        hidden: false,
+                    });
                 }),
                 "assistant" => collect_block_events(events, content, |events, text| {
                     events.push(AgentEvent::AssistantMessage { text });

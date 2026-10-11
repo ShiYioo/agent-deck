@@ -45,6 +45,7 @@ import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
 import { useFrameQueue } from "./hooks/useFrameQueue";
 import { useAutoScroll } from "./hooks/useAutoScroll";
 import { Disclosure } from "./components/Disclosure";
+import { ToolIcon } from "./components/EventLine";
 import {
   IconBack,
   IconKey,
@@ -282,7 +283,15 @@ export default function App() {
         projectId: params.projectId, sessionId: params.resumeSessionId ?? undefined,
         events: [
           ...(previous?.events ?? []),
-          { event: { type: "user_message", text: params.prompt }, key: nextKey() },
+          // 接力轮次注入的简报不透出，与入库事件一致（徽标行见 EventLine）
+          {
+            event: {
+              type: "user_message",
+              text: params.prompt,
+              hidden: params.relay === true,
+            },
+            key: nextKey(),
+          },
         ],
         running: true, status: "running", exitCode: null, queued,
       },
@@ -425,6 +434,9 @@ export default function App() {
     };
   }, [refreshHistory, enqueueUpdate, flushUpdates, clearApproval, flushQueued, notify]);
 
+  const selectedConversation = useMemo(() => selected
+    ? groupSessions(sidebarTasks).find((session) => session.turns.some((turn) => turn.id === selected))
+    : undefined, [sidebarTasks, selected]);
   // 发送：@ 智能体唤醒（可并行）；选中已完成任务且有会话 ID → 续接；否则开新任务
   const handleSend = useCallback(
     async (rawText: string) => {
@@ -511,6 +523,9 @@ export default function App() {
           harness: canResume ? resumeSource!.harness : useHarness,
           cwd: useCwd,
           prompt: promptToSend,
+          // 接力/续接轮次归入当前会话（跨 harness 同组）；简报不作为用户消息透出
+          conversationId: canResume || crossHarness ? selectedConversation?.turns[0].id ?? null : null,
+          relay: crossHarness,
           mode: canResume
             ? resumeSource!.mode
             : useHarness === "deck"
@@ -550,6 +565,7 @@ export default function App() {
       projects,
       dispatchTask,
       historyEvents,
+      selectedConversation,
     ],
   );
 
@@ -607,9 +623,6 @@ export default function App() {
 
   const selectedRow = selected ? history.find((t) => t.id === selected) : undefined;
   const selectedLive = selected ? live[selected] : undefined;
-  const selectedConversation = useMemo(() => selected
-    ? groupSessions(sidebarTasks).find((session) => session.turns.some((turn) => turn.id === selected))
-    : undefined, [sidebarTasks, selected]);
   const conversationKey = selectedConversation?.turns[0].id ?? selected ?? "new";
   const conversationTitle = selectedConversation?.turns[0].prompt ?? selectedRow?.prompt ?? selectedLive?.prompt ?? "聊天";
   // 条目携带稳定 key：live 用追加时分配的递增 key，回放用序号。
@@ -1185,6 +1198,44 @@ export default function App() {
 /** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
 const MAX_RENDER = 500;
 
+/** 折叠的读类工具连调（read/grep/find/ls）：一行摘要，展开看逐次 */
+const READ_TOOLS = new Set(["read", "grep", "find", "ls", "view"]);
+type LogEntry = { event: AgentEvent; key: number };
+type DisplayGroup =
+  | { kind: "single"; item: LogEntry }
+  | { kind: "run"; tool: string; items: LogEntry[] };
+
+function groupToolRuns(events: LogEntry[]): DisplayGroup[] {
+  const out: DisplayGroup[] = [];
+  let run: LogEntry[] = [];
+  let runTool = "";
+  const flush = () => {
+    if (run.length >= 4) out.push({ kind: "run", tool: runTool, items: run });
+    else for (const item of run) out.push({ kind: "single", item });
+    run = [];
+    runTool = "";
+  };
+  for (const item of events) {
+    const { event } = item;
+    const tool = event.type === "tool_use" || event.type === "tool_result" ? event.tool.toLowerCase() : "";
+    if (tool && READ_TOOLS.has(tool)) {
+      if (!runTool || tool === runTool) {
+        runTool = tool;
+        run.push(item);
+      } else {
+        flush();
+        runTool = tool;
+        run.push(item);
+      }
+    } else {
+      flush();
+      out.push({ kind: "single", item });
+    }
+  }
+  flush();
+  return out;
+}
+
 /** 事件 → 可复制纯文本（消息/工具/错误摘要） */
 function eventsToText(events: { event: AgentEvent }[]): string {
   return events
@@ -1249,12 +1300,36 @@ const LogPanel = memo(function LogPanel({
         </div>
       )}
       <Suspense fallback={<div className="content-loading" role="status">正在加载对话…</div>}>
-      {visible.map(({ event, key }) => (
-        <EventLine
-          key={key}
-          event={event}
-        />
-      ))}
+      {groupToolRuns(visible).map((group) => {
+        if (group.kind === "single") {
+          const { event, key } = group.item;
+          return <EventLine key={key} event={event} />;
+        }
+        const [first] = group.items;
+        const failed = group.items.some(
+          ({ event }) => event.type === "tool_result" && !event.ok,
+        );
+        return (
+          <Disclosure
+            key={first.key}
+            className="activity-event"
+            title={
+              <>
+                <ToolIcon tool={group.tool} />
+                <span>
+                  {group.tool} ×{group.items.filter(({ event }) => event.type === "tool_use").length || group.items.length}
+                  （已折叠）
+                </span>
+                {failed && <span className="text-red-600">含失败</span>}
+              </>
+            }
+          >
+            {group.items.map(({ event, key }) => (
+              <EventLine key={key} event={event} />
+            ))}
+          </Disclosure>
+        );
+      })}
       </Suspense>
       </div>
       </div>

@@ -145,6 +145,28 @@ async fn check_harness(
 
 /// 前端 → Rust：启动一个无头 agent 任务。
 // tauri command 签名参数固定较多，属框架形态
+/// 会话归属：接力/续接轮次继承指定会话根；无指定或根不存在 = 自成新会话。
+fn mark_conversation(
+    store: &Store,
+    task_id: &str,
+    conversation_id: Option<&str>,
+) -> Result<(), String> {
+    match conversation_id {
+        Some(cid) if store.get_task(cid)?.is_some() => {
+            // 旧会话根没有 conversation_id：回填自身，历史会话也能跨 harness 归组
+            if store
+                .get_task(cid)?
+                .and_then(|t| t.conversation_id)
+                .is_none()
+            {
+                store.set_task_conversation(cid, cid)?;
+            }
+            store.set_task_conversation(task_id, cid)
+        }
+        _ => store.set_task_conversation(task_id, task_id),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn start_task(
@@ -160,6 +182,8 @@ async fn start_task(
     permission: Option<String>,
     resume_session_id: Option<String>,
     project_id: Option<String>,
+    conversation_id: Option<String>,
+    relay: Option<bool>,
 ) -> Result<TaskStartInfo, String> {
     start_task_impl(
         app,
@@ -174,6 +198,8 @@ async fn start_task(
         permission,
         resume_session_id,
         project_id,
+        conversation_id,
+        relay,
     )
     .await
 }
@@ -192,6 +218,8 @@ pub(crate) async fn start_task_impl(
     permission: Option<String>,
     resume_session_id: Option<String>,
     project_id: Option<String>,
+    conversation_id: Option<String>,
+    relay: Option<bool>,
 ) -> Result<TaskStartInfo, String> {
     if prompt.trim().is_empty() {
         return Err("请输入任务描述".into());
@@ -243,11 +271,15 @@ pub(crate) async fn start_task_impl(
             model.as_deref(),
             deck_project.as_deref(),
         )?;
-        let user_event = serde_json::json!({ "type": "user_message", "text": prompt });
+        let user_event = serde_json::json!({
+            "type": "user_message", "text": prompt,
+            "hidden": relay.unwrap_or(false),
+        });
         store.append_event(&task_id, &user_event.to_string())?;
         if let Some(id) = &resume_session_id {
             store.set_session_id(&task_id, id)?;
         }
+        mark_conversation(&store, &task_id, conversation_id.as_deref())?;
         let use_cwd_deck = cwd.clone();
         let task_memories = store.list_memories(&cwd, 20).unwrap_or_default();
         let params = pi_session::PiRunParams {
@@ -349,13 +381,15 @@ pub(crate) async fn start_task_impl(
     store.append_event(
         &task_id,
         &serde_json::json!({
-            "type": "user_message", "text": prompt
+            "type": "user_message", "text": prompt,
+            "hidden": relay.unwrap_or(false),
         })
         .to_string(),
     )?;
     if let Some(id) = &resume_session_id {
         store.set_session_id(&task_id, id)?;
     }
+    mark_conversation(&store, &task_id, conversation_id.as_deref())?;
 
     let child = runner::spawn(
         harness,

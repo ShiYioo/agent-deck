@@ -15,7 +15,7 @@ import {
 } from "./icons";
 
 /** 依据工具名挑图标：终端/文件/网络/通用扳手 */
-function ToolIcon({ tool }: { tool: string }) {
+export function ToolIcon({ tool }: { tool: string }) {
   const t = tool.toLowerCase();
   if (/(shell|bash|terminal|exec|command)/.test(t)) return <IconTerminal size={13} />;
   if (/(file|edit|write|read|patch)/.test(t)) return <IconFileEdit size={13} />;
@@ -32,6 +32,15 @@ export const EventLine = memo(function EventLine({
 
   switch (event.type) {
     case "user_message":
+      // 接力注入的简报/内置提示词：入库留档但不透出，只显示接力标记
+      if (event.hidden) {
+        return (
+          <div className="activity-event flex items-center gap-1.5">
+            <IconInfo size={13} className="shrink-0" />
+            已接力自 AgentDeck（自动注入上一会话的交接简报）
+          </div>
+        );
+      }
       return (
         <div className="message-user">
           <div>{event.text}</div>
