@@ -230,6 +230,7 @@ async fn stage(
         Some(run.source_task_id.clone()),
         None,
         None,
+        Vec::new(),
     )
     .await?;
     run.current_task_id = Some(task.task_id.clone());

@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Play, Square, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Play, Square, Plus, ShieldAlert, ShieldCheck, Paperclip, FileText, X } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 import { useTextareaAutosize } from "../hooks/useTextareaAutosize";
@@ -27,6 +27,9 @@ export const Composer = memo(function Composer({
   projects,
   selectedProjectId,
   onProjectSelect,
+  attachments,
+  onAttach,
+  onRemoveAttachment,
   onSend,
   running,
   recentModels = [],
@@ -48,6 +51,9 @@ export const Composer = memo(function Composer({
   projects: { id: string; name: string; dir: string }[];
   selectedProjectId: string | null;
   onProjectSelect: (id: string | null, dir: string) => void;
+  attachments: string[];
+  onAttach: (paths: string[]) => void;
+  onRemoveAttachment: (path: string) => void;
   onSend: (text: string) => Promise<boolean>;
   draftKey: string;
   onStop: () => void;
@@ -61,6 +67,12 @@ export const Composer = memo(function Composer({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const drafts = useRef(new Map<string, string>());
+  // 附件：附加按钮选入，chips 展示可移除；发送后清空由父级负责
+  const pickAttachments = async () => {
+    const picked = await open({ multiple: true, title: "选择附件（图片/文件）" });
+    if (Array.isArray(picked) && picked.length) onAttach(picked);
+    else if (typeof picked === "string") onAttach([picked]);
+  };
   const currentDraftKey = useRef(draftKey);
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const projectPopupRef = useRef<HTMLDivElement>(null);
@@ -325,6 +337,23 @@ export const Composer = memo(function Composer({
 
   return (
     <div className="composer-card">
+      {attachments.length > 0 && (
+        <div className="composer-attachments" role="list" aria-label="附件">
+          {attachments.map((a) => (
+            <span key={a} className="composer-attachment-chip" role="listitem" title={a}>
+              <FileText size={12} className="shrink-0 text-stone-400" />
+              <span className="min-w-0 max-w-48 truncate">{a.split(/[\/]/).pop()}</span>
+              <button
+                onClick={() => onRemoveAttachment(a)}
+                aria-label={`移除附件 ${a.split(/[\/]/).pop()}`}
+                className="shrink-0 text-stone-400 hover:text-red-500"
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       {/* 项目/目录行：未选 → 整行安静「选择项目」；已选 → chip 显示名称 */}
       <div ref={projectMenuRef} className="composer-project-row">
         <button
@@ -345,6 +374,14 @@ export const Composer = memo(function Composer({
         >
           <Plus size={20} />
           <span className="sr-only">{activeProject?.name ?? projectName(cwd)}</span>
+        </button>
+        <button
+          onClick={pickAttachments}
+          className="composer-attach-button"
+          title="附加文件/图片"
+          aria-label="附加文件"
+        >
+          <Paperclip size={17} />
         </button>
 
         {createPortal(<AnimatePresence>

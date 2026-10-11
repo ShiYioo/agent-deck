@@ -253,6 +253,11 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
 .composer-dock { flex-shrink: 0; width: 100%; padding: 12px 28px 16px; }
 .is-new .composer-dock { margin-bottom: auto; padding-top: 0; padding-bottom: 90px; }
 .composer-card { position: relative; max-width: var(--content-width); width: 100%; margin: 0 auto; border: 1px solid #e8e8e8; border-radius: var(--composer-radius); background: #fff; box-shadow: 0 2px 5px rgba(0,0,0,.02), 0 0 28px rgba(0,0,0,.025); }
+.composer-attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+.composer-attachment-chip { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border-radius: 6px; background: #f5f5f5; font-size: 11px; color: #525252; }
+.composer-attach-button { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 8px; color: var(--text-3); transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out); }
+.composer-attach-button:hover { background: #ebebeb; color: var(--text-1); }
+
 .composer-project-row { position: absolute; left: 12px; bottom: 10px; z-index: 2; }
 .composer-project-button { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 6px; color: var(--text-1); }
 .composer-project-button:hover { background: #f5f5f5; }

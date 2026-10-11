@@ -117,6 +117,8 @@ export default function App() {
   const [diff, setDiff] = useState<{ taskId: string; text: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionInfo, setActionInfo] = useState<string | null>(null);
+  // composer 附件（绝对路径）；发送后清空
+  const [attachments, setAttachments] = useState<string[]>([]);
 
   // 待审批的工具调用（deck 运行时 approved 模式）
   const [approvals, setApprovals] = useState<Record<string, ApprovalRequest>>({});
@@ -292,7 +294,11 @@ export default function App() {
           {
             event: {
               type: "user_message",
-              text: params.prompt,
+              text: params.prompt + (params.attachments?.length
+                ? `
+
+📎 附件：${params.attachments.map((a) => a.split(/[\/]/).pop()).join("、")}`
+                : ""),
               hidden: params.relay === true,
               ts: Date.now(),
             },
@@ -532,6 +538,7 @@ export default function App() {
           // 接力/续接轮次归入当前会话（跨 harness 同组）；简报不作为用户消息透出
           conversationId: canResume || crossHarness ? selectedConversation?.turns[0].id ?? null : null,
           relay: crossHarness,
+          attachments,
           mode: canResume
             ? resumeSource!.mode
             : useHarness === "deck"
@@ -551,6 +558,7 @@ export default function App() {
             )?.id ??
             null,
         }, previous);
+        setAttachments([]);
         return true;
       } catch (e) {
         setActionError(String(e));
@@ -559,6 +567,7 @@ export default function App() {
     },
     [
       selected,
+      attachments,
       harness,
       mode,
       model,
@@ -1218,7 +1227,7 @@ export default function App() {
             </div>
           )}
           <Composer
-            draftKey={conversationKey}
+            attachments={attachments} onAttach={(paths) => setAttachments((prev) => [...prev, ...paths])} onRemoveAttachment={(p) => setAttachments((prev) => prev.filter((x) => x !== p))} draftKey={conversationKey}
             onStop={stopSelected}
             cwd={cwd}
             onCwdChange={setCwd}

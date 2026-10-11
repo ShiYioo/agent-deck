@@ -29,7 +29,8 @@
     "active": true,
     "targets": ["nsis"],
     "resources": {
-      "../agent/dist/deck-agent.mjs": "agent/deck-agent.mjs"
+      "../agent/dist/deck-agent.mjs": "agent/deck-agent.mjs",
+      "../agent/dist/photon/": "photon/"
     },
     "icon": [
       "icons/32x32.png",

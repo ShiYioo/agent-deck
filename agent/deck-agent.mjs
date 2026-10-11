@@ -53,6 +53,34 @@ let lastAssistantText = ""; // 最近一条助手文本（memorize 抽取用）
  * 通用级运行规范（会话首轮注入）——分区式（抄 ZCode context/sections 架构）：
  * 身份+安全 → 运行纪律 → 输出规范 → 环境注入（cwd/平台/日期，按会话实际值生成）。
  */
+/** 附件 → pi 内联图片（图片附件）；非图片以可读路径注入提示（deck 有 read/bash 可自行打开） */
+const IMAGE_MIME = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  webp: "image/webp", gif: "image/gif",
+};
+function buildAttachments(msg) {
+  const list = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const images = [];
+  const paths = [];
+  for (const a of list) {
+    if (typeof a !== "string" || !a) continue;
+    const ext = a.split(".").pop()?.toLowerCase() ?? "";
+    const mime = IMAGE_MIME[ext];
+    if (mime) {
+      try {
+        const data = fs.readFileSync(a).toString("base64");
+        images.push({ type: "image", data, mimeType: mime });
+        continue;
+      } catch {}
+    }
+    paths.push(a);
+  }
+  const note = paths.length
+    ? "\n\n（附件文件（可用 read/bash 查看）：" + paths.join("；") + "）"
+    : "";
+  return { images, note };
+}
+
 function buildUniversalPrompt(cwd, memories = []) {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, "0");
@@ -150,6 +178,7 @@ function buildModelsJson(profiles) {
           contextWindow: m.contextWindow ?? 128000,
           maxTokens: m.maxTokens ?? 8192,
           reasoning: false,
+          input: ["text", "image"],
         }))
       : [
           {
@@ -158,6 +187,7 @@ function buildModelsJson(profiles) {
             contextWindow: 128000,
             maxTokens: 8192,
             reasoning: false,
+            input: ["text", "image"],
           },
         ];
     providers[p.id] = {
@@ -716,7 +746,8 @@ async function handle(msg) {
             ? buildUniversalPrompt(msg.cwd, msg.memories) + "\n\n==== 任务 ====\n" + msg.prompt
             : msg.prompt;
           if (abortRequested) break;
-          await s.prompt(promptText);
+          const { images, note: attachNote } = buildAttachments(msg);
+          await s.prompt(promptText + attachNote, images.length ? { images } : undefined);
           if (s.sessionFile) {
             resumeFile = s.sessionFile;
             deckEvent("session_file", { path: s.sessionFile });

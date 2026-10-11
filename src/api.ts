@@ -72,6 +72,8 @@ export async function startTask(params: {
   conversationId?: string | null;
   /** 接力轮次：注入的简报不作为用户消息展示 */
   relay?: boolean;
+  /** 附件绝对路径（codex 只取图片；zcode/opencode/deck 全支持） */
+  attachments?: string[];
 }): Promise<string> {
   if (!inTauri) browserStub("派任务");
   const { task_id } = await invoke<{ task_id: string }>("start_task", params);

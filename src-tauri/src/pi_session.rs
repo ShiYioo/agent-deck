@@ -33,6 +33,9 @@ pub struct PiRunParams {
     /// 续接句柄：上次 pi 会话文件路径（deck 任务续接语义）
     #[serde(default)]
     pub resume_session_file: Option<String>,
+    /// 附件绝对路径：sidecar 读为内联图片（或作为可读路径注入提示）
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +142,7 @@ pub async fn run_pi_task(
         "cwd": params.cwd,
         "profiles": params.profiles,
         "resumeSessionFile": params.resume_session_file,
+        "attachments": params.attachments,
         "memories": params.memories,
         "mode": params.mode,
     });

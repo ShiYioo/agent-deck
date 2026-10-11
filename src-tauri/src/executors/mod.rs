@@ -57,6 +57,7 @@ impl Harness {
         model: Option<&str>,
         prompt: &str,
         resume: Option<&str>,
+        attachments: &[String],
     ) -> Vec<String> {
         match self {
             Self::Zcode => {
@@ -70,6 +71,10 @@ impl Harness {
                 if let Some(sid) = resume {
                     args.push("--resume".into());
                     args.push(sid.to_string());
+                }
+                for a in attachments {
+                    args.push("--attach".into());
+                    args.push(a.clone());
                 }
                 args.push("-p".into());
                 args.push(prompt.to_string());
@@ -95,6 +100,11 @@ impl Harness {
                     args.push("-m".into());
                     args.push(m.to_string());
                 }
+                // codex --image 仅支持图片
+                for a in attachments.iter().filter(|a| Self::is_image_path(a)) {
+                    args.push("-i".into());
+                    args.push(a.clone());
+                }
                 args.push(prompt.to_string());
                 args
             }
@@ -114,10 +124,20 @@ impl Harness {
                     args.push("-s".into());
                     args.push(sid.to_string());
                 }
+                for a in attachments {
+                    args.push("-f".into());
+                    args.push(a.clone());
+                }
                 args.push(prompt.to_string());
                 args
             }
         }
+    }
+
+    /// codex --image 只吃图片
+    fn is_image_path(path: &str) -> bool {
+        let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
     }
 
     /// 解析一行 stdout/stderr 输出为统一事件。
@@ -264,45 +284,45 @@ mod tests {
 
     #[test]
     fn zcode_args_initial_and_resume() {
-        let args = Harness::Zcode.build_args(Some("build"), None, "重构 utils", None);
+        let args = Harness::Zcode.build_args(Some("build"), None, "重构 utils", None, &[]);
         assert_eq!(args, vec!["--json", "--mode", "build", "-p", "重构 utils"]);
 
-        let args = Harness::Zcode.build_args(None, None, "继续", Some("sess_1"));
+        let args = Harness::Zcode.build_args(None, None, "继续", Some("sess_1"), &[]);
         assert!(args.windows(2).any(|w| w == ["--resume", "sess_1"]));
         assert!(args.contains(&"yolo".to_string()));
     }
 
     #[test]
     fn codex_args_initial_and_resume() {
-        let args = Harness::Codex.build_args(None, None, "修复 bug", None);
+        let args = Harness::Codex.build_args(None, None, "修复 bug", None, &[]);
         assert_eq!(
             args,
             vec!["exec", "--json", "--skip-git-repo-check", "修复 bug"]
         );
 
-        let args = Harness::Codex.build_args(None, Some("gpt-5.1"), "继续", Some("abc123"));
+        let args = Harness::Codex.build_args(None, Some("gpt-5.1"), "继续", Some("abc123"), &[]);
         assert!(args.windows(2).any(|w| w == ["resume", "abc123"]));
         assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.1"]));
     }
 
     #[test]
     fn codex_permission_modes() {
-        let args = Harness::Codex.build_args(Some("full"), None, "p", None);
+        let args = Harness::Codex.build_args(Some("full"), None, "p", None, &[]);
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
 
-        let args = Harness::Codex.build_args(Some("write"), None, "p", None);
+        let args = Harness::Codex.build_args(Some("write"), None, "p", None, &[]);
         assert!(args.contains(&"--full-auto".into()));
 
-        let args = Harness::Codex.build_args(Some("readonly"), None, "p", None);
+        let args = Harness::Codex.build_args(Some("readonly"), None, "p", None, &[]);
         assert!(args.windows(2).any(|w| w == ["--sandbox", "read-only"]));
     }
 
     #[test]
     fn opencode_plan_agent() {
-        let args = Harness::Opencode.build_args(Some("plan"), None, "p", None);
+        let args = Harness::Opencode.build_args(Some("plan"), None, "p", None, &[]);
         assert!(args.windows(2).any(|w| w == ["--agent", "plan"]));
 
-        let args = Harness::Opencode.build_args(Some("full"), None, "p", None);
+        let args = Harness::Opencode.build_args(Some("full"), None, "p", None, &[]);
         assert!(!args.contains(&"--agent".to_string()));
     }
 
@@ -313,6 +333,7 @@ mod tests {
             Some("anthropic/claude-sonnet-4-5"),
             "写个脚本",
             None,
+            &[],
         );
         assert_eq!(
             args,
@@ -326,7 +347,7 @@ mod tests {
             ]
         );
 
-        let args = Harness::Opencode.build_args(None, None, "继续", Some("ses_abc"));
+        let args = Harness::Opencode.build_args(None, None, "继续", Some("ses_abc"), &[]);
         assert!(args.windows(2).any(|w| w == ["-s", "ses_abc"]));
         assert!(!args.contains(&"-m".to_string()));
     }

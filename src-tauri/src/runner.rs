@@ -40,9 +40,16 @@ pub async fn spawn(
     cwd: &str,
     prompt: &str,
     resume_session_id: Option<&str>,
+    attachments: &[String],
 ) -> Result<command_group::AsyncGroupChild, String> {
     let (program, mut prefix) = resolve_program(harness.program()).await?;
-    let args = harness.build_args(mode.as_deref(), model.as_deref(), prompt, resume_session_id);
+    let args = harness.build_args(
+        mode.as_deref(),
+        model.as_deref(),
+        prompt,
+        resume_session_id,
+        attachments,
+    );
     prefix.extend(args);
 
     let mut command = tokio::process::Command::new(program);

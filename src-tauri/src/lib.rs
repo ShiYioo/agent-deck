@@ -167,6 +167,23 @@ fn mark_conversation(
     }
 }
 
+/// 附件名列表（用户消息尾部展示用）
+fn attachments_note(attachments: &[String]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = attachments
+        .iter()
+        .map(|a| {
+            std::path::Path::new(a)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| a.clone())
+        })
+        .collect();
+    format!("📎 附件：{}", names.join("、"))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn start_task(
@@ -184,6 +201,7 @@ async fn start_task(
     project_id: Option<String>,
     conversation_id: Option<String>,
     relay: Option<bool>,
+    attachments: Vec<String>,
 ) -> Result<TaskStartInfo, String> {
     start_task_impl(
         app,
@@ -200,6 +218,7 @@ async fn start_task(
         project_id,
         conversation_id,
         relay,
+        attachments,
     )
     .await
 }
@@ -220,6 +239,7 @@ pub(crate) async fn start_task_impl(
     project_id: Option<String>,
     conversation_id: Option<String>,
     relay: Option<bool>,
+    attachments: Vec<String>,
 ) -> Result<TaskStartInfo, String> {
     if prompt.trim().is_empty() {
         return Err("请输入任务描述".into());
@@ -271,11 +291,21 @@ pub(crate) async fn start_task_impl(
             model.as_deref(),
             deck_project.as_deref(),
         )?;
+        let attach_note = attachments_note(&attachments);
         let user_event = serde_json::json!({
-            "type": "user_message", "text": prompt,
+            "type": "user_message",
+            "text": if attach_note.is_empty() { prompt.clone() } else { format!("{prompt}
+
+{attach_note}") },
             "hidden": relay.unwrap_or(false),
         });
         store.append_event(&task_id, &user_event.to_string())?;
+        if !attachments.is_empty() {
+            let _ = store.set_task_attachments(
+                &task_id,
+                &serde_json::to_string(&attachments).unwrap_or_default(),
+            );
+        }
         if let Some(id) = &resume_session_id {
             store.set_session_id(&task_id, id)?;
         }
@@ -290,6 +320,7 @@ pub(crate) async fn start_task_impl(
             memories: task_memories,
             // 选中既有 deck 任务再发消息 = 续接（上次 pi 会话文件由 sidecar 打开）
             resume_session_file: resume_session_id.clone(),
+            attachments: attachments.clone(),
             // approved = 工具执行前经 UI 审批（P2 权限门）
             mode: if permission.as_deref() == Some("approved") {
                 "approved"
@@ -378,14 +409,24 @@ pub(crate) async fn start_task_impl(
             &w.dir.to_string_lossy(),
         )?;
     }
+    let attach_note = attachments_note(&attachments);
     store.append_event(
         &task_id,
         &serde_json::json!({
-            "type": "user_message", "text": prompt,
+            "type": "user_message",
+            "text": if attach_note.is_empty() { prompt.clone() } else { format!("{prompt}
+
+{attach_note}") },
             "hidden": relay.unwrap_or(false),
         })
         .to_string(),
     )?;
+    if !attachments.is_empty() {
+        let _ = store.set_task_attachments(
+            &task_id,
+            &serde_json::to_string(&attachments).unwrap_or_default(),
+        );
+    }
     if let Some(id) = &resume_session_id {
         store.set_session_id(&task_id, id)?;
     }
@@ -408,6 +449,7 @@ pub(crate) async fn start_task_impl(
         &task_cwd,
         &prompt,
         resume_session_id.as_deref(),
+        &attachments,
     )
     .await
     .inspect_err(|_| {
