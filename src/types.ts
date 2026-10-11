@@ -4,7 +4,7 @@ export type AgentEvent =
   | { type: "user_message"; text: string; hidden?: boolean }
   | { type: "assistant_message"; text: string; streamId?: string; streaming?: boolean }
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
-  | { type: "tool_use"; tool: string; detail: string }
+  | { type: "tool_use"; tool: string; detail: string; args?: Record<string, unknown> }
   | { type: "tool_result"; tool: string; ok: boolean; detail: string }
   | { type: "status"; text: string }
   | { type: "complete"; ok: boolean; durationMs?: number }
@@ -88,7 +88,12 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
       tool === "bash" && typeof args?.command === "string"
         ? String(args.command).slice(0, 800)
         : JSON.stringify(args ?? {}, null, 2).slice(0, 400);
-    return { type: "tool_use", tool, detail };
+    return {
+      type: "tool_use",
+      tool,
+      detail,
+      args: args && typeof args === "object" ? (args as Record<string, unknown>) : undefined,
+    };
   }
   if (t === "tool_execution_end") {
     const out = ev.result as { content?: Array<{ text?: string }>; isError?: boolean } | undefined;

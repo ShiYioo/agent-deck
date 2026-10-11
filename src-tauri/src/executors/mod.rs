@@ -156,6 +156,9 @@ pub enum AgentEvent {
     ToolUse {
         tool: String,
         detail: String,
+        /// 原始工具参数（read/grep 等折叠摘要统计文件数用）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
     },
     ToolResult {
         tool: String,

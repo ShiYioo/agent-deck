@@ -107,6 +107,7 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
             events.push(AgentEvent::ToolUse {
                 tool: "shell".into(),
                 detail: command,
+                args: None,
             });
             events.push(AgentEvent::ToolResult {
                 tool: "shell".into(),
@@ -123,6 +124,7 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
             events.push(AgentEvent::ToolUse {
                 tool: "files".into(),
                 detail,
+                args: None,
             });
         }
         "web_search" => {
@@ -131,6 +133,7 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                 detail: field_str(item, &["query", "url"])
                     .unwrap_or_default()
                     .to_string(),
+                args: None,
             });
         }
         other => {

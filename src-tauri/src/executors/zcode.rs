@@ -69,6 +69,7 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             events.push(AgentEvent::ToolUse {
                 tool: tool.to_string(),
                 detail: summarize_args(obj),
+                args: None,
             });
         }
         "tool_result" | "tool_call_result" | "task_output" => {
@@ -172,6 +173,7 @@ where
                         events.push(AgentEvent::ToolUse {
                             tool: tool.to_string(),
                             detail: summarize_args(block),
+                            args: None,
                         });
                     }
                     "tool_result" | "tool_call_result" => {

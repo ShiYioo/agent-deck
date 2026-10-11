@@ -134,7 +134,12 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                                         )
                                     })
                             };
-                            events.push(AgentEvent::ToolUse { tool, detail });
+                            let input = state.get("input").filter(|v| v.is_object()).cloned();
+                            events.push(AgentEvent::ToolUse {
+                                tool,
+                                detail,
+                                args: input,
+                            });
                         }
                         "completed" => {
                             let title =
@@ -146,6 +151,7 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                             events.push(AgentEvent::ToolUse {
                                 tool: tool.clone(),
                                 detail: title.to_string(),
+                                args: None,
                             });
                             events.push(AgentEvent::ToolResult {
                                 tool,
@@ -285,7 +291,7 @@ mod tests {
         );
         assert!(matches!(
             &running[..],
-            [AgentEvent::ToolUse { tool, detail }] if tool == "bash" && detail == "ls"
+            [AgentEvent::ToolUse { tool, detail, .. }] if tool == "bash" && detail == "ls"
         ));
 
         let done = events(

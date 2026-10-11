@@ -1245,7 +1245,7 @@ function decorateTiming(events: LogItem[]): LogItem[] {
 type LogEntry = LogItem;
 type DisplayGroup =
   | { kind: "single"; item: LogEntry }
-  | { kind: "segment"; items: LogEntry[]; uses: { tool: string; n: number }[]; failed: boolean };
+  | { kind: "segment"; items: LogEntry[]; uses: { tool: string; n: number; targets: number | null }[]; failed: boolean };
 
 const TOOL_RUN_MIN = 2;
 
@@ -1265,6 +1265,7 @@ function groupToolRuns(events: LogEntry[]): DisplayGroup[] {
       }
     }
     const uses = new Map<string, number>();
+    const files = new Map<string, Set<string>>();
     let failed = false;
     let calls = 0;
     for (const { event } of seg) {
@@ -1272,12 +1273,32 @@ function groupToolRuns(events: LogEntry[]): DisplayGroup[] {
         calls += 1;
         const tool = event.tool.toLowerCase();
         uses.set(tool, (uses.get(tool) ?? 0) + 1);
+        // read/grep/ls 类：统计涉及的文件/搜索目标（去重）
+        const a = (event as { args?: Record<string, unknown> }).args;
+        const target =
+          typeof a?.path === "string" ? a.path
+          : typeof a?.file_path === "string" ? a.file_path
+          : typeof a?.pattern === "string" ? `搜索 ${a.path ? a.path + "/" : ""}${a.pattern}`
+          : null;
+        if (target) {
+          const set = files.get(tool) ?? new Set<string>();
+          set.add(target);
+          files.set(tool, set);
+        }
       } else if (event.type === "tool_result" && !event.ok) {
         failed = true;
       }
     }
     if (calls >= TOOL_RUN_MIN) {
-      out.push({ kind: "segment", items: seg, uses: [...uses.entries()].map(([tool, n]) => ({ tool, n })), failed });
+      out.push({
+        kind: "segment",
+        items: seg,
+        uses: [...uses.entries()].map(([tool, n]) => {
+          const targets = files.get(tool);
+          return { tool, n, targets: targets ? targets.size : null };
+        }),
+        failed,
+      });
     } else {
       for (const item of seg) out.push({ kind: "single", item });
     }
@@ -1368,7 +1389,15 @@ const LogPanel = memo(function LogPanel({
           return <EventLine key={key} event={event} />;
         }
         const [first] = group.items;
-        const summary = group.uses.map(({ tool, n }) => `${tool}×${n}`).join(" · ");
+        const summary = group.uses
+          .map(({ tool, n, targets }) => {
+            const isSearch = tool === "grep" || tool === "find";
+            if (targets !== null) {
+              return isSearch ? `${tool} ×${n}（搜索 ${targets} 处）` : `${tool} ×${n}（${targets} 个文件）`;
+            }
+            return `${tool} ×${n}`;
+          })
+          .join(" · ");
         return (
           <Disclosure
             key={first.key}
@@ -1377,7 +1406,7 @@ const LogPanel = memo(function LogPanel({
               <>
                 <ToolIcon tool="tool" />
                 <span>
-                  工具操作 ×{group.uses.reduce((n, { n: k }) => n + k, 0)}（{summary}）
+                  工具操作 ×{group.uses.reduce((n, { n: k }) => n + k, 0)}：{summary}
                 </span>
                 {group.failed && <span className="text-red-600">含失败</span>}
               </>
