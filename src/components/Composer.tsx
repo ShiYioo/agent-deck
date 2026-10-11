@@ -317,6 +317,11 @@ export const Composer = memo(function Composer({
       { value: "default", label: "完全访问" },
       { value: "plan", label: "只读规划（plan）" },
     ],
+    deck: [
+      { value: "default", label: "标准执行" },
+      { value: "plan", label: "计划模式（只读出方案）" },
+      { value: "goal", label: "目标模式（目标跨轮持续）" },
+    ],
   };
 
   /** 各 harness 的模型目录（"" = 走 CLI 账号默认模型） */
@@ -636,9 +641,9 @@ export const Composer = memo(function Composer({
           /></div>
         )}
 
-        {/* 权限模式：zcode/codex/opencode 各自目录 */}
+        {/* 权限模式：zcode/codex/opencode/deck 各自目录 */}
         {MODE_CATALOG[harness] && (
-          <div className={`composer-permission-control ${["yolo", "full", "default"].includes(mode) ? "is-elevated" : ""}`}><Dropdown
+          <div className={`composer-permission-control ${["yolo", "full", "default"].includes(mode) || (harness === "deck" && mode === "default") ? "is-elevated" : ""}`}><Dropdown
             value={mode}
             onChange={onModeChange}
             options={MODE_CATALOG[harness]}

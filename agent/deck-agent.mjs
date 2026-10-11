@@ -41,6 +41,7 @@ let currentModel = null; // 当前底层 provider（glm/gpt）
 let pendingApproval = null; // { resolve, info: {id, tool, args} }
 let currentCwd = null;
 let firstRun = true;
+let currentGoal = null; // 目标模式：会话目标（进程内跨轮注入）
 let abortRequested = false;
 let activeRun = null;
 let sessionKey = null;
@@ -736,10 +737,13 @@ async function handle(msg) {
         try {
           const s = await ensureSessionForProfile(p, {
             cwd: msg.cwd,
-            mode: msg.mode === "approved" ? "approved" : "auto",
+            mode:
+              msg.mode === "approved" ? "approved" : msg.mode === "plan" ? "plan" : "auto",
             resumeFile,
           });
           if (i === 0 && msg.resumeSessionFile) firstRun = false; // 续接：纪律已在历史里
+          // 目标模式：首轮 prompt 即会话目标，跨轮持续注入（续接同会话由历史自证）
+          if (msg.mode === "goal" && i === 0) currentGoal = msg.prompt;
           deckEvent("run_start", { model: p.provider });
           // 通用级运行规范：仅会话首轮注入（纪律只说一次）
           const promptText = firstRun
@@ -747,7 +751,15 @@ async function handle(msg) {
             : msg.prompt;
           if (abortRequested) break;
           const { images, note: attachNote } = buildAttachments(msg);
-          await s.prompt(promptText + attachNote, images.length ? { images } : undefined);
+          const goalNote =
+            msg.mode === "goal" && currentGoal
+              ? "\n\n==== 会话目标（持续有效，勿偏离） ====\n" + currentGoal
+              : "";
+          const planNote =
+            msg.mode === "plan"
+              ? "\n\n==== 计划模式 ====\n当前为只读规划：只允许读取与搜索，不要修改任何文件。产出一份可执行计划（步骤/风险/验证方式），等用户确认后再进入执行模式。"
+              : "";
+          await s.prompt(promptText + planNote + goalNote + attachNote, images.length ? { images } : undefined);
           if (s.sessionFile) {
             resumeFile = s.sessionFile;
             deckEvent("session_file", { path: s.sessionFile });

@@ -542,7 +542,9 @@ export default function App() {
           mode: canResume
             ? resumeSource!.mode
             : useHarness === "deck"
-              ? null
+              ? mode === "default"
+                ? null
+                : mode
               : useHarness === "zcode"
                 ? mode
                 : mode === "default"

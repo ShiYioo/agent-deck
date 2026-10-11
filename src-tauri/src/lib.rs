@@ -321,11 +321,12 @@ pub(crate) async fn start_task_impl(
             // 选中既有 deck 任务再发消息 = 续接（上次 pi 会话文件由 sidecar 打开）
             resume_session_file: resume_session_id.clone(),
             attachments: attachments.clone(),
-            // approved = 工具执行前经 UI 审批（P2 权限门）
-            mode: if permission.as_deref() == Some("approved") {
-                "approved"
-            } else {
-                "auto"
+            // plan/goal 模式直通 sidecar（只读工具集 / 会话目标）；
+            // approved = 工具执行前经 UI 审批（P2 权限门）；其余 auto
+            mode: match mode.as_deref() {
+                Some(m @ ("plan" | "goal")) => m,
+                _ if permission.as_deref() == Some("approved") => "approved",
+                _ => "auto",
             }
             .into(),
         };
