@@ -1240,41 +1240,60 @@ function decorateTiming(events: LogItem[]): LogItem[] {
   return out.map(({ event, key }) => ({ event: event as AgentEvent, key }));
 }
 
-/** 折叠的读类工具连调（read/grep/find/ls）：一行摘要，展开看逐次 */
-const READ_TOOLS = new Set(["read", "grep", "find", "ls", "view"]);
+/** 工具段折叠：tool_use/tool_result/thinking 的工作序列归为一段（≥2 次调用收成一行摘要，可展开逐条看）。
+ * 紧邻文本输出的最后一段思考保留在外——思考耗时徽标保持可见。 */
 type LogEntry = LogItem;
 type DisplayGroup =
   | { kind: "single"; item: LogEntry }
-  | { kind: "run"; tool: string; items: LogEntry[] };
+  | { kind: "segment"; items: LogEntry[]; uses: { tool: string; n: number }[]; failed: boolean };
+
+const TOOL_RUN_MIN = 2;
+
+function isWorkEvent(e: AgentEvent): boolean {
+  return e.type === "tool_use" || e.type === "tool_result" || e.type === "thinking";
+}
 
 function groupToolRuns(events: LogEntry[]): DisplayGroup[] {
   const out: DisplayGroup[] = [];
-  let run: LogEntry[] = [];
-  let runTool = "";
-  const flush = () => {
-    if (run.length >= 4) out.push({ kind: "run", tool: runTool, items: run });
-    else for (const item of run) out.push({ kind: "single", item });
-    run = [];
-    runTool = "";
+  let seg: LogEntry[] = [];
+  const flush = (keepTrailingThinking: boolean) => {
+    if (seg.length === 0) return;
+    let tail: LogEntry[] = [];
+    if (keepTrailingThinking) {
+      while (seg.length > 0 && seg[seg.length - 1].event.type === "thinking") {
+        tail.unshift(seg.pop() as LogEntry);
+      }
+    }
+    const uses = new Map<string, number>();
+    let failed = false;
+    let calls = 0;
+    for (const { event } of seg) {
+      if (event.type === "tool_use") {
+        calls += 1;
+        const tool = event.tool.toLowerCase();
+        uses.set(tool, (uses.get(tool) ?? 0) + 1);
+      } else if (event.type === "tool_result" && !event.ok) {
+        failed = true;
+      }
+    }
+    if (calls >= TOOL_RUN_MIN) {
+      out.push({ kind: "segment", items: seg, uses: [...uses.entries()].map(([tool, n]) => ({ tool, n })), failed });
+    } else {
+      for (const item of seg) out.push({ kind: "single", item });
+    }
+    for (const item of tail) out.push({ kind: "single", item });
+    seg = [];
   };
   for (const item of events) {
     const { event } = item;
-    const tool = event.type === "tool_use" || event.type === "tool_result" ? event.tool.toLowerCase() : "";
-    if (tool && READ_TOOLS.has(tool)) {
-      if (!runTool || tool === runTool) {
-        runTool = tool;
-        run.push(item);
-      } else {
-        flush();
-        runTool = tool;
-        run.push(item);
-      }
+    if (isWorkEvent(event)) {
+      seg.push(item);
     } else {
-      flush();
+      flush(event.type === "assistant_message");
       out.push({ kind: "single", item });
     }
   }
-  flush();
+  flush(false);
   return out;
 }
 
@@ -1349,21 +1368,18 @@ const LogPanel = memo(function LogPanel({
           return <EventLine key={key} event={event} />;
         }
         const [first] = group.items;
-        const failed = group.items.some(
-          ({ event }) => event.type === "tool_result" && !event.ok,
-        );
+        const summary = group.uses.map(({ tool, n }) => `${tool}×${n}`).join(" · ");
         return (
           <Disclosure
             key={first.key}
             className="activity-event"
             title={
               <>
-                <ToolIcon tool={group.tool} />
+                <ToolIcon tool="tool" />
                 <span>
-                  {group.tool} ×{group.items.filter(({ event }) => event.type === "tool_use").length || group.items.length}
-                  （已折叠）
+                  工具操作 ×{group.uses.reduce((n, { n: k }) => n + k, 0)}（{summary}）
                 </span>
-                {failed && <span className="text-red-600">含失败</span>}
+                {group.failed && <span className="text-red-600">含失败</span>}
               </>
             }
           >
