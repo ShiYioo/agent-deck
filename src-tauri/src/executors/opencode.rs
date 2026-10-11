@@ -78,7 +78,9 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 _ => {}
             }
         }
-        "message.part.updated" => {
+        // run 平铺事件（opencode run --format json 实测）：
+        // {type: text|reasoning|tool_use, part: {...}}——part 结构与 SSE 版一致
+        "message.part.updated" | "text" | "reasoning" | "tool_use" => {
             let part = body.get("part").unwrap_or(&Value::Null);
             let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
             match part_type {
@@ -231,6 +233,40 @@ mod tests {
         assert!(evs.contains(&AgentEvent::AssistantMessage {
             text: "你好".into()
         }));
+    }
+
+    /// `opencode run --format json` 的实测平铺事件（run 模式与 SDK SSE 形态不同名）
+    #[test]
+    fn flat_run_events_parse_like_sse_parts() {
+        let text = events(
+            r#"{"type":"text","timestamp":1791700517934,"sessionID":"ses_x","part":{"id":"prt_1","messageID":"m1","sessionID":"ses_x","type":"text","text":"好的","time":{"start":1,"end":2}}}"#,
+        );
+        assert!(text.contains(&AgentEvent::SessionId { id: "ses_x".into() }));
+        assert!(text.contains(&AgentEvent::AssistantMessage {
+            text: "好的".into()
+        }));
+
+        let tool = events(
+            r#"{"type":"tool_use","sessionID":"ses_x","part":{"type":"tool","tool":"bash","callID":"c1","state":{"status":"completed","input":{"command":"ls"},"output":"file1","title":"ls"}}}"#,
+        );
+        assert!(
+            tool.iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { ok: true, .. }))
+        );
+
+        let reasoning =
+            events(r#"{"type":"reasoning","part":{"type":"reasoning","text":"想一想"}}"#);
+        assert!(reasoning.contains(&AgentEvent::Thinking {
+            text: "想一想".into()
+        }));
+
+        // 上游错误 + 退出码 0：必须产出 Error 而非静默 done
+        let error = events(
+            r#"{"type":"error","sessionID":"ses_x","error":{"name":"UnknownError","data":{"message":"boom ref: err_1"}}}"#,
+        );
+        assert!(error.iter().any(
+            |e| matches!(e, AgentEvent::Error { message, .. } if message == "boom ref: err_1")
+        ));
     }
 
     #[test]
