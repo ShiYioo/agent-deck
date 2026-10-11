@@ -66,6 +66,8 @@ pub struct TaskRow {
     pub conversation_id: Option<String>,
     /// 附件绝对路径（JSON 数组；仅落档展示与重试，调用时逐家 CLI 转旗标）
     pub attachments: Option<String>,
+    /// 轮次基线 manifest（任务开始时目录快照 JSON；产出面板按它判定本轮改动）
+    pub baseline: Option<String>,
     /// running | done | failed | cancelled
     pub status: String,
     pub exit_code: Option<i64>,
@@ -174,6 +176,7 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_commit TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_dir TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN conversation_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN baseline TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN attachments TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN model TEXT", []);
@@ -244,6 +247,17 @@ impl Store {
     }
 
     /// 落档附件路径列表（JSON 数组）。
+    /// 轮次基线：任务开始时的目录快照（manifest），产出面板按它判定本轮改动。
+    pub fn set_task_baseline(&self, task_id: &str, baseline: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "UPDATE tasks SET baseline = ?2 WHERE id = ?1",
+            params![task_id, baseline],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn set_task_attachments(&self, task_id: &str, attachments: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute(
@@ -336,7 +350,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
                         created_at, finished_at
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
@@ -356,10 +370,11 @@ impl Store {
                     session_id: row.get(9)?,
                     conversation_id: row.get(10)?,
                     attachments: row.get(11)?,
-                    status: row.get(12)?,
-                    exit_code: row.get(13)?,
-                    created_at: row.get(14)?,
-                    finished_at: row.get(15)?,
+                    baseline: row.get(12)?,
+                    status: row.get(13)?,
+                    exit_code: row.get(14)?,
+                    created_at: row.get(15)?,
+                    finished_at: row.get(16)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -372,7 +387,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, status, exit_code,
+                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
                         created_at, finished_at
                  FROM tasks WHERE id = ?1",
             )
@@ -391,10 +406,11 @@ impl Store {
                 session_id: row.get(9)?,
                 conversation_id: row.get(10)?,
                 attachments: row.get(11)?,
-                status: row.get(12)?,
-                exit_code: row.get(13)?,
-                created_at: row.get(14)?,
-                finished_at: row.get(15)?,
+                baseline: row.get(12)?,
+                status: row.get(13)?,
+                exit_code: row.get(14)?,
+                created_at: row.get(15)?,
+                finished_at: row.get(16)?,
             })
         })
         .optional()

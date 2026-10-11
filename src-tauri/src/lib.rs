@@ -306,6 +306,11 @@ pub(crate) async fn start_task_impl(
                 &serde_json::to_string(&attachments).unwrap_or_default(),
             );
         }
+        // 轮次基线：任务开始时的目录快照（产出面板按它判定本轮改动）
+        store.set_task_baseline(
+            &task_id,
+            &snapshot_dir_manifest(Path::new(&cwd)).to_string(),
+        )?;
         if let Some(id) = &resume_session_id {
             store.set_session_id(&task_id, id)?;
         }
@@ -430,6 +435,13 @@ pub(crate) async fn start_task_impl(
     }
     if let Some(id) = &resume_session_id {
         store.set_session_id(&task_id, id)?;
+    }
+    if worktree.is_none() {
+        // 无 worktree 隔离：落目录基线，产出面板只显示本轮改动
+        store.set_task_baseline(
+            &task_id,
+            &snapshot_dir_manifest(Path::new(&task_cwd)).to_string(),
+        )?;
     }
     mark_conversation(&store, &task_id, conversation_id.as_deref())?;
 
@@ -825,8 +837,6 @@ pub struct TurnArtifacts {
     pub base_dir: String,
 }
 
-const TURN_DIFF_CAP: usize = 60_000;
-
 fn artifact_kind(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next()?.to_ascii_lowercase();
     let ext = ext.as_str();
@@ -861,25 +871,198 @@ fn turn_git_ok(dir: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 /// status --porcelain 行 → (xy, path)；处理 R 重命名的 "new -> old" 与引号
-fn parse_porcelain(line: &str) -> Option<(String, String)> {
-    if line.len() < 4 {
-        return None;
-    }
-    let xy = line[..2].to_string();
-    let mut path = line[3..].trim().to_string();
-    if path.starts_with('"') && path.ends_with('"') {
-        path = path[1..path.len() - 1].to_string();
-    }
-    if path.contains(" -> ") {
-        let (a, _) = path.split_once(" -> ").unwrap();
-        path = a.trim().to_string();
-    }
-    Some((xy, path))
-}
 
 #[tauri::command]
+/// 目录快照（浅层 manifest）：rel -> [mtime_ms, size]，跳过依赖/隐藏/worktrees
+fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value {
+    let skip = |name: &str| {
+        matches!(
+            name,
+            "node_modules"
+                | "target"
+                | "dist"
+                | "build"
+                | "__pycache__"
+                | ".venv"
+                | "vendor"
+                | "worktrees"
+        ) || name.starts_with('.')
+    };
+    let mut entries = serde_json::Map::new();
+    let mut stack = vec![dir.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            visited += 1;
+            if visited > 5000 {
+                return serde_json::json!({ "entries": entries, "truncated": true });
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let p = entry.path();
+            if p.is_dir() {
+                if !skip(&name) {
+                    stack.push(p);
+                }
+                continue;
+            }
+            if skip(&name) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let rel = p
+                .strip_prefix(dir)
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or(name.clone());
+            entries.insert(rel, serde_json::json!([mtime, meta.len()]));
+        }
+    }
+    serde_json::json!({ "entries": entries })
+}
+
+/// 按基线分类本轮改动：基线没有 = added；mtime/size 变了 = modified；基线有现在没了 = deleted。
+/// git 仓库内 modified 文件的 diff 对 HEAD（可能含早前轮次对该文件的编辑，文件级归属仍准确）。
+fn classify_turn_changes(
+    dir: &std::path::Path,
+    manifest: &serde_json::Value,
+) -> Vec<TurnFileChange> {
+    let empty = serde_json::Map::new();
+    let manifest_entries = manifest
+        .get("entries")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+    let mut current: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    let skip = |name: &str| {
+        matches!(
+            name,
+            "node_modules"
+                | "target"
+                | "dist"
+                | "build"
+                | "__pycache__"
+                | ".venv"
+                | "vendor"
+                | "worktrees"
+        ) || name.starts_with('.')
+    };
+    let mut stack = vec![dir.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            visited += 1;
+            if visited > 5000 {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let p = entry.path();
+            if p.is_dir() {
+                if !skip(&name) {
+                    stack.push(p);
+                }
+                continue;
+            }
+            if skip(&name) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let rel = p
+                .strip_prefix(dir)
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or(name.clone());
+            current.insert(rel, (mtime, meta.len()));
+        }
+    }
+
+    let git_inside = {
+        use std::process::Stdio;
+        std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false)
+    };
+
+    let mut files = Vec::new();
+    for (rel, (mtime, size)) in &current {
+        let changed = match manifest_entries.get(rel) {
+            Some(entry) => {
+                let bm = entry.get(0).and_then(|v| v.as_u64()).unwrap_or(0);
+                let bs = entry.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                bm != *mtime || bs != *size
+            }
+            None => true,
+        };
+        if !changed {
+            continue;
+        }
+        let bytes = std::fs::read(dir.join(rel)).unwrap_or_default();
+        let binary = bytes.contains(&0);
+        let (added, removed) = if binary {
+            (None, None)
+        } else {
+            (
+                Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1),
+                Some(0),
+            )
+        };
+        let diff = if git_inside {
+            turn_git_ok(dir, &["diff", "HEAD", "--unified=3", "--", rel])
+                .map(|s| s.chars().take(60_000).collect::<String>())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        files.push(TurnFileChange {
+            path: rel.clone(),
+            status: if manifest_entries.contains_key(rel) {
+                "modified".into()
+            } else {
+                "added".into()
+            },
+            added,
+            removed,
+            binary,
+            diff,
+        });
+    }
+    for rel in manifest_entries.keys() {
+        if !current.contains_key(rel) {
+            files.push(TurnFileChange {
+                path: rel.clone(),
+                status: "deleted".into(),
+                added: None,
+                removed: None,
+                binary: false,
+                diff: String::new(),
+            });
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+/// 前端 → Rust：轮次产出面板（基线驱动；旧任务无基线时回退 git/mtime 行为）。
+#[tauri::command]
 fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnArtifacts, String> {
-    use std::collections::BTreeMap;
     let row = store
         .get_task(&task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
@@ -888,13 +1071,55 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
     if !dir_path.is_dir() {
         return Err(format!("任务目录不存在：{dir}"));
     }
-    // 非 git 目录：扫描任务开始后新建/修改的文件（浅层，跳过依赖与隐藏目录）
-    if turn_git_ok(dir_path, &["rev-parse", "--is-inside-work-tree"])
-        .map(|s| s.trim() != "true")
-        .unwrap_or(true)
+
+    let manifest: Option<serde_json::Value> = row
+        .baseline
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    if let Some(manifest) =
+        manifest.filter(|m| m.get("entries").map(|v| v.is_object()).unwrap_or(false))
     {
-        let started = row.created_at - 5_000; // 容忍时钟偏差
-        let mut artifacts: Vec<TurnArtifact> = Vec::new();
+        let files = classify_turn_changes(dir_path, &manifest);
+        let mut artifacts = Vec::new();
+        for f in &files {
+            if let Some(kind) = artifact_kind(&f.path) {
+                let size = std::fs::metadata(dir_path.join(&f.path))
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                artifacts.push(TurnArtifact {
+                    path: f.path.clone(),
+                    kind: kind.to_string(),
+                    size,
+                });
+            }
+        }
+        return Ok(TurnArtifacts {
+            files,
+            artifacts,
+            base_dir: dir,
+        });
+    }
+
+    // ── 旧任务兜底（无 baseline）：git → 对 HEAD；非 git → mtime 扫描 ──
+    let status_out = {
+        #[cfg(windows)]
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        match std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir_path)
+            .stdin(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .output()
+        {
+            Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).to_string()),
+            _ => None,
+        }
+    };
+    if status_out.is_none() {
+        // 非 git：mtime 扫描（任务开始后新建/修改的工件）
+        let started = row.created_at - 5_000;
+        let mut artifacts = Vec::new();
         let skip = |name: &str| {
             matches!(
                 name,
@@ -908,7 +1133,6 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
                     | "worktrees"
             ) || name.starts_with('.')
         };
-        let mut files: Vec<TurnFileChange> = Vec::new();
         let mut stack = vec![dir_path.to_path_buf()];
         let mut visited = 0usize;
         while let Some(d) = stack.pop() {
@@ -918,11 +1142,7 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
             for entry in rd.flatten() {
                 visited += 1;
                 if visited > 5000 {
-                    return Ok(TurnArtifacts {
-                        files: Vec::new(),
-                        artifacts,
-                        base_dir: dir,
-                    });
+                    break;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
                 let p = entry.path();
@@ -949,27 +1169,6 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
                     .strip_prefix(dir_path)
                     .map(|x| x.to_string_lossy().to_string())
                     .unwrap_or(name.clone());
-                // 指定产出的普通文件也要展示：非 git 无基线，任务期内新建 = 本轮产出
-                if files.len() < 50 {
-                    let bytes = std::fs::read(&p).unwrap_or_default();
-                    let binary = bytes.contains(&0);
-                    let (added, removed) = if binary {
-                        (None, None)
-                    } else {
-                        (
-                            Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1),
-                            Some(0),
-                        )
-                    };
-                    files.push(TurnFileChange {
-                        path: rel.clone(),
-                        status: "added".into(),
-                        added,
-                        removed,
-                        binary,
-                        diff: String::new(),
-                    });
-                }
                 if let Some(kind) = artifact_kind(&rel) {
                     artifacts.push(TurnArtifact {
                         path: rel,
@@ -980,25 +1179,51 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
             }
         }
         artifacts.sort_by(|a, b| a.path.cmp(&b.path));
-        files.sort_by(|a, b| a.path.cmp(&b.path));
         return Ok(TurnArtifacts {
-            files,
+            files: Vec::new(),
             artifacts,
             base_dir: dir,
         });
     }
-
-    // 1) status --porcelain：改动全集（含未跟踪）
-    let status_out = turn_git_ok(dir_path, &["status", "--porcelain"]).unwrap_or_default();
     let entries: Vec<(String, String)> = status_out
+        .unwrap()
         .lines()
-        .filter_map(parse_porcelain)
-        .filter(|(_, path)| !path.is_empty() && !path.starts_with(".git/"))
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let xy = line[..2].to_string();
+            let mut path = line[3..].trim().to_string();
+            if path.starts_with('"') && path.ends_with('"') {
+                path = path[1..path.len() - 1].to_string();
+            }
+            if path.contains(" -> ") {
+                let (a, _) = path.split_once(" -> ").unwrap();
+                path = a.trim().to_string();
+            }
+            if path.is_empty() || path.starts_with(".git/") {
+                return None;
+            }
+            Some((xy, path))
+        })
         .collect();
-
-    // 2) numstat（跟踪文件 vs HEAD）：path → (added, removed, binary)
-    let numstat_out = turn_git_ok(dir_path, &["diff", "--numstat", "HEAD"]).unwrap_or_default();
-    let mut numstat: BTreeMap<String, (Option<u64>, Option<u64>)> = BTreeMap::new();
+    let numstat_out = {
+        #[cfg(windows)]
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        match std::process::Command::new("git")
+            .args(["diff", "--numstat", "HEAD"])
+            .current_dir(dir_path)
+            .stdin(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => String::new(),
+        }
+    };
+    let mut numstat: std::collections::BTreeMap<String, (Option<u64>, Option<u64>)> =
+        Default::default();
     for line in numstat_out.lines() {
         let mut parts = line.split('\t');
         let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
@@ -1016,23 +1241,20 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         };
         numstat.insert(p.to_string(), (added, removed));
     }
-
-    // 3) 逐文件：状态、行数、diff 文本（cap）
     let mut files = Vec::new();
     let mut artifacts = Vec::new();
     for (xy, path) in &entries {
         let untracked = xy.starts_with("??");
         let deleted = xy.contains('D');
-        let full = dir_path.join(path);
         let (added, removed, binary) = if untracked {
-            match std::fs::read(full) {
+            match std::fs::read(dir_path.join(path)) {
                 Ok(bytes) => {
                     let bin = bytes.contains(&0);
                     (
                         if bin {
                             None
                         } else {
-                            Some(bytes.iter().filter(|&&b| b == b'\n').count() as u64 + 1)
+                            Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1)
                         },
                         Some(0),
                         bin,
@@ -1044,20 +1266,17 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
             let (a, r) = numstat.get(path).copied().unwrap_or((None, None));
             (a, r, a.is_none() && r.is_none())
         };
-
         let diff = if deleted {
             String::new()
+        } else if untracked {
+            turn_git_ok(dir_path, &["diff", "--no-index", "--", "/dev/null", path])
+                .map(|o| o.chars().take(60_000).collect())
+                .unwrap_or_default()
         } else {
-            let text = if untracked {
-                turn_git(dir_path, &["diff", "--no-index", "--", "/dev/null", path])
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            } else {
-                turn_git_ok(dir_path, &["diff", "HEAD", "--unified=3", "--", path])
-            }
-            .unwrap_or_default();
-            text.chars().take(TURN_DIFF_CAP).collect()
+            turn_git_ok(dir_path, &["diff", "HEAD", "--unified=3", "--", path])
+                .map(|s| s.chars().take(60_000).collect())
+                .unwrap_or_default()
         };
-
         let status = if untracked {
             "added"
         } else if deleted {
@@ -1065,7 +1284,6 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         } else {
             "modified"
         };
-
         if let Some(kind) = artifact_kind(path) {
             let size = std::fs::metadata(dir_path.join(path))
                 .map(|m| m.len())
@@ -1076,7 +1294,6 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
                 size,
             });
         }
-
         files.push(TurnFileChange {
             path: path.clone(),
             status: status.to_string(),
@@ -1088,7 +1305,6 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     artifacts.sort_by(|a, b| a.path.cmp(&b.path));
-
     Ok(TurnArtifacts {
         files,
         artifacts,
@@ -1096,7 +1312,7 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
     })
 }
 
-/// 撤销单文件改动：未跟踪 = 删除新文件；跟踪 = 还原到 HEAD。破坏性操作由前端二次确认。
+/// 前端 → Rust：撤销单文件改动（未跟踪 = 删除新文件；跟踪 = 还原到 HEAD）。
 #[tauri::command]
 fn undo_task_file(store: State<'_, Store>, task_id: String, path: String) -> Result<(), String> {
     let row = store
