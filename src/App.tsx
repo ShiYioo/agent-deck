@@ -235,6 +235,7 @@ export default function App() {
   }, [projects]);
   const chooseHarness = useCallback((next: string) => {
     setHarness(next);
+    void setSetting("composer_harness", next).catch(() => {});
     const config = preferencesRef.current[`${executionScope ?? "default"}:${next}`];
     setModel(config?.model ?? "");
     setEffort(config?.effort ?? "");
@@ -412,6 +413,22 @@ export default function App() {
         if (deletedTasks.current.has(taskId)) return;
         if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
         enqueueUpdate({ taskId, item: { event, key: nextKey() } });
+
+  // composer 会话偏好持久化：harness/mode/permission 重启后保持用户上次的选择
+  const COMPOSER_PREF_KEYS = ["harness", "mode", "permission"] as const;
+  useEffect(() => {
+    (async () => {
+      const saved: Record<string, string | null> = {};
+      for (const k of COMPOSER_PREF_KEYS) saved[k] = await getSetting(`composer_${k}`).catch(() => null);
+      if (saved.harness) {
+        setHarness(saved.harness);
+        if (saved.mode) setMode(saved.mode);
+        if (saved.permission) setPermission(saved.permission);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
       }),
       listen<{ taskId: string; code: number | null; status?: TaskRow["status"] }>("task-exit", (e) => {
         const { taskId, code } = e.payload;
@@ -1423,7 +1440,10 @@ export default function App() {
             harness={harness}
             onHarnessChange={chooseHarness}
             mode={mode}
-            onModeChange={setMode}
+            onModeChange={(v) => {
+              setMode(v);
+              void setSetting("composer_mode", v).catch(() => {});
+            }}
             model={model}
             onModelChange={(value) => rememberExecution(harness, { model: value, effort: "" })}
             effort={effort}
@@ -1431,7 +1451,10 @@ export default function App() {
             executionScope={executionScope}
             permission={permission}
             catalogVersion={settingsOpen}
-            onPermissionChange={setPermission}
+            onPermissionChange={(v) => {
+              setPermission(v);
+              void setSetting("composer_permission", v).catch(() => {});
+            }}
             onSend={handleSend}
             running={selectedRunning}
             recentModels={recentModels}
