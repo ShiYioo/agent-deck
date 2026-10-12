@@ -120,13 +120,14 @@ pub async fn run_pi_task(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    use command_group::AsyncCommandGroup;
     let mut child = command
-        .spawn()
+        .group().kill_on_drop(true).spawn()
         .map_err(|e| format!("启动 deck-agent 失败：{e}"))?;
 
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
-    let stderr = child.stderr.take().ok_or("no stderr")?;
+    let mut stdin = child.inner().stdin.take().ok_or("no stdin")?;
+    let stdout = child.inner().stdout.take().ok_or("no stdout")?;
+    let stderr = child.inner().stderr.take().ok_or("no stderr")?;
 
     // 指令通道：注册到 registry，供 cancel/approve/reject 命令使用
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();

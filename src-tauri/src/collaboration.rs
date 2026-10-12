@@ -37,17 +37,67 @@ pub struct Collaboration {
     pub current_task_id: Option<String>,
     pub task_ids: Vec<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default = "default_timeout")]
+    pub phase_timeout_secs: u64,
+    #[serde(default)]
+    pub execution: PhaseExecution,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PhaseExecution {
+    #[serde(default)]
+    pub planning: crate::execution::ExecutionConfig,
+    #[serde(default)]
+    pub executing: crate::execution::ExecutionConfig,
+    #[serde(default)]
+    pub reviewing: crate::execution::ExecutionConfig,
+}
+
+fn default_timeout() -> u64 {
+    900
+}
+fn restricted_mode(mode: Option<&str>) -> bool {
+    mode.is_some_and(|mode| !matches!(mode, "" | "auto" | "default" | "full" | "yolo"))
 }
 
 #[derive(Clone, Default)]
 pub struct CollaborationRegistry(Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>);
 
 fn publish(app: &AppHandle, store: &Store, run: &Collaboration) -> Result<(), String> {
+    if store.get_task(&run.source_task_id)?.is_none() {
+        return Err("源会话已删除".into());
+    }
     store.save_collaboration(
         &run.id,
         &serde_json::to_string(run).map_err(|e| e.to_string())?,
     )?;
     let _ = app.emit("collaboration-update", run);
+    Ok(())
+}
+
+pub(crate) fn stop_for_tasks(app: &AppHandle, store: &Store, ids: &[String]) -> Result<(), String> {
+    crate::orchestration::stop_for_tasks(app, store, ids)?;
+    let registry = app.state::<CollaborationRegistry>();
+    for raw in store.list_collaborations()? {
+        let run: Collaboration = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        if ids.contains(&run.source_task_id) || run.task_ids.iter().any(|id| ids.contains(id)) {
+            if let Some(cancelled) = registry
+                .0
+                .lock()
+                .map_err(|_| "collaboration registry poisoned")?
+                .get(&run.id)
+            {
+                cancelled.store(true, Ordering::SeqCst);
+            }
+            if let Some(id) = run.current_task_id {
+                cancel_child(app, &id);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -128,11 +178,18 @@ pub async fn start_collaboration(
     mentor: String,
     worker: String,
     max_rounds: u32,
+    read_only: Option<bool>,
+    phase_timeout_secs: Option<u64>,
+    execution: Option<PhaseExecution>,
 ) -> Result<Collaboration, String> {
     let mentor = mentor.to_ascii_lowercase();
     let worker = worker.to_ascii_lowercase();
     validate_pair(&mentor, &worker, max_rounds)?;
     let source = store.get_task(&source_task_id)?.ok_or("源任务不存在")?;
+    let phase_timeout_secs = phase_timeout_secs.unwrap_or_else(default_timeout);
+    if !(60..=3600).contains(&phase_timeout_secs) {
+        return Err("阶段时限必须在 60 到 3600 秒之间".into());
+    }
     if source.status == "running" {
         return Err("请先等待源任务结束或停止源任务".into());
     }
@@ -147,6 +204,24 @@ pub async fn start_collaboration(
         } else if which::which(Harness::parse(harness)?.program()).is_err() {
             return Err(format!("未找到 {harness}，请先安装并登录"));
         }
+    }
+    let conversation_id = store.ensure_conversation(&source_task_id)?;
+    let execution = execution.unwrap_or_default();
+    crate::execution::initialize(&app);
+    for (harness, config) in [
+        (&mentor, &execution.planning),
+        (&worker, &execution.executing),
+        (&mentor, &execution.reviewing),
+    ] {
+        let copy = store.clone_handle();
+        let cid = conversation_id.clone();
+        let harness = harness.clone();
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::execution::resolve(&copy, Some(&cid), &harness, &config)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     }
     let mut active = registry
         .0
@@ -175,7 +250,12 @@ pub async fn start_collaboration(
         current_task_id: None,
         task_ids: Vec::new(),
         error: None,
+        conversation_id: Some(conversation_id),
+        read_only: read_only.unwrap_or(false) || restricted_mode(source.mode.as_deref()),
+        phase_timeout_secs,
+        execution,
     };
+    let workspace = store.claim_workspace(&source.cwd, &run.id)?;
     publish(&app, &store, &run)?;
     let cancelled = Arc::new(AtomicBool::new(false));
     active.insert(run.id.clone(), cancelled.clone());
@@ -184,6 +264,7 @@ pub async fn start_collaboration(
     let store = store.clone_handle();
     let registry = registry.inner().clone();
     tauri::async_runtime::spawn(async move {
+        let _workspace = workspace;
         let mut run = run;
         let result = run_flow(&app, &store, &mut run, &cancelled).await;
         if cancelled.load(Ordering::SeqCst) {
@@ -192,6 +273,7 @@ pub async fn start_collaboration(
             run.status = "failed".into();
             run.error = Some(error);
         }
+        run.current_task_id = None;
         let _ = publish(&app, &store, &run);
         if let Ok(mut active) = registry.0.lock() {
             active.remove(&run.id);
@@ -215,6 +297,12 @@ async fn stage(
     let source = store
         .get_task(&run.source_task_id)?
         .ok_or("源任务已被删除")?;
+    let initial = match run.phase.as_str() {
+        "planning" => &run.execution.planning,
+        "executing" => &run.execution.executing,
+        _ => &run.execution.reviewing,
+    };
+    let config = initial.clone();
     let task = crate::start_task_impl(
         app.clone(),
         app.state::<TaskRegistry>(),
@@ -224,13 +312,18 @@ async fn stage(
         source.cwd,
         prompt,
         Some(mode.into()),
-        None,
+        config.model,
         Some("auto".into()),
         None,
-        Some(run.source_task_id.clone()),
-        None,
-        None,
+        source.project_id,
+        Some(source.conversation_id.unwrap_or_else(|| source.id.clone())),
+        Some(true),
         Vec::new(),
+        Some(run.id.clone()),
+        None,
+        config.effort,
+        Some(run.phase.clone()),
+        None,
     )
     .await?;
     run.current_task_id = Some(task.task_id.clone());
@@ -239,12 +332,34 @@ async fn stage(
         cancel_child(app, &task.task_id);
         return Err(error);
     }
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(run.phase_timeout_secs);
+    let mut stopped_at = None;
+    let mut timed_out = false;
     loop {
-        if cancelled.load(Ordering::SeqCst) {
+        if tokio::time::Instant::now() >= deadline {
+            timed_out = true;
+        }
+        if cancelled.load(Ordering::SeqCst) || timed_out {
             cancel_child(app, &task.task_id);
+            let stopped = stopped_at.get_or_insert_with(tokio::time::Instant::now);
+            if stopped.elapsed() >= std::time::Duration::from_secs(10) {
+                return Err(
+                    "阶段未在取消时限内结束；工作目录仍由运行任务阻止派发，请检查执行者".into(),
+                );
+            }
         }
         let row = store.get_task(&task.task_id)?.ok_or("阶段任务已被删除")?;
         if row.status != "running" {
+            if timed_out {
+                return Err(format!(
+                    "{} 阶段超过 {} 秒时限",
+                    run.phase, run.phase_timeout_secs
+                ));
+            }
+            if cancelled.load(Ordering::SeqCst) {
+                return Err("协作已停止".into());
+            }
             if row.status != "done" {
                 return Err(format!(
                     "{} 阶段 {}：{}",
@@ -269,11 +384,20 @@ async fn run_flow(
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let source = store.get_task(&run.source_task_id)?.ok_or("源任务不存在")?;
-    let events = crate::conversation_events(store, &source.id)?
-        .into_iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>();
-    let context = handoff::convo_tail(&handoff::render_conversation(&events), 24_000);
+    let mut turns = store.session_tasks(&source.id)?;
+    turns.sort_by(crate::conversation::turn_order);
+    let mut latest_request = source.prompt.clone();
+    for turn in turns {
+        for event in store.get_events(&turn.id, 0, i64::MAX)? {
+            let event: serde_json::Value =
+                serde_json::from_str(&event).map_err(|e| e.to_string())?;
+            if event["type"] == "user_message" && event["hidden"] != true {
+                if let Some(text) = event["text"].as_str() {
+                    latest_request = text.into();
+                }
+            }
+        }
+    }
     let mentor = run.mentor.clone();
     let worker = run.worker.clone();
     let mentor_mode = if mentor == "codex" {
@@ -281,10 +405,19 @@ async fn run_flow(
     } else {
         "plan"
     };
-    let worker_mode = if worker == "codex" { "write" } else { "build" };
+    let worker_mode = if run.read_only {
+        if worker == "codex" {
+            "readonly"
+        } else {
+            "plan"
+        }
+    } else if worker == "codex" {
+        "write"
+    } else {
+        "build"
+    };
     let goal = format!(
-        "原始任务：{}\n会话记录（可能截断，须核对实际文件）：\n{context}",
-        source.prompt
+        "用户最新要求：{latest_request}\n历史由 AgentDeck 另行同步；最新要求与共享任务约束优先，不重放旧工具调用。"
     );
     let plan = stage(
         app,
@@ -311,9 +444,14 @@ async fn run_flow(
             &worker,
             worker_mode,
             format!(
-                "你是执行方，由 {mentor} 指导。只在当前目录工作，保留已有改动，不再委派。\n\
+                "你是执行方，由 {mentor} 指导。只在当前目录工作，保留已有改动，不再委派。{}\n\
              按指导实施并验证；遇到冲突说明原因，报告修改文件、测试结果和未完成项。\n\
-             {goal}\n指导/返工要求：\n{instructions}"
+             {goal}\n指导/返工要求：\n{instructions}",
+                if run.read_only {
+                    "本流程只读；只提交分析和实施建议，不修改文件。"
+                } else {
+                    ""
+                }
             ),
         )
         .await?;
@@ -367,5 +505,21 @@ mod tests {
         assert!(!review_approved(
             "{\"agent_deck_verdict\":\"changes_requested\"}"
         ));
+    }
+
+    #[test]
+    fn old_workflows_keep_safe_timeout_defaults_and_restrictions_are_not_elevated() {
+        let run: Collaboration = serde_json::from_value(serde_json::json!({
+            "id":"flow","source_task_id":"a","mentor":"codex","worker":"zcode",
+            "status":"done","phase":"reviewing","round":1,"max_rounds":2,
+            "current_task_id":null,"task_ids":[],"error":null
+        }))
+        .unwrap();
+        assert_eq!(run.phase_timeout_secs, 900);
+        assert!(restricted_mode(Some("approved")));
+        assert!(restricted_mode(Some("readonly")));
+        assert!(restricted_mode(Some("write")));
+        assert!(!restricted_mode(Some("yolo")));
+        assert!(!restricted_mode(Some("full")));
     }
 }

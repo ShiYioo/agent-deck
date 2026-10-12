@@ -13,6 +13,16 @@ export function sessionKey(task: TaskRow): string {
     : [task.harness, "task", task.id]);
 }
 
+export function transferMode(source: string, mode: string | null, target: string, permission?: string | null): string {
+  if (source === target) return mode ?? "default";
+  const full = ["full", "yolo", "default", ""].includes(mode ?? "");
+  // Approval and sandbox modes are not interchangeable across native CLIs.
+  const restricted = !full || (source === "deck" && permission === "approved");
+  if (target === "codex") return restricted ? "readonly" : "full";
+  if (target === "zcode") return restricted ? "plan" : "yolo";
+  return restricted ? "plan" : "default";
+}
+
 export function groupSessions(tasks: TaskRow[]): SessionGroup[] {
   const groups = new Map<string, SessionGroup>();
   for (const task of tasks) {
@@ -22,7 +32,9 @@ export function groupSessions(tasks: TaskRow[]): SessionGroup[] {
     else groups.set(key, { key, turns: [task] });
   }
   for (const group of groups.values()) {
-    group.turns.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+    group.turns.sort((a, b) => a.conversation_seq != null && b.conversation_seq != null
+      ? a.conversation_seq - b.conversation_seq || a.id.localeCompare(b.id)
+      : a.created_at - b.created_at || a.id.localeCompare(b.id));
   }
   return [...groups.values()].sort((a, b) =>
     b.turns[b.turns.length - 1].created_at - a.turns[a.turns.length - 1].created_at

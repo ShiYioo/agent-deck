@@ -9,7 +9,6 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import {
-  buildSmartHandoffPrompt,
   cancelCollaboration,
   cancelTask,
   deleteSession,
@@ -27,16 +26,22 @@ import {
   inTauri,
   listTasks,
   listCollaborations,
+  listGraphRuns,
   runLogin,
   setSetting,
   startTask,
   startCollaboration,
+  getExecutionDefaults,
+  setExecutionDefaults,
+  inheritedExecution,
 } from "./api";
-import type { Collaboration } from "./api";
+import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
+import { ExecutionPicker, effortLabel } from "./components/ExecutionPicker";
+import { DelegationExecution } from "./components/DelegationExecution";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
 import { applyTaskUpdates, type LogItem, type TaskUpdate } from "./taskState";
-import { groupSessions, sessionKey } from "./sessions";
+import { groupSessions, sessionKey, transferMode } from "./sessions";
 import { Sidebar, projectName, directoryKey } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
 import { Composer } from "./components/Composer";
@@ -48,7 +53,7 @@ import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
 import { useFrameQueue } from "./hooks/useFrameQueue";
 import { useAutoScroll } from "./hooks/useAutoScroll";
 import { Disclosure } from "./components/Disclosure";
-import { ToolIcon } from "./components/EventLine";
+import { ToolIcon } from "./components/ToolIcon";
 import { TurnArtifactsPanel } from "./components/TurnArtifacts";
 import {
   IconBack,
@@ -58,6 +63,7 @@ import {
 } from "./components/icons";
 
 const emptyEvents: LogItem[] = [];
+const ConversationContext = lazy(() => import("./components/ConversationContext"));
 const EventLine = lazy(() => import("./components/EventLine").then((module) => ({ default: module.EventLine })));
 const DiffModal = lazy(() => import("./components/DiffModal").then((module) => ({ default: module.DiffModal })));
 const SettingsPage = lazy(() => import("./components/SettingsPage").then((module) => ({ default: module.SettingsPage })));
@@ -69,6 +75,7 @@ export default function App() {
   const [harness, setHarness] = useState("zcode");
   const [mode, setMode] = useState("yolo");
   const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
   const [permission, setPermission] = useState("auto");
   const [cwd, setCwd] = useState("");
 
@@ -78,6 +85,7 @@ export default function App() {
   const pendingUpdates = useRef(new Map<string, TaskUpdate[]>());
   const deletedTasks = useRef(new Set<string>());
   const deletingTasks = useRef(new Set<string>());
+  const reconfiguringTasks = useRef(new Set<string>());
   const listenersReady = useRef<Promise<unknown>>(Promise.resolve());
   const setLive = useCallback((update: (prev: Record<string, LiveTask>) => Record<string, LiveTask>) => {
     const next = update(liveRef.current);
@@ -112,11 +120,44 @@ export default function App() {
   const [loadingEvents, setLoadingEvents] = useState<Set<string>>(new Set());
   const eventRequests = useRef(new Set<string>());
   const [selected, setSelected] = useState<string | null>(null);
+  const executionScope = history.find((row) => row.id === selected)?.conversation_id ?? selected;
+  const [executionPreferences, setExecutionPreferences] = useState<Record<string, ExecutionConfig>>({});
+  const preferencesRef = useRef(executionPreferences);
+  preferencesRef.current = executionPreferences;
+  const preferenceKey = (h: string) => `${executionScope ?? "default"}:${h}`;
+  const executionFor = (h: string): ExecutionConfig => executionPreferences[preferenceKey(h)] ?? inheritedExecution();
+  const rememberExecution = (h: string, config: ExecutionConfig) => {
+    const key = preferenceKey(h);
+    preferencesRef.current = { ...preferencesRef.current, [key]: config };
+    setExecutionPreferences(preferencesRef.current);
+    if (h === harness) { setModel(config.model ?? ""); setEffort(config.effort ?? ""); }
+    void setExecutionDefaults(executionScope, h, config).catch((error) => setActionError(String(error)));
+  };
+  const executionSelectionRef = useRef({ scope: executionScope, harness });
+  executionSelectionRef.current = { scope: executionScope, harness };
+  useEffect(() => {
+    let alive = true;
+    for (const h of ["codex", "opencode", "zcode", "deck"]) {
+      const key = `${executionScope ?? "default"}:${h}`;
+      if (preferencesRef.current[key]) continue;
+      void getExecutionDefaults(executionScope, h).then((config) => {
+        if (!alive || preferencesRef.current[key]) return;
+        preferencesRef.current = { ...preferencesRef.current, [key]: config };
+        setExecutionPreferences(preferencesRef.current);
+        if (executionSelectionRef.current.scope === executionScope && executionSelectionRef.current.harness === h) {
+          if (config.model !== null) setModel(config.model);
+          if (config.effort !== null) setEffort(config.effort);
+        }
+      }).catch((error) => { if (alive) setActionError(String(error)); });
+    }
+    return () => { alive = false; };
+  }, [executionScope]);
 
   // diff 弹层
   const [diff, setDiff] = useState<{ taskId: string; text: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [actionInfo, setActionInfo] = useState<string | null>(null);
+  // 换档提示：接力/切模型时的一次性说明（发送即清）
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   // composer 附件（绝对路径）；发送后清空
   const [attachments, setAttachments] = useState<string[]>([]);
 
@@ -135,11 +176,16 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [busyHandoff, setBusyHandoff] = useState(false);
+  const [busyReconfigure, setBusyReconfigure] = useState(false);
   const [collaborations, setCollaborations] = useState<Collaboration[]>([]);
   const [mentor, setMentor] = useState("codex");
   const [worker, setWorker] = useState("zcode");
   const [maxRounds, setMaxRounds] = useState(2);
+  const [phaseTimeoutMinutes, setPhaseTimeoutMinutes] = useState(15);
   const [busyCollaboration, setBusyCollaboration] = useState(false);
+  const [phaseExecution, setPhaseExecution] = useState<PhaseExecution>({
+    planning: inheritedExecution(), executing: inheritedExecution(), reviewing: inheritedExecution(),
+  });
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const [sidebarView, setSidebarView] = useState<"projects" | "recent">("projects");
   const [searchRequest, setSearchRequest] = useState(0);
@@ -188,9 +234,11 @@ export default function App() {
   }, [projects]);
   const chooseHarness = useCallback((next: string) => {
     setHarness(next);
-    setModel("");
-    setMode(next === "zcode" ? "yolo" : next === "codex" ? "full" : "default");
-  }, []);
+    const config = preferencesRef.current[`${executionScope ?? "default"}:${next}`];
+    setModel(config?.model ?? "");
+    setEffort(config?.effort ?? "");
+    setMode(transferMode(harness, mode, next, permission));
+  }, [harness, mode, permission, executionScope]);
   const stopSelected = useCallback(() => {
     if (selected) cancelTask(selected).catch((e) => setActionError(String(e)));
   }, [selected]);
@@ -271,6 +319,7 @@ export default function App() {
     params: Parameters<typeof startTask>[0],
     previous?: LiveTask,
     queued?: string[],
+    queuedConfigs?: ExecutionConfig[],
   ) => {
     await listenersReady.current;
     const taskId = await startTask(params);
@@ -280,16 +329,20 @@ export default function App() {
       return [];
     });
     if (rows.length) setHistory(rows.filter((row) => !deletedTasks.current.has(row.id)));
-    const taskCwd = rows.find((row) => row.id === taskId)?.cwd ?? params.cwd;
+    const startedRow = rows.find((row) => row.id === taskId);
+    const taskCwd = startedRow?.cwd ?? params.cwd;
     setLive((prev) => ({
       ...prev,
       [taskId]: {
         harness: params.harness, cwd: taskCwd, prompt: params.prompt,
         mode: params.mode, model: params.model, permission: params.permission,
-        projectId: params.projectId, sessionId: params.resumeSessionId ?? undefined,
+        effort: startedRow?.execution_config?.resolved.effort ?? params.effort,
+        executionConfig: startedRow?.execution_config,
+        projectId: params.projectId, sessionId: startedRow?.session_id ?? params.resumeSessionId ?? undefined,
+        conversationId: startedRow?.conversation_id ?? params.conversationId ?? null,
         events: [
           ...(previous?.events ?? []),
-          // 接力轮次注入的简报不透出，与入库事件一致（徽标行见 EventLine）
+          // 自动接力请求不伪装成用户消息；用户本轮输入始终保留。
           // ts = 派发时刻：complete 的工作耗时以此为起点
           {
             event: {
@@ -305,12 +358,13 @@ export default function App() {
             key: nextKey(),
           },
         ],
-        running: true, status: "running", exitCode: null, queued,
+        running: true, status: "running", exitCode: null, queued, queuedConfigs,
       },
     }));
     setSelected(taskId);
     setHarness(params.harness);
     setModel(params.model ?? "");
+    setEffort(params.effort ?? "");
     setMode(params.mode ?? "default");
     setPermission(params.permission ?? "auto");
     setCwd(taskCwd);
@@ -326,13 +380,15 @@ export default function App() {
         cwd: task.cwd,
         prompt: text,
         mode: task.mode,
-        model: task.model ?? null,
+        model: task.queuedConfigs?.[0] ? task.queuedConfigs[0].model : task.model ?? null,
+        effort: task.queuedConfigs?.[0] ? task.queuedConfigs[0].effort : task.effort ?? null,
         permission: task.permission ?? "auto",
         projectId: task.projectId,
+        conversationId: task.conversationId,
         resumeSessionId: task.sessionId ?? null,
-      }, task, task.queued?.slice(1))
+      }, task, task.queued?.slice(1), task.queuedConfigs?.slice(1))
         .then(() => setLive((prev) => prev[sourceId] ? ({
-          ...prev, [sourceId]: { ...prev[sourceId], queued: [] },
+          ...prev, [sourceId]: { ...prev[sourceId], queued: [], queuedConfigs: [] },
         }) : prev))
         .catch((e) => setActionError(String(e)));
     },
@@ -374,7 +430,7 @@ export default function App() {
             `${task.harness}：${task.prompt.slice(0, 40)}`,
           );
           // 队列续发：成功且有会话 → 取队首消息作为续接派发（抄 VK 队列消息）
-          if (code === 0 && task.queued && task.queued.length > 0 && task.sessionId) {
+          if (code === 0 && !reconfiguringTasks.current.has(taskId) && task.queued && task.queued.length > 0 && task.sessionId) {
             const [next] = task.queued;
             flushQueued(task, next, taskId);
           }
@@ -438,6 +494,7 @@ export default function App() {
         ]);
         refreshHistory();
       }),
+      listen<string>("context-cleanup-error", (event) => setActionError(event.payload)),
     ];
     listenersReady.current = Promise.all(unlisteners);
     listenersReady.current.catch((e) => setActionError(`监听运行事件失败：${String(e)}`));
@@ -449,7 +506,7 @@ export default function App() {
   const selectedConversation = useMemo(() => selected
     ? groupSessions(sidebarTasks).find((session) => session.turns.some((turn) => turn.id === selected))
     : undefined, [sidebarTasks, selected]);
-  // 发送：@ 智能体唤醒（可并行）；选中已完成任务且有会话 ID → 续接；否则开新任务
+  // @ routes within the selected conversation; native bindings remain harness-specific.
   const handleSend = useCallback(
     async (rawText: string) => {
       setActionError(null);
@@ -474,85 +531,86 @@ export default function App() {
 
       const row = selected ? history.find((t) => t.id === selected) : undefined;
       const runningTask = selected ? liveRef.current[selected] : undefined;
+      const useHarness = atTarget ?? harness;
+      const targetConfig = preferencesRef.current[`${executionScope ?? "default"}:${useHarness}`] ?? inheritedExecution();
+      const routeModel = atTarget ? atModel ?? targetConfig.model : model.trim() || targetConfig.model;
+      const routeEffort = atModel && atModel !== targetConfig.model ? "" : atTarget ? targetConfig.effort : effort || targetConfig.effort;
 
-      // 运行中排队：仅当未 @ 其他智能体（@ 别家 = 并行唤醒新任务）
+      // 同执行者运行中排队；其他执行者必须等待当前会话结束。
       if (
         selected &&
         runningTask?.running &&
-        (!atTarget || atTarget === runningTask.harness)
+        useHarness === runningTask.harness
       ) {
         setLive((prev) => ({
           ...prev,
           [selected]: {
             ...prev[selected],
             queued: [...(prev[selected].queued ?? []), text],
+            queuedConfigs: [...(prev[selected].queuedConfigs ?? []), { model: routeModel ?? "", effort: routeEffort ?? "" }],
           },
         }));
         return true;
       }
+      if (runningTask?.running ?? row?.status === "running") {
+        setActionError("当前会话已有执行者运行中，请等待结束或停止后再接力");
+        return false;
+      }
 
-      // @ 路由的任务是全新派发（不续接旧会话）
-      const routeFresh = atTarget !== null;
-      const useHarness = routeFresh ? (atTarget as string) : harness;
-      const routeModel = routeFresh ? atModel : model.trim() || null;
       const resumeSource: LiveTask | undefined = runningTask ?? (row ? {
         harness: row.harness, cwd: row.cwd, prompt: row.prompt,
         mode: row.mode, model: row.model,
         permission: row.harness === "deck" ? row.mode : permission,
         projectId: row.project_id,
-        sessionId: row.session_id ?? undefined, running: row.status === "running",
+        sessionId: row.session_id ?? undefined, running: false,
         exitCode: row.exit_code,
         events: (historyEvents[selected!] ?? []).map((event) => ({ event, key: nextKey() })),
       } : undefined);
-      const canResume = !routeFresh && !!resumeSource?.sessionId && !resumeSource.running
-        && resumeSource.harness === useHarness
+      const continuing = !!resumeSource
         && directoryKey(resumeSource.cwd) === directoryKey(cwd || ".");
-      // 跨 harness 续聊：会话句柄互不相认，自动走接力（压缩上一会话 → 简报注入新家）
-      const crossHarness = !routeFresh && !!resumeSource?.sessionId && !resumeSource.running
-        && resumeSource.harness !== useHarness
-        && directoryKey(resumeSource.cwd) === directoryKey(cwd || ".");
+      const binding = continuing ? [...(selectedConversation?.turns ?? [])].reverse().find((turn) =>
+        turn.harness === useHarness && turn.session_id && turn.status !== "running") : undefined;
+      const resumeId = binding?.session_id
+        ?? (continuing && resumeSource?.harness === useHarness ? resumeSource.sessionId : null);
       // 记住这次的工作目录，下次启动作为默认
-      const useCwd = canResume ? resumeSource!.cwd : cwd || ".";
-      if (!routeFresh && cwd.trim()) {
+      const useCwd = continuing ? resumeSource!.cwd : cwd || ".";
+      if (cwd.trim()) {
         setSetting("default_cwd", cwd.trim()).catch(() => {});
       }
-      try {
-        const previous = canResume ? resumeSource : undefined;
-        if (previous && !runningTask && selected) {
-          previous.events = (await getTaskEvents(selected)).map((event) => ({ event, key: nextKey() }));
+      // 换档提示（对齐会话最后一轮的 harness/model）：
+      // 换家 → 接力到 X；换家且指定模型 → 接力到 X · 模型；同家换模型 → 切换模型 · 模型；都不变 → 不提示
+      const lastTurn = selectedConversation?.turns.at(-1);
+      if (continuing && lastTurn) {
+        const harnessChanged = lastTurn.harness !== useHarness;
+        const modelChanged = (routeModel ?? null) !== (lastTurn.model ?? null);
+        const harnessLabel = useHarness === "deck" ? "AgentDeck Agent" : useHarness;
+        if (harnessChanged) {
+          setActionNotice(
+            routeModel
+              ? `接力到 ${harnessLabel} · ${routeModel.split("/").pop()}（上一会话已注入上下文）`
+              : `接力到 ${harnessLabel}（上一会话已注入上下文）`,
+          );
+        } else if (modelChanged && routeModel) {
+          setActionNotice(`切换模型 · ${routeModel.split("/").pop()}`);
         }
-        // 跨 harness：先压缩上一会话成接力简报，失败则中止发送（错误可见）
-        let promptToSend = text;
-        if (crossHarness) {
-          setActionInfo(`正在压缩上一会话，接力到 ${useHarness}…`);
-          try {
-            promptToSend = await buildSmartHandoffPrompt(selected!);
-          } finally {
-            setActionInfo(null);
-          }
+      }
+      try {
+        const previous = continuing && resumeSource ? { ...resumeSource } : undefined;
+        const latest = selectedConversation?.turns.at(-1)?.id ?? selected;
+        if (previous && latest && (!runningTask || latest !== selected)) {
+          previous.events = (await getTaskEvents(latest)).map((event) => ({ event, key: nextKey() }));
         }
         await dispatchTask({
-          harness: canResume ? resumeSource!.harness : useHarness,
+          harness: useHarness,
           cwd: useCwd,
-          prompt: promptToSend,
-          // 接力/续接轮次归入当前会话（跨 harness 同组）；简报不作为用户消息透出
-          conversationId: canResume || crossHarness ? selectedConversation?.turns[0].id ?? null : null,
-          relay: crossHarness,
+          prompt: text,
+          conversationId: continuing ? row?.conversation_id ?? selectedConversation?.turns[0].id ?? selected : null,
           attachments,
-          mode: canResume
-            ? resumeSource!.mode
-            : useHarness === "deck"
-              ? mode === "default"
-                ? null
-                : mode
-              : useHarness === "zcode"
-                ? mode
-                : mode === "default"
-                  ? null
-                  : mode,
+          mode: transferMode(harness, mode, useHarness, permission),
           model: routeModel,
+          effort: routeEffort,
           permission,
-          resumeSessionId: canResume ? resumeSource!.sessionId! : null,
+          resumeSessionId: resumeId ?? null,
           projectId:
             selectedProjectId ??
             projects.find(
@@ -561,6 +619,7 @@ export default function App() {
             null,
         }, previous);
         setAttachments([]);
+        setTimeout(() => setActionNotice(null), 3500);
         return true;
       } catch (e) {
         setActionError(String(e));
@@ -573,6 +632,8 @@ export default function App() {
       harness,
       mode,
       model,
+      effort,
+      executionScope,
       cwd,
       history,
       permission,
@@ -628,7 +689,9 @@ export default function App() {
         setSelectedProjectId(row.project_id ?? projects.find((p) => directoryKey(p.dir) === directoryKey(row.cwd))?.id ?? null);
         setHarness(row.harness);
         setMode(row.mode ?? "default");
-        setModel(row.model ?? "");
+        const config = preferencesRef.current[`${row.conversation_id ?? row.id}:${row.harness}`];
+        setModel(config?.model ?? row.model ?? "");
+        setEffort(config?.effort ?? row.execution_config?.resolved.effort ?? "");
         if (row.harness === "deck") setPermission(row.mode === "approved" ? "approved" : "auto");
       }
       setActionError(null);
@@ -809,24 +872,74 @@ export default function App() {
 
 
   const canShowDiff = !!selectedRow;
+  const reconfigureRunning = async () => {
+    if (!selectedRow || !selectedLive?.running || busyReconfigure) return;
+    const source = selectedRow;
+    const previous = { ...selectedLive };
+    const config = { model, effort };
+    setBusyReconfigure(true);
+    reconfiguringTasks.current.add(source.id);
+    setActionError(null);
+    try {
+      const [guided, graphs] = await Promise.all([listCollaborations(), listGraphRuns(source.id)]);
+      if (guided.some((run) => run.status === "running" && run.task_ids.includes(source.id))) {
+        throw new Error("当前轮次由指导协作管理，请调整后续阶段配置或先停止协作");
+      }
+      if (graphs.some((run) => run.status === "running" && run.nodes.some((node) => node.task_id === source.id))) {
+        throw new Error("当前轮次由并行协作管理，请调整待启动节点配置或先停止协作");
+      }
+      await cancelTask(source.id);
+      const deadline = Date.now() + 10000;
+      let stopped = false;
+      while (Date.now() < deadline) {
+        if (deletedTasks.current.has(source.id) || deletingTasks.current.has(source.id)) throw new Error("会话正在删除，已停止切换");
+        const rows = await listTasks(Number.MAX_SAFE_INTEGER);
+        const row = rows.find((r) => r.id === source.id);
+        if (!row) throw new Error("会话已删除，已停止切换");
+        if (row.status !== "running") { stopped = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (!stopped) throw new Error("旧执行者尚未结束，未启动新轮次");
+      previous.events = (await getTaskEvents(source.id)).map((event) => ({ event, key: nextKey() }));
+      await dispatchTask({
+        harness: source.harness, cwd: source.cwd, prompt: "用户已停止上一轮并调整执行配置。先核对文件与已有执行证据，再继续尚未完成的任务，不重复已完成的操作。",
+        mode: source.mode, model: config.model, effort: config.effort, permission: previous.permission ?? "auto",
+        conversationId: source.conversation_id ?? source.id, resumeSessionId: null, projectId: source.project_id,
+        relay: true,
+      }, previous, previous.queued, previous.queuedConfigs);
+    } catch (error) { setActionError(String(error)); }
+    finally { reconfiguringTasks.current.delete(source.id); setBusyReconfigure(false); }
+  };
 
-  // 会话接力：会话记录压缩为交接简报 → 派给目标 harness（同一工作目录）
+  // Context is compiled by the backend; no separate summarization request.
   const handoff = async (target: string) => {
     if (!selectedRow || busyHandoff) return;
     setBusyHandoff(true);
     setActionError(null);
     try {
-      const briefing = await buildSmartHandoffPrompt(selectedRow.id);
+      const latest = selectedConversation?.turns.at(-1)?.id ?? selectedRow.id;
+      const events = await getTaskEvents(latest);
+      const previous: LiveTask = selectedLive ? { ...selectedLive } : {
+        harness: selectedRow.harness, cwd: selectedRow.cwd, prompt: selectedRow.prompt,
+        mode: selectedRow.mode, permission, projectId: selectedRow.project_id,
+        events: events.map((event) => ({ event, key: nextKey() })), running: false, exitCode: selectedRow.exit_code,
+      };
+      if (!selectedLive || latest !== selectedRow.id) {
+        previous.events = events.map((event) => ({ event, key: nextKey() }));
+      }
       await dispatchTask({
         harness: target,
         cwd: selectedRow.cwd,
-        prompt: briefing,
-        mode: target === "zcode" ? "yolo" : target === "codex" ? "full" : null,
-        model: null,
-        permission: "auto",
+        prompt: "继续当前会话的未完成任务，先核对当前文件和最新用户要求。",
+        conversationId: selectedRow.conversation_id ?? selectedConversation?.turns[0].id ?? selectedRow.id,
+        relay: true,
+        mode: transferMode(harness, mode, target, permission),
+        model: executionFor(target).model,
+        effort: executionFor(target).effort,
+        permission,
         resumeSessionId: null,
         projectId: selectedRow.project_id,
-      });
+      }, previous);
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -844,6 +957,10 @@ export default function App() {
         mentor,
         worker,
         maxRounds,
+        readOnly: !["full", "yolo", "default", "auto", ""].includes(mode)
+          || (harness === "deck" && permission === "approved"),
+        phaseTimeoutSecs: phaseTimeoutMinutes * 60,
+        execution: phaseExecution,
       });
     } catch (error) {
       setActionError(String(error));
@@ -1000,6 +1117,9 @@ export default function App() {
             </div>
 
             <div className="task-actions">
+              {selectedRow && (detailsOpen || selectedStatus === "failed") && <Suspense fallback={<div role="status">加载上下文…</div>}>
+                <ConversationContext taskId={selectedRow.id} onRecovered={refreshHistory} />
+              </Suspense>}
                  {!selectedRunning && selectedStatus === "failed" && selectedRow && (
                   <button
                     onClick={() => {
@@ -1013,6 +1133,7 @@ export default function App() {
                         model: r.model,
                         permission: selectedLive?.permission ?? (r.harness === "deck" ? r.mode : permission),
                         resumeSessionId: r.session_id,
+                        conversationId: r.conversation_id ?? selectedConversation?.turns[0].id ?? r.id,
                         projectId: r.project_id,
                       })
                         .catch((e) => setActionError(String(e)));
@@ -1091,8 +1212,9 @@ export default function App() {
                   {(["deck", "zcode", "codex", "opencode"] as const)
                     .filter((h) => h !== selectedRow.harness)
                     .map((h) => (
-                      <button
-                        key={h}
+                       <div key={h} className="handoff-target">
+                       <button
+                        aria-label={`用 ${h === "deck" ? "AgentDeck Agent" : h} 接力`}
                         onClick={() => handoff(h)}
                         disabled={busyHandoff}
                         className="flex items-center gap-1.5 rounded-full border px-3 py-1 transition-colors hover:bg-stone-100 disabled:opacity-50"
@@ -1101,11 +1223,14 @@ export default function App() {
                         <HarnessIcon harness={h} size={12} />
                         用 {h === "deck" ? "AgentDeck Agent" : h} 接力
                       </button>
+                       <ExecutionPicker harness={h} value={executionFor(h)} taskId={executionScope}
+                         onChange={(config) => rememberExecution(h, config)} label={`${h} 接力 `} disabled={busyHandoff} />
+                       </div>
                     ))}
                 </div>
                 {busyHandoff && (
                   <div className="typing-dots mt-2 flex items-center text-xs text-stone-400">
-                    正在由 AgentDeck 运行时压缩会话记录…
+                    正在同步会话记录…
                     <span />
                     <span />
                     <span />
@@ -1118,14 +1243,18 @@ export default function App() {
               <Disclosure className="handoff-section mx-6 mt-2" title="互相指导">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <label>指导方
-                    <select aria-label="指导方" value={mentor} onChange={(e) => setMentor(e.target.value)}>
-                      {["zcode", "codex", "opencode"].filter((item) => item !== worker)
+                    <select aria-label="指导方" value={mentor} onChange={(e) => {
+                      setMentor(e.target.value); setPhaseExecution((p) => ({ ...p, planning: inheritedExecution(), reviewing: inheritedExecution() }));
+                    }}>
+                      {["zcode", "codex", "opencode", "deck"].filter((item) => item !== worker)
                         .map((item) => <option key={item} value={item}>{item}</option>)}
                     </select>
                   </label>
                   <label>执行方
-                    <select aria-label="执行方" value={worker} onChange={(e) => setWorker(e.target.value)}>
-                      {["zcode", "codex", "opencode"].filter((item) => item !== mentor)
+                    <select aria-label="执行方" value={worker} onChange={(e) => {
+                      setWorker(e.target.value); setPhaseExecution((p) => ({ ...p, executing: inheritedExecution() }));
+                    }}>
+                      {["zcode", "codex", "opencode", "deck"].filter((item) => item !== mentor)
                         .map((item) => <option key={item} value={item}>{item}</option>)}
                     </select>
                   </label>
@@ -1134,19 +1263,44 @@ export default function App() {
                       {[1, 2, 3].map((round) => <option key={round} value={round}>{round}</option>)}
                     </select>
                   </label>
+                  <label>阶段时限
+                    <input aria-label="阶段时限（分钟）" type="number" min={1} max={60} value={phaseTimeoutMinutes}
+                      onChange={(event) => setPhaseTimeoutMinutes(Math.min(60, Math.max(1, Number(event.target.value) || 1)))} />
+                    分钟
+                  </label>
                   <button onClick={startGuidedCollaboration} disabled={busyCollaboration}
                     className="rounded-full border px-3 py-1 disabled:opacity-50">
                     {busyCollaboration ? "启动中…" : "开始指导协作"}
                   </button>
                 </div>
+                <div className="phase-execution">
+                  {(["planning", "executing", "reviewing"] as const).map((phase) => <div key={phase}>
+                    <span>{({ planning: "规划", executing: "执行", reviewing: "验收" })[phase]}</span>
+                    <ExecutionPicker harness={phase === "executing" ? worker : mentor} value={phaseExecution[phase]}
+                      taskId={executionScope} label={`${phase} `} disabled={busyCollaboration}
+                      onChange={(config) => setPhaseExecution((p) => ({ ...p, [phase]: config }))} />
+                  </div>)}
+                </div>
               </Disclosure>
             )}
-            {collaborations.filter((item) => item.source_task_id === selected).map((item) => (
+            {collaborations.filter((item) => item.source_task_id === selected
+              || (item.conversation_id && item.conversation_id === (selectedRow?.conversation_id ?? selectedConversation?.turns[0]?.id))).map((item) => (
               <div key={item.id} className="mx-6 mt-2 flex flex-wrap items-center gap-2 text-xs">
-                <span>{item.mentor} 指导 {item.worker} · {item.phase} · 第 {item.round}/{item.max_rounds} 轮 · {item.status}</span>
+                <span>{item.mentor} 指导 {item.worker}{item.read_only ? " · 只读" : ""} · {({
+                  planning: "规划", executing: "实施", reviewing: "验收",
+                } as Record<string, string>)[item.phase] ?? item.phase} · 第 {item.round}/{item.max_rounds} 轮 · {({
+                  running: "运行中", done: "已通过", failed: "失败", cancelled: "已停止", needs_attention: "待处理",
+                } as Record<string, string>)[item.status] ?? item.status}</span>
                 {item.current_task_id && <button onClick={() => viewTask(item.current_task_id!)}>查看当前阶段</button>}
                 {item.error && <span className="text-red-700">{item.error}</span>}
                 {item.status === "running" && <button onClick={() => cancelCollaboration(item.id).catch((e) => setActionError(String(e)))}>停止协作</button>}
+                {item.status === "running" && <details className="execution-future">
+                  <summary>后续阶段配置</summary>
+                  {(["planning", "executing", "reviewing"] as const).map((phase) => <DelegationExecution key={phase}
+                    runId={item.id} target={phase} harness={phase === "executing" ? item.worker : item.mentor}
+                    taskId={item.source_task_id} initial={item.execution?.[phase] ?? inheritedExecution()}
+                    disabled={phase === "planning"} />)}
+                </details>}
               </div>
             ))}
             </div>
@@ -1193,17 +1347,36 @@ export default function App() {
         {/* 底部输入卡：始终可见。运行中发送 = 入队（结束后自动续发） */}
         <m.div className="composer-dock" layout={motionEnabled ? "position" : false} layoutDependency={selected === null}>
           {actionError && <div className="action-error" role="alert">{actionError}</div>}
-          {actionInfo && <div className="action-info">{actionInfo}</div>}
+          {actionNotice && !actionError && <div className="action-notice">{actionNotice}</div>}
           <RuntimeStatus harness={harness} refreshKey={settingsOpen} onSettings={openSettings} />
+          {selectedRow?.execution_config && <div className="execution-current">
+            <span>{selectedRunning ? "本轮运行" : "本轮配置"}</span>
+            <span title={selectedRow.execution_config.resolved.model ?? ""}>{selectedRow.harness} · {selectedRow.execution_config.resolved.model || "默认模型"}</span>
+            <span>{effortLabel(selectedRow.execution_config.resolved.effort || "默认")}</span>
+            {selectedRunning && harness === selectedRow.harness
+              && ((selectedRow.execution_config.resolved.model ?? "") !== model
+                || (selectedRow.execution_config.resolved.effort ?? "") !== effort)
+              && <button type="button" className="context-command" disabled={busyReconfigure}
+                onClick={() => void reconfigureRunning()}><RotateCcw size={14} />{busyReconfigure ? "等待停止" : "停止并按新配置继续"}</button>}
+          </div>}
           {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
             <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
               <span className="text-stone-400">已排队（结束后自动续发）：</span>
               {selectedLive.queued.map((q, i) => (
-                <span
+                <div
                   key={i}
                   className="flex items-center gap-1 rounded-full border border-stone-200 px-2 py-0.5 text-stone-500"
                 >
                   <span className="max-w-48 truncate">{q}</span>
+                  <ExecutionPicker harness={selectedLive.harness} taskId={executionScope}
+                    value={selectedLive.queuedConfigs?.[i] ?? { model: selectedLive.model ?? "", effort: selectedLive.effort ?? "" }}
+                    label={`排队 ${i + 1} `} allowInherit={false} onChange={(config) => setLive((prev) => {
+                      const task = prev[selected];
+                      if (!task?.queued?.[i]) return prev;
+                      const configs = task.queued.map((_, index) => task.queuedConfigs?.[index] ?? { model: task.model ?? "", effort: task.effort ?? "" });
+                      configs[i] = config;
+                      return { ...prev, [selected]: { ...task, queuedConfigs: configs } };
+                    })} />
                   <button
                     onClick={() =>
                       setLive((prev) => {
@@ -1214,6 +1387,7 @@ export default function App() {
                           [selected]: {
                             ...t,
                             queued: t.queued?.filter((_, j) => j !== i),
+                            queuedConfigs: t.queuedConfigs?.filter((_, j) => j !== i),
                           },
                         };
                       })
@@ -1224,7 +1398,7 @@ export default function App() {
                    >
                      <X size={12} />
                   </button>
-                </span>
+                </div>
               ))}
             </div>
           )}
@@ -1241,7 +1415,10 @@ export default function App() {
             mode={mode}
             onModeChange={setMode}
             model={model}
-            onModelChange={setModel}
+            onModelChange={(value) => rememberExecution(harness, { model: value, effort: "" })}
+            effort={effort}
+            onEffortChange={(value) => rememberExecution(harness, { model, effort: value })}
+            executionScope={executionScope}
             permission={permission}
             catalogVersion={settingsOpen}
             onPermissionChange={setPermission}

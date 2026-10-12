@@ -1,5 +1,5 @@
 /** 与 Rust 侧 AgentEvent 严格对应的统一事件模型 */
-export type AgentEvent =
+export type AgentEvent = (
   | { type: "session_id"; id: string }
   | { type: "user_message"; text: string; hidden?: boolean }
   | { type: "assistant_message"; text: string; streamId?: string; streaming?: boolean }
@@ -14,7 +14,8 @@ export type AgentEvent =
       tokens?: { input: number; output: number; reasoning?: number; cached?: number };
     }
   | { type: "error"; kind: string; message: string }
-  | { type: "raw"; line: string };
+  | { type: "raw"; line: string }
+) & { sourceHarness?: string; sourceTaskId?: string };
 
 /** 统一事件可携带入库时间戳（ms，Rust append_event 统一打点），用于思考/轮次耗时 */
 export type TimedAgentEvent = AgentEvent & { ts?: number };
@@ -147,7 +148,8 @@ export function normalizeAgentEvents(ev: PiEvent | AgentEvent): AgentEvent[] {
   // 思考/轮次耗时的数据源：每个事件都带到达时刻（入库事件自带 ts，实时流补当前时刻）
   type Timed = AgentEvent & { ts?: number };
   const stamp = (e: Timed): AgentEvent =>
-    ({ ...e, ts: e.ts ?? (ev as Timed).ts ?? Date.now() }) as unknown as AgentEvent;
+    ({ ...e, sourceHarness: ev.sourceHarness, sourceTaskId: ev.sourceTaskId,
+      ts: e.ts ?? (ev as Timed).ts ?? Date.now() }) as unknown as AgentEvent;
   if (nativeTypes.has(ev.type)) return [stamp(ev as AgentEvent)];
   const mapped = piEventToAgentEvent(ev as PiEvent);
   const result = mapped ? [stamp(mapped)] : [];
@@ -188,6 +190,8 @@ export type TaskRow = {
   session_id: string | null;
   /** 会话根任务 id：接力/续接轮次继承（跨 harness 归同一会话） */
   conversation_id: string | null;
+  conversation_seq?: number | null;
+  execution_config?: import("./api").ExecutionSnapshot | null;
   base_branch: string | null;
   worktree_dir: string | null;
   status: "running" | "done" | "failed" | "cancelled";
@@ -203,8 +207,11 @@ export type LiveTask = {
   prompt: string;
   mode: string | null;
   model?: string | null;
+  effort?: string | null;
+  executionConfig?: import("./api").ExecutionSnapshot | null;
   permission?: string | null;
   projectId?: string | null;
+  conversationId?: string | null;
   events: { event: AgentEvent; key: number }[];
   running: boolean;
   status?: TaskRow["status"];
@@ -212,6 +219,7 @@ export type LiveTask = {
   sessionId?: string;
   /** 运行中排队的后续消息（任务结束自动续发） */
   queued?: string[];
+  queuedConfigs?: import("./api").ExecutionConfig[];
   /** deck 运行时的 todo 清单（todo_write 工具维护） */
   todos?: { content: string; status: string }[];
 };

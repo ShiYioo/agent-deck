@@ -3,25 +3,14 @@ import { Copy, Check, AlertCircle } from "lucide-react";
 import type { AgentEvent } from "../types";
 import { AssistantText } from "./AssistantText";
 import { Disclosure } from "./Disclosure";
+import { ToolIcon } from "./ToolIcon";
 import {
   IconSparkle,
   IconTerminal,
-  IconFileEdit,
-  IconGlobe,
-  IconTool,
   IconCheckCircle,
   IconXCircle,
   IconInfo,
 } from "./icons";
-
-/** 依据工具名挑图标：终端/文件/网络/通用扳手 */
-export function ToolIcon({ tool }: { tool: string }) {
-  const t = tool.toLowerCase();
-  if (/(shell|bash|terminal|exec|command)/.test(t)) return <IconTerminal size={13} />;
-  if (/(file|edit|write|read|patch)/.test(t)) return <IconFileEdit size={13} />;
-  if (/(web|search|fetch|globe)/.test(t)) return <IconGlobe size={13} />;
-  return <IconTool size={13} />;
-}
 
 /** Stable event objects keep prior messages out of streaming re-renders. */
 export const EventLine = memo(function EventLine({
@@ -37,7 +26,7 @@ export const EventLine = memo(function EventLine({
         return (
           <div className="activity-event flex items-center gap-1.5">
             <IconInfo size={13} className="shrink-0" />
-            已接力自 AgentDeck（自动注入上一会话的交接简报）
+            AgentDeck 接力请求
           </div>
         );
       }
@@ -48,9 +37,12 @@ export const EventLine = memo(function EventLine({
       );
     case "assistant_message":
       return (
-        <div className="message-assistant">
+        <div className="assistant-entry">
+          {event.sourceHarness && <div className="message-source">{event.sourceHarness}</div>}
+          <div className="message-assistant">
           <AssistantText text={event.text} />
           <MessageActions text={event.text} />
+          </div>
         </div>
       );
     case "thinking":

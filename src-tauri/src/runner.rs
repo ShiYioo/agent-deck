@@ -41,16 +41,35 @@ pub async fn spawn(
     prompt: &str,
     resume_session_id: Option<&str>,
     attachments: &[String],
+    native_adapter: Option<&std::path::Path>,
+    native_transport: Option<&str>,
+    context_archive: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<command_group::AsyncGroupChild, String> {
-    let (program, mut prefix) = resolve_program(harness.program()).await?;
-    let args = harness.build_args(
+    let (program, prefix) = if let Some(adapter) = native_adapter {
+        let path = which::which(harness.program()).map_err(|e| e.to_string())?;
+        let node = which::which("node").map_err(|_| "原生服务适配需要 Node.js".to_string())?;
+        let params = serde_json::json!({
+            "harness":harness.name(), "program":path, "mode":mode,
+            "model":model, "cwd":cwd, "prompt":prompt, "resume":resume_session_id,
+            "attachments":attachments.iter().filter(|p| harness != Harness::Codex || Harness::is_image_path(p)).collect::<Vec<_>>(),
+            "transport":native_transport,
+            "contextArchive":context_archive,
+            "effort":effort,
+        });
+        (node, vec![adapter.to_string_lossy().into_owned(), params.to_string()])
+    } else {
+        let (program, mut prefix) = resolve_program(harness.program()).await?;
+        prefix.extend(harness.build_execution_args(
         mode.as_deref(),
         model.as_deref(),
         prompt,
         resume_session_id,
         attachments,
-    );
-    prefix.extend(args);
+        effort,
+        ));
+        (program, prefix)
+    };
 
     let mut command = tokio::process::Command::new(program);
     command
@@ -70,7 +89,11 @@ pub async fn spawn(
 
     // 进程组启动：终止时整树杀（cmd → node → CLI 不留孤儿）
     use command_group::AsyncCommandGroup;
-    command.group_spawn().map_err(|e| format!("启动失败：{e}"))
+    command
+        .group()
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("启动失败：{e}"))
 }
 
 /// 读取一个输出流，逐行解析为事件：入库 + 推送前端。
@@ -135,7 +158,7 @@ pub async fn stream_loop(
 
     // 两个流都关闭后，把子进程从任务表取出并等待退出码
     // （注意：MutexGuard 不能跨 await，必须先 take 再 wait）
-    let (mut child, cancelled) = {
+    let (mut child, mut cancelled) = {
         let mut guard = match registry.0.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -146,9 +169,15 @@ pub async fn stream_loop(
         }
     };
     let code = match child.as_mut() {
-        Some(c) => c.wait().await.ok().and_then(|s| s.code()),
+        Some(c) => wait_for_exit(c, &registry, &task_id).await,
         None => None,
     };
+    cancelled |= registry
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&task_id).map(|t| t.cancelled))
+        .unwrap_or(false);
 
     let status = terminal_status(code, cancelled, out_failed || err_failed);
     let code = if cancelled {
@@ -185,6 +214,38 @@ pub async fn stream_loop(
     );
 }
 
+async fn wait_for_exit(
+    child: &mut command_group::AsyncGroupChild,
+    registry: &TaskRegistry,
+    task_id: &str,
+) -> Option<i32> {
+    loop {
+        let cancelled = registry
+            .0
+            .lock()
+            .ok()
+            .and_then(|g| g.get(task_id).map(|task| task.cancelled))
+            .unwrap_or(false);
+        if cancelled {
+            let _ = child.start_kill();
+        }
+        match child.inner().try_wait() {
+            Ok(Some(status)) => {
+                // An executor's background descendants cannot outlive its workspace lease.
+                let _ = child.start_kill();
+                return child
+                    .wait()
+                    .await
+                    .ok()
+                    .map(|_| status)
+                    .and_then(|status| status.code());
+            }
+            Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            Err(_) => return None,
+        }
+    }
+}
+
 fn terminal_status(code: Option<i32>, cancelled: bool, failed: bool) -> &'static str {
     if cancelled {
         "cancelled"
@@ -199,11 +260,111 @@ fn terminal_status(code: Option<i32>, cancelled: bool, failed: bool) -> &'static
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancellation_remains_effective_without_output_readers() {
+        use command_group::AsyncCommandGroup;
+        let node = which::which("node").unwrap();
+        let mut command = tokio::process::Command::new(node);
+        command
+            .args(["-e", "setInterval(()=>{},1000)"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command.group().kill_on_drop(true).spawn().unwrap();
+        assert!(child.inner().stdout.is_none() && child.inner().stderr.is_none());
+        assert!(child.inner().try_wait().unwrap().is_none());
+        let registry = TaskRegistry::default();
+        registry.0.lock().unwrap().insert(
+            "closed-stream".into(),
+            crate::RunningTask {
+                label: "test".into(),
+                child: None,
+                cancelled: true,
+            },
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_for_exit(&mut child, &registry, "closed-stream"),
+        )
+        .await
+        .expect("cancelled process did not exit");
+    }
+
     #[test]
     fn cancellation_and_protocol_errors_override_process_exit_codes() {
         assert_eq!(terminal_status(Some(0), false, false), "done");
         assert_eq!(terminal_status(Some(0), false, true), "failed");
         assert_eq!(terminal_status(Some(1), true, true), "cancelled");
         assert_eq!(terminal_status(None, false, false), "failed");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn owned_process_groups_terminate_descendants_when_dropped() {
+        use command_group::AsyncCommandGroup;
+        let node = which::which("node").unwrap();
+        let mut command = tokio::process::Command::new(node);
+        command.args(["-e","const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(child.pid);setInterval(()=>{},1000)"])
+            .stdout(Stdio::piped()).creation_flags(0x0800_0000);
+        let mut child = command.group().kill_on_drop(true).spawn().unwrap();
+        let stdout = child.inner().stdout.take().unwrap();
+        let mut lines = BufReader::new(stdout).lines();
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(child);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let output = tokio::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .creation_flags(0x0800_0000)
+                .output()
+                .await
+                .unwrap();
+            if !String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "test descendant survived its owning group"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn successful_executor_exit_closes_background_descendants_before_releasing_ownership() {
+        use command_group::AsyncCommandGroup;
+        let mut command = tokio::process::Command::new(which::which("node").unwrap());
+        command.args(["-e","const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(child.pid);process.exit(0)"])
+            .stdout(Stdio::piped()).creation_flags(0x0800_0000);
+        let mut child = command.group().kill_on_drop(true).spawn().unwrap();
+        let stdout = child.inner().stdout.take().unwrap();
+        let mut lines = BufReader::new(stdout).lines();
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_for_exit(&mut child, &TaskRegistry::default(), "completed"),
+        )
+        .await
+        .expect("background child prevented executor completion");
+        assert_eq!(code, Some(0));
+        let output = tokio::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .creation_flags(0x0800_0000)
+            .output()
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")));
     }
 }

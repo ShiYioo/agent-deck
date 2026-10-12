@@ -135,7 +135,23 @@ impl Harness {
     }
 
     /// codex --image 只吃图片
-    fn is_image_path(path: &str) -> bool {
+    pub fn build_execution_args(
+        &self, mode: Option<&str>, model: Option<&str>, prompt: &str,
+        resume: Option<&str>, attachments: &[String], effort: Option<&str>,
+    ) -> Vec<String> {
+        let mut args = self.build_args(mode, model, prompt, resume, attachments);
+        if let Some(effort) = effort.filter(|s| !s.is_empty()) {
+            let at = args.len() - 1;
+            match self {
+                Self::Codex => { args.splice(at..at, ["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]); }
+                Self::Opencode => { args.splice(at..at, ["--variant".into(), effort.into()]); }
+                _ => {}
+            }
+        }
+        args
+    }
+
+    pub(crate) fn is_image_path(path: &str) -> bool {
         let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
     }

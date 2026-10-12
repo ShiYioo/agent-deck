@@ -11,6 +11,7 @@ import { discoverModels, inTauri, listModelProfiles, listProfileModels } from ".
 import { IconFolder } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
+import { ExecutionPicker } from "./ExecutionPicker";
 
 /** Shared composer; draft state survives chat switches and failed dispatches. */
 export const Composer = memo(function Composer({
@@ -22,6 +23,9 @@ export const Composer = memo(function Composer({
   onModeChange,
   model,
   onModelChange,
+  effort,
+  onEffortChange,
+  executionScope,
   permission,
   onPermissionChange,
   projects,
@@ -32,7 +36,6 @@ export const Composer = memo(function Composer({
   onRemoveAttachment,
   onSend,
   running,
-  recentModels = [],
   placeholder,
   draftKey,
   onStop,
@@ -46,6 +49,9 @@ export const Composer = memo(function Composer({
   onModeChange: (v: string) => void;
   model: string;
   onModelChange: (v: string) => void;
+  effort: string;
+  onEffortChange: (v: string) => void;
+  executionScope: string | null;
   permission: string;
   onPermissionChange: (v: string) => void;
   projects: { id: string; name: string; dir: string }[];
@@ -252,9 +258,8 @@ export const Composer = memo(function Composer({
 
   // 动态发现真实模型列表（codex 读 desktop 状态文件、opencode 调 CLI）；
   // 失败或为空则回退静态目录
-  const [modelOptionsBy, setModelOptionsBy] = useState<Record<string, string[]>>({});
+   const [modelOptionsBy, setModelOptionsBy] = useState<Record<string, string[]>>({});
   const requestedHarness = mention?.kind === "model" ? mention.agent : harness;
-  const discovered = modelOptionsBy[harness] ?? [];
   useEffect(() => {
     if (requestedHarness !== "codex" && requestedHarness !== "opencode" && requestedHarness !== "zcode") return;
     let alive = true;
@@ -601,47 +606,15 @@ export const Composer = memo(function Composer({
         </div>
 
         {/* codex/opencode/deck：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
-        {(MODEL_CATALOG[harness] || harness === "deck" || (harness === "zcode" && (modelOptionsBy.zcode?.length ?? 0) > 0)) && (
-          <div className="composer-model-control"><Dropdown
-            value={model}
-            onChange={onModelChange}
-            options={[
-              { value: "", label: harness === "deck" ? "模型池默认（自动降级）" : "默认模型" },
-              ...(harness === "deck"
-                ? deckOptions.map((o) => ({
-                    value: o.value,
-                    label: `${o.group} · ${o.label}`,
-                    group: o.group,
-                  }))
-                : discovered.length
-                  ? discovered
-                      .map((m) => ({
-                        value: m,
-                        label: m,
-                        // opencode 的 free 模型（如 -free 后缀）标注免费徽章
-                        tag: /free/i.test(m) ? "免费" : undefined,
-                      }))
-                      // 常用置顶（按历史使用频次）
-                      .sort(
-                        (a, b) =>
-                           (recentModels.indexOf(a.value) < 0 ? 999 : recentModels.indexOf(a.value)) -
-                           (recentModels.indexOf(b.value) < 0 ? 999 : recentModels.indexOf(b.value)),
-                      )
-                  : MODEL_CATALOG[harness].filter((o) => o.value !== "")),
-            ]}
-            searchable
-            groupBy={
-              harness === "deck"
-                ? (value) => deckOptions.find((o) => o.value === value)?.group ?? "其他"
-                : harness === "opencode"
-                  ? (value) => (value.includes("/") ? value.split("/")[0] : "默认")
-                  : undefined
-            }
-            title="模型"
-          /></div>
-        )}
-
-        {/* 权限模式：zcode/codex/opencode/deck 各自目录 */}
+         <ExecutionPicker harness={harness} value={{ model, effort }} allowInherit={false} taskId={executionScope}
+           modelOptions={harness === "deck" ? deckOptions.map((o) => ({ value: o.value, label: `${o.group} · ${o.label}` }))
+             : harness === "zcode" ? (modelOptionsBy.zcode ?? []).map((value) => ({ value, label: value }))
+             : undefined}
+           onChange={(config) => {
+             if (config.model !== model) onModelChange(config.model ?? "");
+             else onEffortChange(config.effort ?? "");
+           }} />
+         {/* 权限模式：zcode/codex/opencode/deck 各自目录 */}
         {MODE_CATALOG[harness] && (
           <div className={`composer-permission-control ${["yolo", "full", "default"].includes(mode) || (harness === "deck" && mode === "default") ? "is-elevated" : ""}`}><Dropdown
             value={mode}

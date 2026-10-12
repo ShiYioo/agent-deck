@@ -20,6 +20,15 @@ const result = await build({
     js: `import { createRequire as __deckCreateRequire } from "node:module"; const require = __deckCreateRequire(import.meta.url);`,
   },
 });
+await build({
+  entryPoints: ["agent/native-harness.mjs"],
+  outfile: "agent/dist/native-harness.mjs",
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node20",
+  logLevel: "info",
+});
 
 // photon 的 wasm：图片缩放（ImageContent → 模型可读）运行时按 execDir/photon/ 回退查找，
 // 打包安装后落在资源目录的 photon/ 下即可命中

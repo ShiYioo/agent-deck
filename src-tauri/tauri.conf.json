@@ -30,6 +30,7 @@
     "targets": ["nsis"],
     "resources": {
       "../agent/dist/deck-agent.mjs": "agent/deck-agent.mjs",
+      "../agent/dist/native-harness.mjs": "agent/native-harness.mjs",
       "../agent/dist/photon/": "photon/"
     },
     "icon": [

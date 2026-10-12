@@ -165,7 +165,7 @@ test("browser mode exposes disconnected runtime and failed sends retain the draf
   await expect(page.getByRole("textbox", { name: "消息" })).toHaveValue("不能悄悄消失的消息");
 });
 
-test("changing the harness starts a fresh run instead of silently resuming the old agent", async ({ page }) => {
+test("changing the harness preserves the conversation without reusing the other agent's handle", async ({ page }) => {
   await mockDesktop(page, false);
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
@@ -180,4 +180,8 @@ test("changing the harness starts a fresh run instead of silently resuming the o
     (window as unknown as { __testRequests: Record<string, unknown>[] }).__testRequests[0]);
   expect(request.harness).toBe("codex");
   expect(request.resumeSessionId).toBeNull();
+  expect(request.conversationId).toBe("a");
+  expect(request.prompt).toBe("使用选中的新运行器");
+  expect(await page.evaluate(() =>
+    (window as unknown as { __testCalls: string[] }).__testCalls)).not.toContain("build_smart_handoff_prompt");
 });

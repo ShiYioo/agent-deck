@@ -16,14 +16,20 @@ export function applyTaskUpdates(task: LiveTask, updates: TaskUpdate[]): LiveTas
   let next = { ...task, events };
   for (const update of updates) {
     if (update.item) {
-      const event = update.item.event;
+      const event = {
+        ...update.item.event,
+        sourceHarness: update.item.event.sourceHarness ?? (task.harness || undefined),
+        sourceTaskId: update.item.event.sourceTaskId ?? update.taskId,
+      };
+      const item = { ...update.item, event };
       const streaming = event.type === "assistant_message" || event.type === "thinking";
       const index = streaming && event.streamId
         ? events.findIndex(({ event: previous }) =>
-            previous.type === event.type && previous.streaming && previous.streamId === event.streamId)
+            previous.type === event.type && previous.streaming && previous.streamId === event.streamId
+            && previous.sourceTaskId === event.sourceTaskId)
         : -1;
-      if (index >= 0) events[index] = { ...update.item, key: events[index].key };
-      else events.push(update.item);
+      if (index >= 0) events[index] = { ...item, key: events[index].key };
+      else events.push(item);
       if (event.type === "session_id") next.sessionId = event.id;
     }
     if (update.running !== undefined) next.running = update.running;

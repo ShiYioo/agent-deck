@@ -8,6 +8,37 @@ export const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export type HarnessHealth = { ready: boolean; issues: string[] };
+export type ExecutionConfig = { model: string | null; effort: string | null };
+export type ExecutionSnapshot = { requested: ExecutionConfig; resolved: ExecutionConfig; transport: string };
+export type ModelCapability = { model: string; efforts: string[]; context_window: number | null };
+export type PhaseExecution = { planning: ExecutionConfig; executing: ExecutionConfig; reviewing: ExecutionConfig };
+export type ExecutionOverride = { target: string; version: number; config: ExecutionConfig };
+export const inheritedExecution = (): ExecutionConfig => ({ model: null, effort: null });
+
+const capabilityRequests = new Map<string, { expires: number; request: Promise<ModelCapability[]> }>();
+export async function discoverExecutionModels(harness: string): Promise<ModelCapability[]> {
+  if (!inTauri) return [];
+  const cached = capabilityRequests.get(harness);
+  if (cached && cached.expires > Date.now()) return cached.request;
+  const entry = { expires: Infinity, request: invoke<ModelCapability[]>("discover_execution_models", { harness }) };
+  capabilityRequests.set(harness, entry);
+  try { const rows = await entry.request; entry.expires = Date.now() + 60_000; return rows; }
+  catch (error) { if (capabilityRequests.get(harness) === entry) capabilityRequests.delete(harness); throw error; }
+}
+export async function getExecutionDefaults(taskId: string | null, harness: string): Promise<ExecutionConfig> {
+  if (!inTauri) return inheritedExecution();
+  return invoke("get_execution_defaults", { taskId, harness });
+}
+export async function setExecutionDefaults(taskId: string | null, harness: string, config: ExecutionConfig): Promise<void> {
+  if (!inTauri) return;
+  return invoke("set_execution_defaults", { taskId, harness, config });
+}
+export async function listExecutionOverrides(runId: string): Promise<ExecutionOverride[]> {
+  return invoke("list_execution_overrides", { runId });
+}
+export async function updateDelegationExecution(runId: string, target: string, expectedVersion: number, config: ExecutionConfig): Promise<ExecutionOverride> {
+  return invoke("update_delegation_execution", { runId, target, expectedVersion, config });
+}
 export type Collaboration = {
   id: string;
   source_task_id: string;
@@ -20,6 +51,10 @@ export type Collaboration = {
   current_task_id: string | null;
   task_ids: string[];
   error: string | null;
+  conversation_id?: string | null;
+  read_only?: boolean;
+  phase_timeout_secs?: number;
+  execution?: PhaseExecution;
 };
 
 export async function startCollaboration(params: {
@@ -27,6 +62,9 @@ export async function startCollaboration(params: {
   mentor: string;
   worker: string;
   maxRounds: number;
+  readOnly?: boolean;
+  phaseTimeoutSecs?: number;
+  execution?: PhaseExecution;
 }): Promise<Collaboration> {
   if (!inTauri) browserStub("协作");
   return invoke("start_collaboration", {
@@ -34,6 +72,9 @@ export async function startCollaboration(params: {
     mentor: params.mentor,
     worker: params.worker,
     maxRounds: params.maxRounds,
+    readOnly: params.readOnly ?? false,
+    phaseTimeoutSecs: params.phaseTimeoutSecs ?? 900,
+    execution: params.execution,
   });
 }
 
@@ -45,6 +86,70 @@ export async function cancelCollaboration(id: string): Promise<void> {
 export async function listCollaborations(): Promise<Collaboration[]> {
   if (!inTauri) return [];
   return invoke("list_collaborations");
+}
+
+export type SharedConversationState = { version: number; goal: string; notes: string };
+export type ConversationInfo = {
+  conversation_id: string;
+  bindings: { harness: string; cwd: string; session_id: string; task_id: string; cursor_task_id: string | null; status: string }[];
+  state: SharedConversationState;
+  recovery_task_ids: string[];
+  deliveries: { task_id: string; strategy: string; status: string; source_ids: string }[];
+};
+export type ContextPage = {
+  items: { task_id: string; harness: string; seq: number; event: Record<string, unknown> }[];
+  next_offset: number | null;
+};
+export async function getConversationInfo(taskId: string): Promise<ConversationInfo> {
+  if (!inTauri) browserStub("会话状态");
+  return invoke("get_conversation_info", { taskId });
+}
+export async function searchConversationContext(taskId: string, query: string, offset = 0): Promise<ContextPage> {
+  if (!inTauri) browserStub("会话历史");
+  return invoke("search_conversation_context", { taskId, query, offset });
+}
+export async function updateConversationState(taskId: string, expectedVersion: number, goal: string, notes: string): Promise<SharedConversationState> {
+  if (!inTauri) browserStub("共享任务状态");
+  return invoke("update_conversation_state", { taskId, expectedVersion, goal, notes });
+}
+export async function confirmConversationRecovery(taskId: string, confirmed: boolean): Promise<void> {
+  if (!inTauri) browserStub("恢复会话");
+  return invoke("confirm_conversation_recovery", { taskId, confirmed });
+}
+export async function resetConversationBinding(taskId: string, harness: string): Promise<void> {
+  if (!inTauri) browserStub("重建上下文");
+  return invoke("reset_conversation_binding", { taskId, harness });
+}
+
+export type ContextPolicy = {
+  version: number; allowed_harnesses: string[]; redact_secrets: boolean; blocked_terms: string[];
+  context_window: number; output_reserve: number; overhead_reserve: number;
+};
+export type GraphNodeSpec = { id: string; harness: string; prompt: string; dependencies: string[]; read_only: boolean; execution?: ExecutionConfig };
+export type GraphRun = {
+  id: string; source_task_id: string; conversation_id: string; cwd: string; base_commit: string;
+  status: string; integrated: boolean; max_parallel: number; timeout_secs: number; error: string | null;
+  nodes: { spec: GraphNodeSpec; status: string; task_id: string | null; report: string | null; error: string | null;
+    patch_path: string | null; patch_hash: string | null; worktree: string | null }[];
+};
+export async function getContextPolicy(taskId: string): Promise<ContextPolicy> {
+  return invoke("get_context_policy", { taskId });
+}
+export async function updateContextPolicy(taskId: string, expectedVersion: number, policy: ContextPolicy): Promise<ContextPolicy> {
+  return invoke("update_context_policy", { taskId, expectedVersion, policy });
+}
+export async function listGraphRuns(taskId: string): Promise<GraphRun[]> {
+  return invoke("list_graph_runs", { taskId });
+}
+export async function startGraphRun(taskId: string, nodes: GraphNodeSpec[], maxParallel: number, timeoutSecs: number): Promise<GraphRun> {
+  return invoke("start_graph_run", { sourceTaskId: taskId, nodes, maxParallel, timeoutSecs });
+}
+export async function cancelGraphRun(id: string): Promise<void> { return invoke("cancel_graph_run", { id }); }
+export async function integrateGraphRun(id: string, confirmed: boolean): Promise<GraphRun> {
+  return invoke("integrate_graph_run", { id, confirmed });
+}
+export async function discardGraphRun(id: string, confirmed: boolean): Promise<GraphRun> {
+  return invoke("discard_graph_run", { id, confirmed });
 }
 
 export async function checkHarness(harness: string): Promise<HarnessHealth> {
@@ -65,12 +170,13 @@ export async function startTask(params: {
   prompt: string;
   mode: string | null;
   model: string | null;
+  effort?: string | null;
   permission: string | null;
   resumeSessionId: string | null;
   projectId?: string | null;
   /** 会话根 id：接力/续接轮次继承（跨 harness 归同一会话） */
   conversationId?: string | null;
-  /** 接力轮次：注入的简报不作为用户消息展示 */
+  /** 自动接力请求隐藏；用户本轮原话始终独立保存 */
   relay?: boolean;
   /** 附件绝对路径（codex 只取图片；zcode/opencode/deck 全支持） */
   attachments?: string[];
@@ -359,7 +465,7 @@ export async function getDefaultCwd(): Promise<string> {
   return await invoke<string>("get_default_cwd");
 }
 
-/** AI 会话接力：deck 运行时压缩会话记录为交接简报（失败自动回退机械版） */
+/** 可选 AI 交接简报；普通发送与接力不依赖此命令。失败会明确报错。 */
 export async function buildSmartHandoffPrompt(taskId: string): Promise<string> {
   if (!inTauri) browserStub("会话接力");
   return await invoke<string>("build_smart_handoff_prompt", { taskId });

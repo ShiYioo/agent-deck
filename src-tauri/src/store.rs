@@ -4,6 +4,7 @@
 //! 由调用方（tauri command / runner）自行决定是否放进异步上下文。
 
 use std::path::Path;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -64,6 +65,8 @@ pub struct TaskRow {
     pub worktree_dir: Option<String>,
     /// 会话根任务 id：接力/续接轮次继承，跨 harness 归同一会话（空 = 旧数据，按 session 分组）
     pub conversation_id: Option<String>,
+    pub conversation_seq: Option<i64>,
+    pub execution_config: Option<serde_json::Value>,
     /// 附件绝对路径（JSON 数组；仅落档展示与重试，调用时逐家 CLI 转旗标）
     pub attachments: Option<String>,
     /// 轮次基线 manifest（任务开始时目录快照 JSON；产出面板按它判定本轮改动）
@@ -75,14 +78,43 @@ pub struct TaskRow {
     pub finished_at: Option<i64>,
 }
 
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        id: row.get(0)?, harness: row.get(1)?, cwd: row.get(2)?, prompt: row.get(3)?,
+        mode: row.get(4)?, model: row.get(5)?, project_id: row.get(6)?,
+        base_branch: row.get(7)?, worktree_dir: row.get(8)?, session_id: row.get(9)?,
+        conversation_id: row.get(10)?, attachments: row.get(11)?, baseline: row.get(12)?,
+        status: row.get(13)?, exit_code: row.get(14)?, created_at: row.get(15)?, finished_at: row.get(16)?,
+        conversation_seq: row.get(17)?,
+        execution_config: row.get::<_, Option<String>>(18)?.and_then(|raw| serde_json::from_str(&raw).ok()),
+    })
+}
+
 pub struct Store {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
+    conversation_launches: Arc<Mutex<HashSet<String>>>,
+    pub(crate) workspace_owners: Arc<Mutex<std::collections::HashMap<String, String>>>,
+}
+
+pub(crate) struct ConversationLaunch {
+    id: String,
+    launches: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Drop for ConversationLaunch {
+    fn drop(&mut self) {
+        if let Ok(mut launches) = self.launches.lock() {
+            launches.remove(&self.id);
+        }
+    }
 }
 
 impl Clone for Store {
     fn clone(&self) -> Self {
         Self {
             conn: self.conn.clone(),
+            conversation_launches: self.conversation_launches.clone(),
+            workspace_owners: self.workspace_owners.clone(),
         }
     }
 }
@@ -93,7 +125,25 @@ impl Store {
         self.clone()
     }
 
+    pub(crate) fn claim_branch_launch(&self, task_id: &str) -> Result<ConversationLaunch, String> {
+        let id = self.ensure_conversation(task_id)?;
+        let mut launches = self.conversation_launches.lock().map_err(|_| "conversation registry poisoned")?;
+        if !launches.insert(id.clone()) {
+            return Err("会话正在派发或删除，请等待当前操作结束".into());
+        }
+        let guard = ConversationLaunch { id: id.clone(), launches: self.conversation_launches.clone() };
+        drop(launches);
+        if self.get_task(&id)?.is_none() {
+            return Err("会话根任务已删除，不能派发隔离任务".into());
+        }
+        Ok(guard)
+    }
+
     /// 打开（或创建）数据库并确保表结构存在。
+    pub(crate) fn conversation_mutating(&self, id: &str) -> Result<bool, String> {
+        Ok(self.conversation_launches.lock().map_err(|_| "conversation registry poisoned")?.contains(id))
+    }
+
     pub fn open(path: &Path) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         Self::with_connection(conn)
@@ -176,6 +226,8 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_commit TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_dir TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN conversation_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN conversation_seq INTEGER", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN execution_config TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN baseline TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN attachments TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
@@ -189,12 +241,15 @@ impl Store {
             "ALTER TABLE profile_models ADD COLUMN max_tokens INTEGER",
             [],
         );
+        crate::coordination::initialize(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            conversation_launches: Arc::new(Mutex::new(HashSet::new())),
+            workspace_owners: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
-    fn now_millis() -> i64 {
+    pub(crate) fn now_millis() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -239,11 +294,60 @@ impl Store {
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
         conn.execute(
-            "UPDATE tasks SET conversation_id = ?2 WHERE id = ?1",
+            "UPDATE tasks SET conversation_seq = CASE
+                WHEN conversation_id IS ?2 AND conversation_seq IS NOT NULL THEN conversation_seq
+                ELSE COALESCE((SELECT MAX(conversation_seq) FROM tasks WHERE conversation_id=?2),0)+1 END,
+                conversation_id = ?2 WHERE id = ?1",
             params![task_id, conversation_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM runtime_bindings WHERE task_id=?1 AND conversation_id!=?2",
+            params![task_id,conversation_id]).map_err(|e| e.to_string())?;
+        crate::coordination::refresh_binding(&conn, task_id)?;
         Ok(())
+    }
+
+    pub(crate) fn ensure_conversation(&self, task_id: &str) -> Result<String, String> {
+        let row = self.get_task(task_id)?.ok_or("会话不存在")?;
+        if let Some(id) = row.conversation_id.filter(|id| !id.is_empty()) {
+            return Ok(id);
+        }
+        let mut turns = self.session_tasks(task_id)?;
+        turns.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        let id = turns.first().ok_or("会话没有任务")?.id.clone();
+        let mut conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (index, turn) in turns.into_iter().enumerate() {
+            tx.execute(
+                "UPDATE tasks SET conversation_id = ?2, conversation_seq=?3 WHERE id = ?1 AND conversation_id IS NULL",
+                params![turn.id, id, index as i64 + 1],
+            ).map_err(|e| e.to_string())?;
+            crate::coordination::refresh_binding(&tx, &turn.id)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    // Hold an owned reservation across process startup; never hold a MutexGuard across await.
+    pub(crate) fn claim_conversation(&self, id: &str) -> Result<ConversationLaunch, String> {
+        let guard = self.claim_conversation_mutation(id)?;
+        let running = self.conn.lock().map_err(|_| "store poisoned")?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE conversation_id=?1 AND status='running')",
+            params![id], |row| row.get::<_, bool>(0)
+        ).map_err(|e| e.to_string())?;
+        if running {
+            return Err("当前会话已有执行者运行中，请等待结束或停止后再接力".into());
+        }
+        Ok(guard)
+    }
+
+    pub(crate) fn claim_conversation_mutation(&self, id: &str) -> Result<ConversationLaunch, String> {
+        let mut launches = self.conversation_launches.lock().map_err(|_| "conversation registry poisoned")?;
+        if launches.contains(id) {
+            return Err("当前会话正在启动或变更，请稍后重试".into());
+        }
+        launches.insert(id.to_string());
+        Ok(ConversationLaunch { id: id.to_string(), launches: self.conversation_launches.clone() })
     }
 
     /// 落档附件路径列表（JSON 数组）。
@@ -275,6 +379,7 @@ impl Store {
             params![task_id, session_id],
         )
         .map_err(|e| e.to_string())?;
+        crate::coordination::refresh_binding(&conn, task_id)?;
         Ok(())
     }
 
@@ -284,6 +389,11 @@ impl Store {
         let _ = conn.execute(
             "UPDATE tasks SET status = ?2, exit_code = ?3, finished_at = ?4 WHERE id = ?1",
             params![task_id, status, exit_code, Self::now_millis()],
+        );
+        let _ = crate::coordination::refresh_binding(&conn, task_id);
+        let _ = conn.execute(
+            "UPDATE context_deliveries SET status = ?2, finished_at = ?3 WHERE task_id = ?1",
+            params![task_id, status, Self::now_millis()],
         );
     }
 
@@ -305,7 +415,8 @@ impl Store {
         let mut stmt = conn
             .prepare_cached(
                 "INSERT INTO task_events (task_id, seq, event)
-                 SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2 FROM task_events WHERE task_id = ?1",
+                 SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2 FROM task_events WHERE task_id = ?1
+                 HAVING EXISTS (SELECT 1 FROM tasks WHERE id = ?1)",
             )
             .map_err(|e| e.to_string())?;
         stmt.execute(params![task_id, stamped])
@@ -351,32 +462,12 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
-                        created_at, finished_at
+                        created_at, finished_at, conversation_seq, execution_config
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![limit], |row| {
-                Ok(TaskRow {
-                    id: row.get(0)?,
-                    harness: row.get(1)?,
-                    cwd: row.get(2)?,
-                    prompt: row.get(3)?,
-                    mode: row.get(4)?,
-                    model: row.get(5)?,
-                    project_id: row.get(6)?,
-                    base_branch: row.get(7)?,
-                    worktree_dir: row.get(8)?,
-                    session_id: row.get(9)?,
-                    conversation_id: row.get(10)?,
-                    attachments: row.get(11)?,
-                    baseline: row.get(12)?,
-                    status: row.get(13)?,
-                    exit_code: row.get(14)?,
-                    created_at: row.get(15)?,
-                    finished_at: row.get(16)?,
-                })
-            })
+            .query_map(params![limit], task_from_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -388,31 +479,11 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
-                        created_at, finished_at
+                        created_at, finished_at, conversation_seq, execution_config
                  FROM tasks WHERE id = ?1",
             )
             .map_err(|e| e.to_string())?;
-        stmt.query_row(params![task_id], |row| {
-            Ok(TaskRow {
-                id: row.get(0)?,
-                harness: row.get(1)?,
-                cwd: row.get(2)?,
-                prompt: row.get(3)?,
-                mode: row.get(4)?,
-                model: row.get(5)?,
-                project_id: row.get(6)?,
-                base_branch: row.get(7)?,
-                worktree_dir: row.get(8)?,
-                session_id: row.get(9)?,
-                conversation_id: row.get(10)?,
-                attachments: row.get(11)?,
-                baseline: row.get(12)?,
-                status: row.get(13)?,
-                exit_code: row.get(14)?,
-                created_at: row.get(15)?,
-                finished_at: row.get(16)?,
-            })
-        })
+        stmt.query_row(params![task_id], task_from_row)
         .optional()
         .map_err(|e| e.to_string())
     }
@@ -525,39 +596,37 @@ impl Store {
 
     /// 删除任务及其全部事件（会话记录一并清除，不可恢复）。
     pub fn delete_task(&self, id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
-        conn.execute("DELETE FROM task_events WHERE task_id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        let changed = conn
-            .execute("DELETE FROM tasks WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        if changed == 0 {
-            return Err(format!("任务不存在：{id}"));
-        }
-        Ok(())
+        self.delete_tasks(&[id.to_owned()])
     }
 
     pub fn session_tasks(&self, task_id: &str) -> Result<Vec<TaskRow>, String> {
         let row = self
             .get_task(task_id)?
             .ok_or_else(|| format!("unknown task: {task_id}"))?;
-        if let Some(session) = row.session_id.as_deref().filter(|s| !s.is_empty()) {
-            Ok(self
-                .list_tasks(i64::MAX)?
-                .into_iter()
-                .filter(|turn| {
-                    turn.harness == row.harness && turn.session_id.as_deref() == Some(session)
-                })
-                .collect())
+        let cid = row.conversation_id.as_deref().filter(|id| !id.is_empty());
+        let session = row.session_id.as_deref().filter(|id| !id.is_empty());
+        if cid.is_none() && session.is_none() { return Ok(vec![row]); }
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let filter = if cid.is_some() { "conversation_id=?1" } else { "harness=?2 AND session_id=?1" };
+        let sql = format!("SELECT id,harness,cwd,prompt,mode,model,project_id,base_branch,worktree_dir,
+            session_id,conversation_id,attachments,baseline,status,exit_code,created_at,finished_at,conversation_seq,execution_config
+            FROM tasks WHERE {filter} ORDER BY created_at DESC,id DESC");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = if let Some(id) = cid {
+            stmt.query_map(params![id], task_from_row)
         } else {
-            Ok(vec![row])
-        }
+            stmt.query_map(params![session, row.harness], task_from_row)
+        }.map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())
     }
 
     pub fn delete_tasks(&self, ids: &[String]) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         for id in ids {
+            let blocked = tx.query_row("SELECT EXISTS(SELECT 1 FROM recovery_blocks WHERE task_id=?1)",
+                params![id],|r|r.get::<_,bool>(0)).map_err(|e| e.to_string())?;
+            if blocked { return Err("上次运行异常中断，请先确认旧执行者结束并核对工作区后再删除".into()); }
             tx.execute("DELETE FROM task_events WHERE task_id = ?1", params![id])
                 .map_err(|e| e.to_string())?;
             let changed = tx
@@ -566,6 +635,7 @@ impl Store {
             if changed == 0 {
                 return Err(format!("任务不存在：{id}"));
             }
+            crate::coordination::remove_task_metadata(&tx, id)?;
         }
         tx.commit().map_err(|e| e.to_string())
     }
