@@ -91,11 +91,9 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
   if (t === "tool_execution_start") {
     const tool = String(ev.toolName ?? "tool");
     const args = ev.args as Record<string, unknown> | undefined;
-    // bash 命令透明：展示命令本身而非 JSON 包装，长度放宽保证可读
-    const detail =
-      tool === "bash" && typeof args?.command === "string"
-        ? String(args.command).slice(0, 800)
-        : JSON.stringify(args ?? {}, null, 2).slice(0, 400);
+    // 工具入参摘要投影（抄 ZCode buildToolTranscriptProjection）：
+    // 每工具 ≤4 行定制摘要；敏感字段遮蔽；路径类收进标题不占正文
+    const detail = summarizeToolInput(tool, args);
     return {
       type: "tool_use",
       tool,
@@ -225,3 +223,66 @@ export type LiveTask = {
   /** deck 运行时的 todo 清单（todo_write 工具维护） */
   todos?: { content: string; status: string }[];
 };
+
+
+// ── 工具入参摘要投影（ZCode app-tool-transcript.ts 的移植）──
+
+const SENSITIVE_KEY_PATTERN = /token|secret|password|api[_-]?key|authorization|credential|cookie/i;
+const MAX_SUMMARY_LINES = 4;
+const MAX_SUMMARY_WIDTH = 100;
+
+function previewValue(key: string, value: unknown): string {
+  if (SENSITIVE_KEY_PATTERN.test(key)) return "[redacted]";
+  if (typeof value === "string") return previewText(value);
+  if (value === null || value === undefined) return "null";
+  const s = JSON.stringify(value) ?? String(value);
+  return previewText(s);
+}
+
+function previewText(value: string): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > 80 ? oneLine.slice(0, 77) + "…" : oneLine;
+}
+
+function fieldLine(record: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in record)) return undefined;
+  return `${key}: ${previewValue(key, record[key])}`;
+}
+
+function compactLines(lines: Array<string | undefined>): string {
+  return lines
+    .filter((l): l is string => Boolean(l))
+    .map((l) => (l.length > MAX_SUMMARY_WIDTH ? l.slice(0, MAX_SUMMARY_WIDTH - 1) + "…" : l))
+    .slice(0, MAX_SUMMARY_LINES)
+    .join("\\n");
+}
+
+/** 逐工具入参摘要：模型工具调用在对话流里一眼可读（ZCode 同款语义） */
+export function summarizeToolInput(toolName: string, input: unknown): string {
+  const record = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const t = toolName.toLowerCase();
+  if (t === "bash" && typeof record.command === "string") {
+    return String(record.command).slice(0, 800); // bash 命令保持全量透明
+  }
+  if (t === "read") return compactLines([fieldLine(record, "offset"), fieldLine(record, "limit")]);
+  if (t === "write") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "offset"), fieldLine(record, "limit")]);
+  if (t === "edit") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "replace_all")]);
+  if (t === "grep") return compactLines([fieldLine(record, "pattern"), fieldLine(record, "path"), fieldLine(record, "glob")]);
+  if (t === "find" || t === "glob") return compactLines([fieldLine(record, "pattern"), fieldLine(record, "path")]);
+  if (t === "webfetch" || t === "webfetchtool") return compactLines([fieldLine(record, "url"), fieldLine(record, "prompt")]);
+  if (t === "todo_write" || t === "todowrite") {
+    const todos = Array.isArray(record.todos) ? record.todos : [];
+    const inProgress = todos.find(
+      (todo) => (todo as { status?: string })?.status === "in_progress",
+    ) as { content?: string } | undefined;
+    return compactLines([
+      `todos: ${todos.length}`,
+      inProgress?.content ? `in_progress: ${previewText(inProgress.content)}` : undefined,
+    ]);
+  }
+  // 通用：前 4 个字段，敏感遮蔽 + 值预览
+  const lines = Object.entries(record).slice(0, MAX_SUMMARY_LINES).map(
+    ([key, value]) => `${key}: ${previewValue(key, value)}`,
+  );
+  return lines.length ? lines.join("\\n") : "(无参数)";
+}
