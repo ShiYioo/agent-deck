@@ -61,7 +61,9 @@ export function errorEvent(raw: string): AgentEvent {
     ? "auth"
     : /429|quota|credit|balance|rate.limit|余额|额度|限流|1113/i.test(raw)
       ? "quota"
-      : "other";
+      : /deprecat|unavailable|model_not_found|no such model|不支持该模型/i.test(raw)
+        ? "model"
+        : "other";
   return { type: "error", kind, message };
 }
 

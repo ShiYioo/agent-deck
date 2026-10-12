@@ -263,7 +263,10 @@ mod tests {
     #[test]
     fn policy_budget_and_allowlist_are_enforced() {
         let mut p = ContextPolicy::default();
-        p.allowed_harnesses = vec!["codex".into()];
+        #[allow(clippy::field_reassign_with_default)]
+        {
+            p.allowed_harnesses = vec!["codex".into()];
+        }
         assert!(p.authorize("opencode").is_err());
         assert!(p.authorize("codex").is_ok());
         assert_eq!(p.available("hello"), 16_379);

@@ -33,6 +33,7 @@ async fn resolve_program(program: &str) -> Result<(PathBuf, Vec<String>), String
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn(
     harness: Harness,
     mode: &Option<String>,
@@ -57,16 +58,19 @@ pub async fn spawn(
             "contextArchive":context_archive,
             "effort":effort,
         });
-        (node, vec![adapter.to_string_lossy().into_owned(), params.to_string()])
+        (
+            node,
+            vec![adapter.to_string_lossy().into_owned(), params.to_string()],
+        )
     } else {
         let (program, mut prefix) = resolve_program(harness.program()).await?;
         prefix.extend(harness.build_execution_args(
-        mode.as_deref(),
-        model.as_deref(),
-        prompt,
-        resume_session_id,
-        attachments,
-        effort,
+            mode.as_deref(),
+            model.as_deref(),
+            prompt,
+            resume_session_id,
+            attachments,
+            effort,
         ));
         (program, prefix)
     };

@@ -122,7 +122,9 @@ pub async fn run_pi_task(
 
     use command_group::AsyncCommandGroup;
     let mut child = command
-        .group().kill_on_drop(true).spawn()
+        .group()
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| format!("启动 deck-agent 失败：{e}"))?;
 
     let mut stdin = child.inner().stdin.take().ok_or("no stdin")?;

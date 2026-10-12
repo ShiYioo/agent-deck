@@ -170,6 +170,7 @@ pub fn cancel_collaboration(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_collaboration(
     app: AppHandle,
     store: State<'_, Store>,

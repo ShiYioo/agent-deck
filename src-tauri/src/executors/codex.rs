@@ -32,12 +32,18 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
 
     match kind {
         "agentdeck.tool.completed" => {
-            let tool = field_str(obj, &["tool"]).unwrap_or("shared_history").to_string();
+            let tool = field_str(obj, &["tool"])
+                .unwrap_or("shared_history")
+                .to_string();
             events.push(AgentEvent::ToolUse {
-                tool: tool.clone(), detail: obj["args"].to_string(), args: Some(obj["args"].clone()),
+                tool: tool.clone(),
+                detail: obj["args"].to_string(),
+                args: Some(obj["args"].clone()),
             });
             events.push(AgentEvent::ToolResult {
-                tool, ok: obj["ok"] == true, detail: obj["result"].to_string(),
+                tool,
+                ok: obj["ok"] == true,
+                detail: obj["result"].to_string(),
             });
         }
         "thread.started" | "session.started" => {

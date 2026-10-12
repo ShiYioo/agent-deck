@@ -1,8 +1,8 @@
 //! Durable public context metadata and conservative local execution ownership.
 use crate::store::Store;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::Path,
@@ -134,8 +134,12 @@ pub(crate) fn remove_task_metadata(conn: &Connection, task_id: &str) -> Result<(
         [],
     )
     .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM execution_overrides WHERE run_id NOT IN
-        (SELECT id FROM graph_runs UNION SELECT id FROM collaborations)", []).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM execution_overrides WHERE run_id NOT IN
+        (SELECT id FROM graph_runs UNION SELECT id FROM collaborations)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM settings WHERE key LIKE 'execution:%' AND key NOT LIKE 'execution:default:%'
         AND NOT EXISTS (SELECT 1 FROM tasks WHERE key LIKE 'execution:' || conversation_id || ':%')", [])
         .map_err(|e| e.to_string())?;
@@ -639,10 +643,11 @@ mod tests {
         f.task("a", "zcode", "done");
         let cwd = f.dir.to_str().unwrap();
         let lease = f.store.claim_workspace(cwd, "flow").unwrap();
-        assert!(f
-            .store
-            .claim_workspace(f.dir.join(".").to_str().unwrap(), "manual")
-            .is_err());
+        assert!(
+            f.store
+                .claim_workspace(f.dir.join(".").to_str().unwrap(), "manual")
+                .is_err()
+        );
         assert!(f.store.authorize_workflow(cwd, "flow").is_ok());
         assert!(f.store.authorize_workflow(cwd, "other").is_err());
         drop(lease);
@@ -672,23 +677,26 @@ mod tests {
         let info = f.store.conversation_info("a").unwrap();
         assert_eq!(info.recovery_task_ids, vec!["a"]);
         assert_eq!(info.deliveries[0]["status"], "interrupted");
-        assert!(f
-            .store
-            .claim_workspace(f.dir.to_str().unwrap(), "manual")
-            .is_err());
-        assert!(f
-            .store
-            .get_collaboration("flow")
-            .unwrap()
-            .unwrap()
-            .contains("needs_attention"));
+        assert!(
+            f.store
+                .claim_workspace(f.dir.to_str().unwrap(), "manual")
+                .is_err()
+        );
+        assert!(
+            f.store
+                .get_collaboration("flow")
+                .unwrap()
+                .unwrap()
+                .contains("needs_attention")
+        );
         assert!(f.store.delete_task("a").is_err());
         assert!(f.store.get_task("a").unwrap().is_some());
         f.store.confirm_recovery("a").unwrap();
-        assert!(f
-            .store
-            .claim_workspace(f.dir.to_str().unwrap(), "manual")
-            .is_ok());
+        assert!(
+            f.store
+                .claim_workspace(f.dir.to_str().unwrap(), "manual")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -703,10 +711,11 @@ mod tests {
         assert_eq!(state.version, 1);
         assert!(f.store.update_shared_state("a", 0, "覆盖目标", "").is_err());
         assert_eq!(f.store.shared_state("a").unwrap().notes, "不修改支付模块");
-        assert!(f
-            .store
-            .update_shared_state("a", 1, &"x".repeat(32_001), "")
-            .is_err());
+        assert!(
+            f.store
+                .update_shared_state("a", 1, &"x".repeat(32_001), "")
+                .is_err()
+        );
     }
 
     #[test]

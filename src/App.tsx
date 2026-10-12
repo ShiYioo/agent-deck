@@ -60,6 +60,7 @@ import {
   IconKey,
   IconDiff,
   IconStop,
+  IconInfo,
 } from "./components/icons";
 
 const emptyEvents: LogItem[] = [];
@@ -766,6 +767,9 @@ export default function App() {
   const hasQuotaError = selectedEvents.some(
     ({ event: e }) => e.type === "error" && e.kind === "quota",
   );
+  const hasModelError = selectedEvents.some(
+    ({ event: e }) => e.type === "error" && e.kind === "model",
+  );
   // 运行中也可查看（实时轮询）；完成后为静态快照
   // 实时 Diff watcher：弹层打开且任务运行中时监听工作目录，关闭/结束即停
   const diffTaskId = diff?.taskId ?? null;
@@ -1154,6 +1158,12 @@ export default function App() {
                     <IconKey size={13} />
                      {selectedHarness === "deck" ? "检查模型配置" : "唤起登录"}
                   </button>
+                )}
+                {hasModelError && !selectedRunning && (
+                  <span className="flex items-center gap-1.5 rounded-full border border-stone-300 bg-stone-100 px-3 py-1 text-xs text-stone-600">
+                    <IconInfo size={13} />
+                    当前模型已不可用（上游已废弃/下线）。更换模型：输入框上方「模型」下拉里重新选择即可
+                  </span>
                 )}
                 {canShowDiff && (
                   <button

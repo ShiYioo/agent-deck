@@ -3,8 +3,8 @@
 //! Connection 不是 Sync，用 Mutex 包一层；所有方法都是同步的，
 //! 由调用方（tauri command / runner）自行决定是否放进异步上下文。
 
-use std::path::Path;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -80,13 +80,27 @@ pub struct TaskRow {
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     Ok(TaskRow {
-        id: row.get(0)?, harness: row.get(1)?, cwd: row.get(2)?, prompt: row.get(3)?,
-        mode: row.get(4)?, model: row.get(5)?, project_id: row.get(6)?,
-        base_branch: row.get(7)?, worktree_dir: row.get(8)?, session_id: row.get(9)?,
-        conversation_id: row.get(10)?, attachments: row.get(11)?, baseline: row.get(12)?,
-        status: row.get(13)?, exit_code: row.get(14)?, created_at: row.get(15)?, finished_at: row.get(16)?,
+        id: row.get(0)?,
+        harness: row.get(1)?,
+        cwd: row.get(2)?,
+        prompt: row.get(3)?,
+        mode: row.get(4)?,
+        model: row.get(5)?,
+        project_id: row.get(6)?,
+        base_branch: row.get(7)?,
+        worktree_dir: row.get(8)?,
+        session_id: row.get(9)?,
+        conversation_id: row.get(10)?,
+        attachments: row.get(11)?,
+        baseline: row.get(12)?,
+        status: row.get(13)?,
+        exit_code: row.get(14)?,
+        created_at: row.get(15)?,
+        finished_at: row.get(16)?,
         conversation_seq: row.get(17)?,
-        execution_config: row.get::<_, Option<String>>(18)?.and_then(|raw| serde_json::from_str(&raw).ok()),
+        execution_config: row
+            .get::<_, Option<String>>(18)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
     })
 }
 
@@ -127,11 +141,17 @@ impl Store {
 
     pub(crate) fn claim_branch_launch(&self, task_id: &str) -> Result<ConversationLaunch, String> {
         let id = self.ensure_conversation(task_id)?;
-        let mut launches = self.conversation_launches.lock().map_err(|_| "conversation registry poisoned")?;
+        let mut launches = self
+            .conversation_launches
+            .lock()
+            .map_err(|_| "conversation registry poisoned")?;
         if !launches.insert(id.clone()) {
             return Err("会话正在派发或删除，请等待当前操作结束".into());
         }
-        let guard = ConversationLaunch { id: id.clone(), launches: self.conversation_launches.clone() };
+        let guard = ConversationLaunch {
+            id: id.clone(),
+            launches: self.conversation_launches.clone(),
+        };
         drop(launches);
         if self.get_task(&id)?.is_none() {
             return Err("会话根任务已删除，不能派发隔离任务".into());
@@ -141,7 +161,11 @@ impl Store {
 
     /// 打开（或创建）数据库并确保表结构存在。
     pub(crate) fn conversation_mutating(&self, id: &str) -> Result<bool, String> {
-        Ok(self.conversation_launches.lock().map_err(|_| "conversation registry poisoned")?.contains(id))
+        Ok(self
+            .conversation_launches
+            .lock()
+            .map_err(|_| "conversation registry poisoned")?
+            .contains(id))
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -301,8 +325,11 @@ impl Store {
             params![task_id, conversation_id],
         )
         .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM runtime_bindings WHERE task_id=?1 AND conversation_id!=?2",
-            params![task_id,conversation_id]).map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM runtime_bindings WHERE task_id=?1 AND conversation_id!=?2",
+            params![task_id, conversation_id],
+        )
+        .map_err(|e| e.to_string())?;
         crate::coordination::refresh_binding(&conn, task_id)?;
         Ok(())
     }
@@ -331,23 +358,38 @@ impl Store {
     // Hold an owned reservation across process startup; never hold a MutexGuard across await.
     pub(crate) fn claim_conversation(&self, id: &str) -> Result<ConversationLaunch, String> {
         let guard = self.claim_conversation_mutation(id)?;
-        let running = self.conn.lock().map_err(|_| "store poisoned")?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE conversation_id=?1 AND status='running')",
-            params![id], |row| row.get::<_, bool>(0)
-        ).map_err(|e| e.to_string())?;
+        let running = self
+            .conn
+            .lock()
+            .map_err(|_| "store poisoned")?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE conversation_id=?1 AND status='running')",
+                params![id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?;
         if running {
             return Err("当前会话已有执行者运行中，请等待结束或停止后再接力".into());
         }
         Ok(guard)
     }
 
-    pub(crate) fn claim_conversation_mutation(&self, id: &str) -> Result<ConversationLaunch, String> {
-        let mut launches = self.conversation_launches.lock().map_err(|_| "conversation registry poisoned")?;
+    pub(crate) fn claim_conversation_mutation(
+        &self,
+        id: &str,
+    ) -> Result<ConversationLaunch, String> {
+        let mut launches = self
+            .conversation_launches
+            .lock()
+            .map_err(|_| "conversation registry poisoned")?;
         if launches.contains(id) {
             return Err("当前会话正在启动或变更，请稍后重试".into());
         }
         launches.insert(id.to_string());
-        Ok(ConversationLaunch { id: id.to_string(), launches: self.conversation_launches.clone() })
+        Ok(ConversationLaunch {
+            id: id.to_string(),
+            launches: self.conversation_launches.clone(),
+        })
     }
 
     /// 落档附件路径列表（JSON 数组）。
@@ -484,8 +526,8 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         stmt.query_row(params![task_id], task_from_row)
-        .optional()
-        .map_err(|e| e.to_string())
+            .optional()
+            .map_err(|e| e.to_string())
     }
 
     // ── 设置（键值对，如 API key） ──────────────────────────────
@@ -605,9 +647,15 @@ impl Store {
             .ok_or_else(|| format!("unknown task: {task_id}"))?;
         let cid = row.conversation_id.as_deref().filter(|id| !id.is_empty());
         let session = row.session_id.as_deref().filter(|id| !id.is_empty());
-        if cid.is_none() && session.is_none() { return Ok(vec![row]); }
+        if cid.is_none() && session.is_none() {
+            return Ok(vec![row]);
+        }
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
-        let filter = if cid.is_some() { "conversation_id=?1" } else { "harness=?2 AND session_id=?1" };
+        let filter = if cid.is_some() {
+            "conversation_id=?1"
+        } else {
+            "harness=?2 AND session_id=?1"
+        };
         let sql = format!("SELECT id,harness,cwd,prompt,mode,model,project_id,base_branch,worktree_dir,
             session_id,conversation_id,attachments,baseline,status,exit_code,created_at,finished_at,conversation_seq,execution_config
             FROM tasks WHERE {filter} ORDER BY created_at DESC,id DESC");
@@ -616,17 +664,26 @@ impl Store {
             stmt.query_map(params![id], task_from_row)
         } else {
             stmt.query_map(params![session, row.harness], task_from_row)
-        }.map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())
+        }
+        .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     pub fn delete_tasks(&self, ids: &[String]) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|_| "store poisoned")?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         for id in ids {
-            let blocked = tx.query_row("SELECT EXISTS(SELECT 1 FROM recovery_blocks WHERE task_id=?1)",
-                params![id],|r|r.get::<_,bool>(0)).map_err(|e| e.to_string())?;
-            if blocked { return Err("上次运行异常中断，请先确认旧执行者结束并核对工作区后再删除".into()); }
+            let blocked = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM recovery_blocks WHERE task_id=?1)",
+                    params![id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if blocked {
+                return Err("上次运行异常中断，请先确认旧执行者结束并核对工作区后再删除".into());
+            }
             tx.execute("DELETE FROM task_events WHERE task_id = ?1", params![id])
                 .map_err(|e| e.to_string())?;
             let changed = tx

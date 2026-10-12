@@ -109,6 +109,7 @@ fn public_record(event: &Value) -> Option<Value> {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare(
     store: &Store,
     source_id: &str,
@@ -157,6 +158,7 @@ pub(crate) fn prepare_branch(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_execution(
     store: &Store,
     source_id: &str,
@@ -401,7 +403,7 @@ fn prepare_impl(
         archive: archive_guard,
         sync_event: Some(json!({
             "type":"status",
-            "text":format!("接力到 {harness} · {}（{} 轮）", if strategy == "delta" { "同步新增公开记录" } else { "同步公开原文" }, missing.len()),
+            "text":format!("上下文同步：已注入其他执行者的 {} 轮记录（{}）", missing.len(), if strategy == "delta" { "增量" } else { "全文" }),
             "context_sync": {
                 "strategy":strategy, "source_task_id":turns.last().map(|t| &t.id),
                 "resume_task_id":binding.map(|(_, task)| &task.id),
@@ -748,9 +750,9 @@ mod tests {
         assert!(path.exists());
         let outside = f.dir.join("outside.json");
         std::fs::write(&outside, "保留").unwrap();
-        assert!(remove_archives(&[outside.clone()], &f.dir.join("archive")).is_err());
+        assert!(remove_archives(std::slice::from_ref(&outside), &f.dir.join("archive")).is_err());
         assert!(outside.exists());
-        remove_archives(&[path.clone()], &f.dir.join("archive")).unwrap();
+        remove_archives(std::slice::from_ref(&path), &f.dir.join("archive")).unwrap();
         assert!(!path.exists());
     }
 }
