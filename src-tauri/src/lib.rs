@@ -978,7 +978,7 @@ async fn delete_task(
     if row.status == "running" {
         let _ = cancel_task(registry, task_id.clone());
         if row.harness == "deck" {
-            let _ = pi_command(pi_registry, task_id.clone(), "abort".into(), None);
+            let _ = pi_command(pi_registry, task_id.clone(), "abort".into(), None, None);
         }
     }
     await_stopped(&store, std::slice::from_ref(&task_id)).await?;
@@ -1006,7 +1006,13 @@ async fn delete_session(
     for turn in &turns {
         if turn.status == "running" {
             if turn.harness == "deck" {
-                pi_command(pi_registry.clone(), turn.id.clone(), "abort".into(), None)?;
+                pi_command(
+                    pi_registry.clone(),
+                    turn.id.clone(),
+                    "abort".into(),
+                    None,
+                    None,
+                )?;
             } else {
                 cancel_task(registry.clone(), turn.id.clone())?;
             }
@@ -1748,8 +1754,9 @@ fn pi_command(
     task_id: String,
     cmd: String,
     id: Option<String>,
+    answer: Option<String>,
 ) -> Result<(), String> {
-    pi_session::send_command(&pi_registry, &task_id, &cmd, id)
+    pi_session::send_command(&pi_registry, &task_id, &cmd, id, answer)
 }
 
 /// 前端 → Rust：读写设置（如 deck API key）。

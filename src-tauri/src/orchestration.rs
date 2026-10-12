@@ -188,7 +188,13 @@ pub fn list_graph_runs(store: State<'_, Store>, task_id: String) -> Result<Vec<G
 fn cancel_node(app: &AppHandle, node: &Node) {
     if let Some(id) = &node.task_id {
         let _ = crate::cancel_task(app.state::<TaskRegistry>(), id.clone());
-        let _ = pi_session::send_command(&app.state::<pi_session::PiRegistry>(), id, "abort", None);
+        let _ = pi_session::send_command(
+            &app.state::<pi_session::PiRegistry>(),
+            id,
+            "abort",
+            None,
+            None,
+        );
     }
 }
 

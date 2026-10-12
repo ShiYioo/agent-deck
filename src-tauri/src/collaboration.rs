@@ -133,7 +133,13 @@ pub fn review_approved(text: &str) -> bool {
 
 fn cancel_child(app: &AppHandle, id: &str) {
     let _ = crate::cancel_task(app.state::<TaskRegistry>(), id.to_string());
-    let _ = pi_session::send_command(&app.state::<pi_session::PiRegistry>(), id, "abort", None);
+    let _ = pi_session::send_command(
+        &app.state::<pi_session::PiRegistry>(),
+        id,
+        "abort",
+        None,
+        None,
+    );
 }
 
 #[tauri::command]

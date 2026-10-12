@@ -336,6 +336,7 @@ pub fn send_command(
     task_id: &str,
     cmd: &str,
     id: Option<String>,
+    answer: Option<String>,
 ) -> Result<(), String> {
     if !matches!(cmd, "approve" | "reject" | "abort") {
         return Err(format!("不支持的运行指令：{cmd}"));
@@ -349,6 +350,10 @@ pub fn send_command(
     let mut msg = serde_json::json!({ "cmd": cmd });
     if let Some(id) = id {
         msg["id"] = serde_json::json!(id);
+    }
+    // 选项式提问的答案（ask_user_question 选中项；普通审批为空）
+    if let Some(answer) = answer {
+        msg["answer"] = serde_json::json!(answer);
     }
     sender
         .send(serde_json::to_string(&msg).unwrap())
@@ -505,14 +510,14 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         registry.insert("task".into(), tx);
         for id in ["first", "second"] {
-            send_command(&registry, "task", "approve", Some(id.into())).unwrap();
+            send_command(&registry, "task", "approve", Some(id.into()), None).unwrap();
             let cmd: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
             assert_eq!(cmd["id"], id);
         }
-        send_command(&registry, "task", "abort", None).unwrap();
+        send_command(&registry, "task", "abort", None, None).unwrap();
         assert!(registry.get("task").is_some());
         registry.remove("task");
-        assert!(send_command(&registry, "task", "abort", None).is_err());
+        assert!(send_command(&registry, "task", "abort", None, None).is_err());
     }
 
     #[test]
@@ -520,8 +525,8 @@ mod tests {
         let registry = PiRegistry::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
         registry.insert("task".into(), tx);
-        assert!(send_command(&registry, "task", "close", None).is_err());
-        assert!(send_command(&registry, "task", "approve", None).is_err());
+        assert!(send_command(&registry, "task", "close", None, None).is_err());
+        assert!(send_command(&registry, "task", "approve", None, None).is_err());
         assert!(rx.try_recv().is_err());
         assert!(registry.get("task").is_some());
     }

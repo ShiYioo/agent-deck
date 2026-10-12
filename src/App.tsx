@@ -1332,9 +1332,38 @@ export default function App() {
             ))}
             </div>
 
-            {/* 审批卡片：deck 运行时 approved 模式的工具授权 */}
+            {/* 审批卡片：工具授权；ask_user_question 渲染为选项式提问（抄 ZCode AskUserQuestion） */}
             {approval && selectedRunning && (
               <div className="anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
+                {"__question" in approval.args ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-xs font-medium text-amber-800">
+                      <span className="rounded bg-amber-200/70 px-1.5 py-0.5 font-mono text-[10px]">
+                        {(approval.args.__question as { header?: string }).header ?? "问题"}
+                      </span>
+                      {(approval.args.__question as { question?: string }).question}
+                    </div>
+                    {((approval.args.__question as { options?: { label: string; description?: string; preview?: string }[] }).options ?? []).map((opt) => (
+                      <button
+                        key={opt.label}
+                        onClick={() =>
+                          invokePiCommand(approval.taskId, "approve", approval.id, opt.label)
+                            .then(() => clearApproval(approval.taskId))
+                            .catch((e) => setActionError(String(e)))
+                        }
+                        className="block w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-left transition-colors hover:border-amber-400 hover:bg-amber-50/50"
+                      >
+                        <div className="text-xs font-medium text-stone-700">{opt.label}</div>
+                        {opt.description && <div className="mt-0.5 text-[11px] text-stone-500">{opt.description}</div>}
+                        {opt.preview && (
+                          <pre className="mt-1 max-h-40 overflow-auto rounded bg-stone-50 p-2 font-mono text-[10px] text-stone-600">{opt.preview}</pre>
+                        )}
+                      </button>
+                    ))}
+                    <div className="text-[11px] text-stone-400">Agent 正在等待你的选择（也可在输入框直接回复，或跳过此问题）</div>
+                  </div>
+                ) : (
+                  <>
                 <div className="text-xs font-medium text-amber-800">
                   Agent 请求执行工具：<span className="font-mono">{approval.tool}</span>
                 </div>
@@ -1364,6 +1393,8 @@ export default function App() {
                   </button>
                   <span className="text-stone-400">执行将阻塞等待你的决定</span>
                 </div>
+                  </>
+                )}
               </div>
             )}
 

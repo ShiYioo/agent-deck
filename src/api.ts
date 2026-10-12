@@ -273,9 +273,10 @@ export async function invokePiCommand(
   taskId: string,
   cmd: string,
   id?: string,
+  answer?: string,
 ): Promise<void> {
   if (!inTauri) browserStub("审批操作");
-  await invoke("pi_command", { taskId, cmd, id: id ?? null });
+  await invoke("pi_command", { taskId, cmd, id: id ?? null, answer: answer ?? null });
 }
 
 export async function getSetting(key: string): Promise<string | null> {

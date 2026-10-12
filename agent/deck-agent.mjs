@@ -279,6 +279,7 @@ function buildTools(mode, cwd) {
     SWITCH_MODEL_TOOL,
     WEBFETCH_TOOL,
     TODO_TOOL,
+    ASK_USER_TOOL,
     LIST_MODELS_TOOL,
   ];
   // 权限门：approved 模式下全部工具（含委派）执行前经 UI 审批
@@ -552,6 +553,77 @@ const WEBFETCH_TOOL = {
   },
 };
 
+/** 选项式提问（抄 ZCode AskUserQuestion 契约）：关键分叉点让用户选，复用审批通道 */
+const ASK_USER_TOOL = {
+  name: "ask_user_question",
+  description:
+    "向用户提出一个需要决策的澄清问题（选项式）。当任务存在多个合理方向、影响范围大的取舍、或信息不足以继续时使用；" +
+    "不要用它确认显而易见的事。选项必须互斥且覆盖主要可能；用户始终可以选'其他'自由输入。" +
+    "options 每项：label（1-5 词）、description（选它的后果/取舍）、preview（可选，聚焦时展示的代码片段或方案对比）。",
+  parameters: {
+    type: "object",
+    properties: {
+      question: { type: "string", description: "完整的问题，清晰具体，以问号结尾" },
+      header: { type: "string", description: "极短的标签（≤12 字符），如「认证方案」「库选择」" },
+      options: {
+        type: "array",
+        minItems: 2,
+        maxItems: 4,
+        description: "2-4 个互斥选项；不要包含「其他」，系统自动提供",
+        items: {
+          type: "object",
+          properties: {
+            label: { type: "string", description: "选项显示文本（1-5 词）" },
+            description: { type: "string", description: "选此项意味着什么（取舍/影响）" },
+            preview: { type: "string", description: "可选：聚焦时展示的预览（代码片段/方案示意）" },
+          },
+          required: ["label", "description"],
+        },
+      },
+      multiSelect: { type: "boolean", description: "true = 允许多选（选项不互斥时）", default: false },
+    },
+    required: ["question", "header", "options"],
+  },
+  execute: async (toolCallId, args, signal) => {
+    const id = toolCallId || randomUUID();
+    const answer = await new Promise((resolve) => {
+      const onAbort = () => resolve(null);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      pendingApproval = {
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        info: { id, tool: "ask_user_question", args },
+      };
+      emit({
+        type: "deck_approval_request",
+        id,
+        tool: "ask_user_question",
+        args: {
+          __question: {
+            question: String(args?.question ?? ""),
+            header: String(args?.header ?? "问题"),
+            options: (Array.isArray(args?.options) ? args.options : []).slice(0, 4),
+            multiSelect: args?.multiSelect === true,
+          },
+          ...(args ?? {}),
+        },
+      });
+    });
+    pendingApproval = null;
+    if (answer === null || answer === false) {
+      return { content: [{ type: "text", text: "用户未作选择（跳过/中止）" }], isError: true };
+    }
+    // 审批通道回传布尔；问题答案经 pi_command 的自定义 payload 传递（answer 字段）
+    const text =
+      typeof answer === "object" && answer?.choice
+        ? `用户选择：${answer.choice}`
+        : "用户已确认继续";
+    return { content: [{ type: "text", text }] };
+  },
+};
+
 const TODO_TOOL = {
   name: "todo_write",
   description:
@@ -567,6 +639,7 @@ const TODO_TOOL = {
           properties: {
             content: { type: "string" },
             status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+            priority: { type: "string", enum: ["high", "medium", "low"], description: "优先级（默认 medium）" },
           },
           required: ["content", "status"],
         },
@@ -912,7 +985,8 @@ async function handle(msg) {
     case "approve": {
       if (pendingApproval?.resolve && pendingApproval.info.id === msg.id) {
         deckEvent("approval_decided", { id: msg.id, approved: true });
-        pendingApproval.resolve(true);
+        // 选项式提问：answer = 用户点的选项 label
+        pendingApproval.resolve(msg.answer ? { choice: String(msg.answer) } : true);
       }
       break;
     }
