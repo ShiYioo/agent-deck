@@ -1830,8 +1830,22 @@ fn discover_zcode_models() -> Vec<String> {
             }
         }
         if let Some(models) = providers[pid].get("models").and_then(|m| m.as_object()) {
+            // 家名：builtin: 前缀转可读（bigmodel-coding-plan → Bigmodel Coding Plan）
+            let family = pid
+                .trim_start_matches("builtin:")
+                .split('-')
+                .map(|w| {
+                    let mut ch = w.chars();
+                    match ch.next() {
+                        Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             for mid in models.keys() {
-                out.push(format!("{pid}/{mid}"));
+                // 制表符三段：value<TAB>组名<TAB>模型名
+                out.push(format!("{pid}/{mid}	{family}	{mid}"));
             }
         }
     }

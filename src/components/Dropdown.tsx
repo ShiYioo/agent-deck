@@ -10,6 +10,8 @@ export type DropdownOption = {
   label: string;
   /** 小徽章（如「免费」），渲染在标签右侧 */
   tag?: string;
+  /** 显式分组名（优先于 groupBy 回调推导） */
+  group?: string;
 };
 
 /** Portaled menu with viewport-aware positioning and interruptible presence. */
@@ -126,7 +128,7 @@ export function Dropdown({
     if (!groupBy) return null;
     const map = new Map<string, DropdownOption[]>();
     for (const o of filtered) {
-      const g = groupBy(o.value, o.label) || "其他";
+      const g = o.group || groupBy(o.value, o.label) || "其他";
       if (!map.has(g)) map.set(g, []);
       map.get(g)!.push(o);
     }

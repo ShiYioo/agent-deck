@@ -168,7 +168,8 @@ export const Composer = memo(function Composer({
 
   const modelOptionsFor = (agent: string): string[] => {
     if (agent === "deck") return deckOptions.map((o) => o.value);
-    if (agent === "zcode") return modelOptionsBy.zcode ?? [];
+    if (agent === "zcode")
+      return (modelOptionsBy.zcode ?? []).map((e) => e.split("	")[0]);
     const discoveredModels = modelOptionsBy[agent] ?? [];
     if (discoveredModels.length) return discoveredModels;
     return (MODEL_CATALOG[agent] ?? []).map((o) => o.value).filter(Boolean);
@@ -608,7 +609,12 @@ export const Composer = memo(function Composer({
         {/* codex/opencode/deck：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
          <ExecutionPicker harness={harness} value={{ model, effort }} allowInherit={false} taskId={executionScope}
            modelOptions={harness === "deck" ? deckOptions.map((o) => ({ value: o.value, label: `${o.group} · ${o.label}` }))
-             : harness === "zcode" ? (modelOptionsBy.zcode ?? []).map((value) => ({ value, label: value }))
+             : harness === "zcode"
+               ? (modelOptionsBy.zcode ?? []).map((entry) => {
+                   // Rust 发的三段：providerId/modelId<TAB>家名<TAB>模型名
+                   const [value, group, label] = entry.split("	");
+                   return { value, group: group || "ZCode", label: label || value };
+                 })
              : undefined}
            onChange={(config) => {
              if (config.model !== model) onModelChange(config.model ?? "");
