@@ -403,17 +403,6 @@ export default function App() {
       .then((d) => setCwd((cur) => cur || d))
       .catch((e) => setActionError(`加载工作目录失败：${String(e)}`));
   }, []);
-
-  useEffect(() => {
-    refreshHistory();
-    if (!inTauri) return; // 纯浏览器预览：无 IPC 桥，跳过事件监听
-    const unlisteners: Promise<UnlistenFn>[] = [
-      listen<{ taskId: string; event: AgentEvent }>("task-event", (e) => {
-        const { taskId, event } = e.payload;
-        if (deletedTasks.current.has(taskId)) return;
-        if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
-        enqueueUpdate({ taskId, item: { event, key: nextKey() } });
-
   // composer 会话偏好持久化：harness/mode/permission 重启后保持用户上次的选择
   const COMPOSER_PREF_KEYS = ["harness", "mode", "permission"] as const;
   useEffect(() => {
@@ -428,6 +417,17 @@ export default function App() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    refreshHistory();
+    if (!inTauri) return; // 纯浏览器预览：无 IPC 桥，跳过事件监听
+    const unlisteners: Promise<UnlistenFn>[] = [
+      listen<{ taskId: string; event: AgentEvent }>("task-event", (e) => {
+        const { taskId, event } = e.payload;
+        if (deletedTasks.current.has(taskId)) return;
+        if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
+        enqueueUpdate({ taskId, item: { event, key: nextKey() } });
+
 
       }),
       listen<{ taskId: string; code: number | null; status?: TaskRow["status"] }>("task-exit", (e) => {
