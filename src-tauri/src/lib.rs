@@ -139,17 +139,16 @@ async fn check_harness(
         }
     } else {
         let runner = Harness::parse(&harness)?;
-        match discovery::locate(runner) {
-            None => issues.push(format!(
+        if discovery::locate(runner).is_none() {
+            issues.push(format!(
                 "未找到 {}（已检查 PATH 与桌面版安装目录），请安装后重试",
                 runner.program()
-            )),
-            // 桌面版内置的 CLI 不在 PATH 上，且 `-p` 一次性模式下它解析不出模型
-            // （provider registry 为空，填它的 legacy 导入只挂在 standalone 发行版上）。
-            // Agent Deck 因此自动改走官方同款通道：app-server + ZCode Protocol，
-            // 由客户端在 session/create 里显式下发模型，不再要求安装独立 CLI。
-            Some(_) => {}
+            ));
         }
+        // 桌面版内置的 CLI 不在 PATH 上，且 `-p` 一次性模式下它解析不出模型
+        // （provider registry 为空，填它的 legacy 导入只挂在 standalone 发行版上）。
+        // Agent Deck 因此自动改走官方同款通道：app-server + ZCode Protocol，
+        // 由客户端在 session/create 里显式下发模型，不再要求安装独立 CLI。
     }
     Ok(HarnessHealth {
         ready: issues.is_empty(),
@@ -626,7 +625,7 @@ pub(crate) async fn start_task_impl(
         && !zcode_bundled
         && let Some(m) = model.as_deref().filter(|s| !s.is_empty())
     {
-        if let Err(e) = write_zcode_default_model(m) {
+        if let Err(e) = write_zcode_default_model(m, effort.as_deref()) {
             store.finish_task(&task_id, "failed", None);
             return Err(format!("应用 ZCode 模型失败：{e}"));
         }
@@ -1875,8 +1874,9 @@ fn discover_zcode_models() -> Vec<String> {
 }
 
 /// 把 ZCode 默认模型写入 personal 配置（官方 /model 的持久化字段）。
-/// model 形如 "providerId/modelId"；原子替换，保留其余字段。
-fn write_zcode_default_model(model: &str) -> Result<(), String> {
+/// model 形如 "providerId/modelId"；effort 写入 ModelSelection 的
+/// options.reasoningLevel（官方 schema 字段）。原子替换，保留其余字段。
+fn write_zcode_default_model(model: &str, effort: Option<&str>) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("无法定位家目录")?;
     let path = home.join(".zcode/v2/config.json");
     let (provider_id, model_id) = model
@@ -1886,10 +1886,14 @@ fn write_zcode_default_model(model: &str) -> Result<(), String> {
         &std::fs::read_to_string(&path).map_err(|e| format!("读取 ZCode 配置失败：{e}"))?,
     )
     .map_err(|e| format!("解析 ZCode 配置失败：{e}"))?;
-    cfg["defaultModelSelection"] = serde_json::json!({
+    let mut selection = serde_json::json!({
         "providerId": provider_id,
         "modelId": model_id,
     });
+    if let Some(level) = effort.filter(|s| !s.is_empty()) {
+        selection["options"] = serde_json::json!({ "reasoningLevel": level });
+    }
+    cfg["defaultModelSelection"] = selection;
     // 原子写：临时文件 + rename
     let tmp = path.with_extension("json.agentdeck-tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&cfg).unwrap_or_default())

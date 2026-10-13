@@ -224,6 +224,46 @@ fn opencode_models() -> Result<Vec<ModelCapability>, String> {
     )))
 }
 
+/// ZCode 能力目录：~/.zcode/v2/config.json 的 provider.<id>.models，
+/// 含 reasoning.variants（思考档位）。
+fn zcode_models() -> Vec<ModelCapability> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(home.join(".zcode/v2/config.json")) else {
+        return Vec::new();
+    };
+    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(providers) = cfg.get("provider").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (pid, provider) in providers {
+        let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        for (mid, model) in models {
+            let efforts = model
+                .pointer("/reasoning/variants")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            out.push(ModelCapability {
+                model: format!("{pid}/{mid}"),
+                efforts,
+                context_window: model.pointer("/limit/context").and_then(|v| v.as_u64()),
+            });
+        }
+    }
+    out
+}
+
 fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
     let cache = CATALOGS.get_or_init(Default::default);
     if let Some((time, values)) = cache.lock().map_err(|_| "模型目录锁错误")?.get(harness) {
@@ -261,6 +301,7 @@ fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
             serde_json::from_value(models["models"].clone()).map_err(|e| e.to_string())?
         }
         "opencode" => opencode_models()?,
+        "zcode" => zcode_models(),
         _ => Vec::new(),
     };
     cache
