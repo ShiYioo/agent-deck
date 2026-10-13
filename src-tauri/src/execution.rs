@@ -114,6 +114,70 @@ fn opencode_catalog(text: &str) -> Result<Vec<ModelCapability>, String> {
     Ok(catalog)
 }
 
+fn opencode_command(args: &[&str]) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "opencode"])
+            .args(args)
+            .creation_flags(0x0800_0000);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = std::process::Command::new("opencode");
+        c.args(args);
+        c
+    }
+}
+
+/// OpenCode 2 的纯文本目录：一行一个 `provider/model`。
+///
+/// 没有 variants / limit.context 可用，能力档位留空即可（前端会显示「不可配置」，
+/// 由 CLI 自己按模型默认档位执行）。
+fn opencode_catalog_plain(text: &str) -> Vec<ModelCapability> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.contains(char::is_whitespace)
+                && line
+                    .split_once('/')
+                    .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+        })
+        .map(|line| ModelCapability {
+            model: line.to_string(),
+            efforts: Vec::new(),
+            context_window: None,
+        })
+        .collect()
+}
+
+/// OpenCode 的模型目录。
+///
+/// 1.x 用 `models --verbose` 输出 NDJSON，带 variants / limit.context；
+/// 2.x 去掉了这个旗标（也没有 --json / --format），只给一行一个 `provider/model`
+/// 的纯文本，且未知旗标会直接报错退出。所以两条通道依次尝试，先成功的先用。
+fn opencode_models() -> Result<Vec<ModelCapability>, String> {
+    if let Ok(output) = catalog_output(opencode_command(&["models", "--verbose"])) {
+        if output.status.success() {
+            if let Ok(values) = opencode_catalog(&String::from_utf8_lossy(&output.stdout)) {
+                if !values.is_empty() {
+                    return Ok(values);
+                }
+            }
+        }
+    }
+    let output = catalog_output(opencode_command(&["models"]))
+        .map_err(|_| "OpenCode 模型能力查询失败".to_string())?;
+    if !output.status.success() {
+        return Err("OpenCode 模型能力查询失败".into());
+    }
+    Ok(opencode_catalog_plain(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
 fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
     let cache = CATALOGS.get_or_init(Default::default);
     if let Some((time, values)) = cache.lock().map_err(|_| "模型目录锁错误")?.get(harness) {
@@ -150,27 +214,7 @@ fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
                 .ok_or("Codex 未返回模型能力")?;
             serde_json::from_value(models["models"].clone()).map_err(|e| e.to_string())?
         }
-        "opencode" => {
-            #[cfg(windows)]
-            let command = {
-                use std::os::windows::process::CommandExt;
-                let mut c = std::process::Command::new("cmd");
-                c.args(["/C", "opencode", "models", "--verbose"])
-                    .creation_flags(0x0800_0000);
-                c
-            };
-            #[cfg(not(windows))]
-            let command = {
-                let mut c = std::process::Command::new("opencode");
-                c.args(["models", "--verbose"]);
-                c
-            };
-            let output = catalog_output(command)?;
-            if !output.status.success() {
-                return Err("OpenCode 模型能力查询失败".into());
-            }
-            opencode_catalog(&String::from_utf8_lossy(&output.stdout))?
-        }
+        "opencode" => opencode_models()?,
         _ => Vec::new(),
     };
     cache
@@ -494,6 +538,24 @@ mod tests {
         assert_eq!(values[0].efforts, vec!["high"]);
         assert_eq!(values[0].context_window, Some(32000));
         assert!(values[1].efforts.is_empty());
+    }
+    #[test]
+    fn plain_catalog_parses_v2_model_lines_and_skips_help_noise() {
+        // OpenCode 2 的 `models` 是纯文本：一行一个 provider/model。
+        // 未知旗标时 CLI 会把 usage 打到 stdout，这些提示行必须被忽略。
+        let values = opencode_catalog_plain(
+            "DESCRIPTION\n  List all available models\n\nopencode/mimo-v2.6-flash-free\nzhipuai-coding-plan/glm-5.3\nollama/qwen3.5:2b\n\n",
+        );
+        assert_eq!(
+            values.iter().map(|m| m.model.as_str()).collect::<Vec<_>>(),
+            vec![
+                "opencode/mimo-v2.6-flash-free",
+                "zhipuai-coding-plan/glm-5.3",
+                "ollama/qwen3.5:2b",
+            ]
+        );
+        assert!(values[0].efforts.is_empty());
+        assert_eq!(values[0].context_window, None);
     }
     #[test]
     fn explicit_default_clears_inheritance_and_unsupported_effort_is_rejected() {
