@@ -23,6 +23,45 @@ export function transferMode(source: string, mode: string | null, target: string
   return restricted ? "plan" : "default";
 }
 
+/** 各 harness 的权限模式目录。取值互不通用，切换 harness 时必须收敛。 */
+export const MODE_CATALOG: Record<string, { value: string; label: string }[]> = {
+  zcode: [
+    { value: "yolo", label: "完全访问" },
+    { value: "build", label: "编辑前确认" },
+    { value: "edit", label: "允许编辑" },
+    { value: "plan", label: "只读规划" },
+  ],
+  codex: [
+    { value: "full", label: "完全访问" },
+    { value: "write", label: "沙箱内写入" },
+    { value: "readonly", label: "只读" },
+  ],
+  opencode: [
+    { value: "default", label: "完全访问" },
+    { value: "plan", label: "只读规划（plan）" },
+  ],
+  deck: [
+    { value: "default", label: "标准执行" },
+    { value: "plan", label: "计划模式（只读出方案）" },
+    { value: "goal", label: "目标模式（目标跨轮持续）" },
+  ],
+};
+
+/**
+ * 把 mode 收敛到 `target` harness 的合法取值。
+ *
+ * mode 是跨 harness 共用的一个状态，而各 harness 的取值完全不重叠（zcode 的 yolo、
+ * codex 的 full、opencode/deck 的 default…）。恢复持久化设置或切换 harness 时若不收敛，
+ * Dropdown 会因为找不到匹配项而直接显示原始字符串（例如非 zcode harness 下显示裸的
+ * "yolo"），并配上「完全访问」的警示图标，看起来像是个坏档位。
+ */
+export function normalizeMode(target: string, mode: string | null | undefined): string {
+  const catalog = MODE_CATALOG[target];
+  if (!catalog) return mode ?? "";
+  if (mode && catalog.some((m) => m.value === mode)) return mode;
+  return catalog[0].value;
+}
+
 export function groupSessions(tasks: TaskRow[]): SessionGroup[] {
   const groups = new Map<string, SessionGroup>();
   for (const task of tasks) {

@@ -12,6 +12,7 @@ import { IconFolder } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
 import { ExecutionPicker } from "./ExecutionPicker";
+import { MODE_CATALOG } from "../sessions";
 
 /** Shared composer; draft state survives chat switches and failed dispatches. */
 export const Composer = memo(function Composer({
@@ -305,30 +306,6 @@ export const Composer = memo(function Composer({
       alive = false;
     };
   }, [requestedHarness, catalogVersion]);
-
-  /** 各 harness 的权限模式目录（mode 字段按 harness 有不同取值） */
-  const MODE_CATALOG: Record<string, { value: string; label: string }[]> = {
-    zcode: [
-      { value: "yolo", label: "完全访问" },
-      { value: "build", label: "编辑前确认" },
-      { value: "edit", label: "允许编辑" },
-      { value: "plan", label: "只读规划" },
-    ],
-    codex: [
-      { value: "full", label: "完全访问" },
-      { value: "write", label: "沙箱内写入" },
-      { value: "readonly", label: "只读" },
-    ],
-    opencode: [
-      { value: "default", label: "完全访问" },
-      { value: "plan", label: "只读规划（plan）" },
-    ],
-    deck: [
-      { value: "default", label: "标准执行" },
-      { value: "plan", label: "计划模式（只读出方案）" },
-      { value: "goal", label: "目标模式（目标跨轮持续）" },
-    ],
-  };
 
   /** 各 harness 的模型目录（"" = 走 CLI 账号默认模型） */
   const MODEL_CATALOG: Record<string, { value: string; label: string }[]> = {

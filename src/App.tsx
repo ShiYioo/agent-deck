@@ -41,7 +41,7 @@ import { DelegationExecution } from "./components/DelegationExecution";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
 import { applyTaskUpdates, type LogItem, type TaskUpdate } from "./taskState";
-import { groupSessions, sessionKey, transferMode } from "./sessions";
+import { groupSessions, normalizeMode, sessionKey, transferMode } from "./sessions";
 import { Sidebar, projectName, directoryKey } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
 import { Composer } from "./components/Composer";
@@ -146,13 +146,25 @@ export default function App() {
         preferencesRef.current = { ...preferencesRef.current, [key]: config };
         setExecutionPreferences(preferencesRef.current);
         if (executionSelectionRef.current.scope === executionScope && executionSelectionRef.current.harness === h) {
-          if (config.model !== null) setModel(config.model);
-          if (config.effort !== null) setEffort(config.effort);
+          // 该 harness 没存过模型时必须清空，否则会留下上一个 harness 的模型
+          setModel(config.model ?? "");
+          setEffort(config.effort ?? "");
         }
       }).catch((error) => { if (alive) setActionError(String(error)); });
     }
     return () => { alive = false; };
   }, [executionScope]);
+  // harness 变化（含启动时恢复上次选择）后，模型必须重新取该 harness 自己的偏好。
+  // 恢复路径只调 setHarness，不经过 chooseHarness，模型会残留上一个 harness 的值，
+  // 在模型下拉里表现为「不可配置」。
+  const appliedHarness = useRef<string | null>(null);
+  useEffect(() => {
+    if (appliedHarness.current === harness) return;
+    appliedHarness.current = harness;
+    const config = preferencesRef.current[`${executionScope ?? "default"}:${harness}`];
+    setModel(config?.model ?? "");
+    setEffort(config?.effort ?? "");
+  }, [harness, executionScope]);
 
   // diff 弹层
   const [diff, setDiff] = useState<{ taskId: string; text: string } | null>(null);
@@ -239,7 +251,11 @@ export default function App() {
     const config = preferencesRef.current[`${executionScope ?? "default"}:${next}`];
     setModel(config?.model ?? "");
     setEffort(config?.effort ?? "");
-    setMode(transferMode(harness, mode, next, permission));
+    // 回写映射后的档位：只在用户手动改档时才写 composer_mode 的话，
+    // 存下来的 (harness, mode) 会是跨 harness 的非法组合，重启后下拉显示裸值。
+    const mapped = normalizeMode(next, transferMode(harness, mode, next, permission));
+    setMode(mapped);
+    void setSetting("composer_mode", mapped).catch(() => {});
   }, [harness, mode, permission, executionScope]);
   const stopSelected = useCallback(() => {
     if (selected) cancelTask(selected).catch((e) => setActionError(String(e)));
@@ -411,7 +427,10 @@ export default function App() {
       for (const k of COMPOSER_PREF_KEYS) saved[k] = await getSetting(`composer_${k}`).catch(() => null);
       if (saved.harness) {
         setHarness(saved.harness);
-        if (saved.mode) setMode(saved.mode);
+        // mode 是跨 harness 共用的状态，而各 harness 取值不通用。这里必须按恢复出来的
+        // harness 收敛：没有存过（冷启动）时会停在初始值 "yolo"，那是 zcode 专属值，
+        // 在 opencode/codex 下会让下拉显示裸字符串。
+        setMode(normalizeMode(saved.harness, saved.mode));
         if (saved.permission) setPermission(saved.permission);
       }
     })();
