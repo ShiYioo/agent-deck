@@ -6,7 +6,7 @@ export type AgentEvent = (
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
   | { type: "tool_use"; tool: string; detail: string; args?: Record<string, unknown> }
   | { type: "tool_result"; tool: string; ok: boolean; detail: string }
-  | { type: "status"; text: string }
+  | { type: "status"; text: string; retryKey?: string | null }
   | {
       type: "complete";
       ok: boolean;
@@ -73,9 +73,12 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
     return errorEvent(String(ev.message ?? "未知错误"));
   }
   if (t === "auto_retry_start") {
+    // 带上失败原因（同名连续重试在渲染层折叠为一条）
+    const reason = String(ev.errorMessage ?? "").trim();
     return {
       type: "status",
-      text: `请求失败，自动重试（第 ${ev.attempt ?? "?"}/${ev.maxAttempts ?? "?"} 次）…`,
+      text: `请求失败，自动重试（第 ${ev.attempt ?? "?"}/${ev.maxAttempts ?? "?"} 次）…` + (reason ? `：${providerErrorMessage(reason).slice(0, 120)}` : ""),
+      retryKey: reason || null,
     };
   }
   if (t === "deck_run_start") return { type: "status", text: "pi 运行时启动" };

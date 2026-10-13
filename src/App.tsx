@@ -1590,6 +1590,25 @@ function isWorkEvent(e: AgentEvent): boolean {
   return e.type === "tool_use" || e.type === "tool_result" || e.type === "thinking";
 }
 
+/** 连续同名重试折叠：相同失败原因的自动重试状态行合并为一条（保留最后一次的计数） */
+function collapseRetries(events: LogEntry[]): LogEntry[] {
+  const out: LogEntry[] = [];
+  for (const item of events) {
+    const ev = item.event;
+    if (ev.type === "status" && ev.retryKey) {
+      const prev = out[out.length - 1];
+      const prevEv = prev?.event;
+      if (prevEv?.type === "status" && prevEv.retryKey === ev.retryKey) {
+        // 同因连续：替换为最新计数（文案里的第 N/M 更新），key 复用第一条
+        out[out.length - 1] = { event: { ...ev }, key: prev.key };
+        continue;
+      }
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 function groupToolRuns(events: LogEntry[]): DisplayGroup[] {
   const out: DisplayGroup[] = [];
   let seg: LogEntry[] = [];
@@ -1693,7 +1712,7 @@ const LogPanel = memo(function LogPanel({
   const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
 
   const overflow = events.length - MAX_RENDER;
-  const decorated = useMemo(() => decorateTiming(events), [events]);
+  const decorated = useMemo(() => collapseRetries(decorateTiming(events)), [events]);
   const visible = overflow > 0 ? decorated.slice(overflow) : decorated;
   void overflow;
 
