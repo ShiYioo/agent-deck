@@ -297,7 +297,8 @@ pub async fn start_graph_run(
     let policy = store.context_policy(&source_task_id)?;
     for node in &nodes {
         policy.authorize(&node.harness)?;
-        if node.harness != "deck" && which::which(Harness::parse(&node.harness)?.program()).is_err()
+        if node.harness != "deck"
+            && crate::discovery::locate(Harness::parse(&node.harness)?).is_none()
         {
             return Err(format!("未安装 {}", node.harness));
         }

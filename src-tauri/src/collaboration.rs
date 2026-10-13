@@ -208,7 +208,7 @@ pub async fn start_collaboration(
             if which::which("node").is_err() {
                 return Err("未找到 Node.js，无法运行 AgentDeck Agent".into());
             }
-        } else if which::which(Harness::parse(harness)?.program()).is_err() {
+        } else if crate::discovery::locate(Harness::parse(harness)?).is_none() {
             return Err(format!("未找到 {harness}，请先安装并登录"));
         }
     }

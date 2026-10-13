@@ -19,18 +19,23 @@ pub fn new_task_id(harness: Harness) -> String {
     format!("{}-{nanos}", harness.name())
 }
 
-/// 解析程序名到可执行路径。Windows 上 npm 安装的 CLI 是 .cmd 垫片，
-/// 不能直接 CreateProcess，需要经 `cmd /C` 启动。
-async fn resolve_program(program: &str) -> Result<(PathBuf, Vec<String>), String> {
-    let path = which::which(program)
-        .map_err(|_| format!("未找到可执行文件：{program}（是否已安装并加入 PATH？）"))?;
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("cmd") | Some("bat") => Ok((
-            PathBuf::from("cmd"),
-            vec!["/C".into(), path.to_string_lossy().to_string()],
-        )),
-        _ => Ok((path, Vec::new())),
-    }
+/// 解析 harness 到可执行入口：程序 + 前置参数 + 需要注入的环境变量。
+///
+/// 除了 PATH，还会探测桌面应用捆绑的 CLI：ZCode 的 CLI 只是它 Electron
+/// 包里的 `resources/glm/zcode.cjs`，从不进 PATH。Windows 上 npm 安装的 CLI
+/// 则是 .cmd 垫片，不能直接 CreateProcess，需要经 `cmd /C` 启动。
+async fn resolve_program(
+    harness: Harness,
+) -> Result<(PathBuf, Vec<String>, Vec<(String, String)>), String> {
+    let located = crate::discovery::locate(harness).ok_or_else(|| {
+        format!(
+            "未找到可执行文件：{}（已检查 PATH 与桌面版安装目录）",
+            harness.program()
+        )
+    })?;
+    let environment = located.environment();
+    let (program, prefix) = located.into_command()?;
+    Ok((program, prefix, environment))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -47,23 +52,43 @@ pub async fn spawn(
     context_archive: Option<&str>,
     effort: Option<&str>,
 ) -> Result<command_group::AsyncGroupChild, String> {
-    let (program, prefix) = if let Some(adapter) = native_adapter {
-        let path = which::which(harness.program()).map_err(|e| e.to_string())?;
+    let (program, prefix, environment) = if let Some(adapter) = native_adapter {
+        // 适配器要自己拉起 CLI，所以入口必须走 discovery：捆绑形态（桌面版里的
+        // zcode.cjs）不在 PATH 上，which 找不到它。
+        let located = crate::discovery::locate(harness).ok_or_else(|| {
+            format!(
+                "未找到可执行文件：{}（已检查 PATH 与桌面版安装目录）",
+                harness.program()
+            )
+        })?;
+        let entry = located.path().to_string_lossy().into_owned();
+        // NodeScript 形态的 launcher 交给适配器解析（ZCode 用 Electron 当 Node）。
+        let (launcher, launcher_args) =
+            if matches!(located, crate::discovery::Located::NodeScript(_)) {
+                (String::new(), Vec::<String>::new())
+            } else {
+                let (program, prefix) = located.into_command()?;
+                (program.to_string_lossy().into_owned(), prefix)
+            };
         let node = which::which("node").map_err(|_| "原生服务适配需要 Node.js".to_string())?;
         let params = serde_json::json!({
-            "harness":harness.name(), "program":path, "mode":mode,
+            "harness":harness.name(), "program":entry, "mode":mode,
             "model":model, "cwd":cwd, "prompt":prompt, "resume":resume_session_id,
             "attachments":attachments.iter().filter(|p| harness != Harness::Codex || Harness::is_image_path(p)).collect::<Vec<_>>(),
             "transport":native_transport,
             "contextArchive":context_archive,
             "effort":effort,
+            "launcher":launcher,
+            "launcherArgs":launcher_args,
+            "launcherEntry":entry,
         });
         (
             node,
             vec![adapter.to_string_lossy().into_owned(), params.to_string()],
+            Vec::new(),
         )
     } else {
-        let (program, mut prefix) = resolve_program(harness.program()).await?;
+        let (program, mut prefix, environment) = resolve_program(harness).await?;
         prefix.extend(harness.build_execution_args(
             mode.as_deref(),
             model.as_deref(),
@@ -72,12 +97,13 @@ pub async fn spawn(
             attachments,
             effort,
         ));
-        (program, prefix)
+        (program, prefix, environment)
     };
 
     let mut command = tokio::process::Command::new(program);
     command
         .args(&prefix)
+        .envs(environment)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())

@@ -4,7 +4,9 @@ import { once } from "node:events";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join, dirname } from "node:path";
 
 export function contextRecords(archive, fallback) {
   return [{
@@ -386,7 +388,255 @@ async function opencode(params) {
   } finally { await stopChild(child); }
 }
 
+// ── ZCode：桌面版捆绑的 CLI 只能走 app-server 协议 ──
+//
+// 捆绑的 `resources/glm/zcode.cjs` 在 `-p` 一次性模式下解析不出模型：
+// registry 为空，而填充 registry 的 legacy 导入只挂在 standalone 发行版上
+// （`...t.standalone ? { importLegacy: () => bCt({}) } : {}`），桌面端从不用 `-p`。
+// 桌面端自己是 `app-server --stdio --surface desktop`，模型由客户端在
+// session/create 与 session/send 里显式下发 —— 这里对齐它的做法。
+
+const ZCODE_RUNTIME_PREFERENCES = {
+  nativeSearchEnhancementsEnabled: false,
+  memoryEnabled: false,
+  askUserQuestionAutoResolutionEnabled: true,
+  modelContextBudgetStrategy: "preflight-v1",
+};
+
+// ZCode Protocol 信封是 {id, method, params}，schema 为 .strict()，不能带 jsonrpc 字段。
+class ZcodeRpc {
+  constructor(child, notify, request) {
+    this.child = child;
+    this.pending = new Map();
+    this.sequence = 0;
+    this.closed = false;
+    this.lines = createInterface({ input: child.stdout });
+    this.lines.on("line", (line) => {
+      let value;
+      try { value = JSON.parse(line); } catch { return; }
+      if (value.method && value.id !== undefined) {
+        Promise.resolve(request(value))
+          .then((reply) => this.write({ id: value.id, ...reply }))
+          .catch((error) => this.write({ id: value.id, error: { code: -32603, message: String(error) } }));
+      } else if (value.id !== undefined) {
+        const entry = this.pending.get(value.id);
+        if (!entry) return;
+        this.pending.delete(value.id);
+        clearTimeout(entry.timer);
+        if (value.error) entry.reject(new Error(value.error.message ?? JSON.stringify(value.error)));
+        else entry.resolve(value.result);
+      } else if (value.method) notify(value);
+    });
+    child.once("error", (error) => this.close(error));
+    child.once("exit", () => this.close(new Error("ZCode app-server 已断开")));
+    child.stdin.on("error", (error) => this.close(error));
+  }
+  write(message) {
+    if (this.closed) return;
+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+  call(method, params, timeout = 120_000) {
+    if (this.closed) return Promise.reject(new Error("ZCode app-server 已关闭"));
+    const id = ++this.sequence;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`ZCode 请求超时：${method}`));
+      }, timeout);
+      this.pending.set(id, { resolve, reject, timer });
+      this.write({ id, method, params });
+    });
+  }
+  close(error = new Error("ZCode app-server 已关闭")) {
+    this.closed = true;
+    for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
+    this.pending.clear();
+    this.lines.close();
+  }
+}
+
+// 模型：Agent Deck 侧沿用 providerId/modelId 形式（如 builtin:bigmodel-coding-plan/GLM-5.3-Flash）。
+function zcodeSelection(model) {
+  const text = String(model ?? "");
+  const slash = text.indexOf("/");
+  if (slash < 1 || slash === text.length - 1) {
+    throw new Error("ZCode 模型需要 providerId/modelId 形式");
+  }
+  return { providerId: text.slice(0, slash), modelId: text.slice(slash + 1) };
+}
+
+// Agent Deck 自己生成 personal provider 规则，指向用户 ~/.zcode/v2/config.json 里
+// 已经配好的 provider（baseURL + apiKey），写进 Agent Deck 自己的文件，
+// 通过 ZCODE_PERSONAL_PROVIDER_CONFIG_FILE 注入 —— 不修改用户的 ZCode 配置。
+async function zcodeProviderConfig(model) {
+  const wanted = zcodeSelection(model);
+  // 用户的 CLI 配置：`provider` 是单数映射，key 在 options 里（见 /model 的落盘格式）。
+  let providers = {};
+  try {
+    const userConfig = JSON.parse(await readFile(join(homedir(), ".zcode", "v2", "config.json"), "utf8"));
+    providers = userConfig.provider ?? userConfig.providers ?? {};
+  } catch { /* 没有用户配置时退回内置默认 */ }
+  const source = providers[wanted.providerId] ?? {};
+  const apiKey = source.options?.apiKey ?? source.apiKey ?? "";
+  const baseUrl = source.options?.baseURL ?? source.baseURL ?? "https://open.bigmodel.cn/api/anthropic";
+  if (!apiKey) throw new Error(`ZCode provider「${wanted.providerId}」没有可用的 API Key，请先在该 CLI 里登录或填写`);
+  const providerId = "personal:agentdeck";
+  const document = {
+    schemaVersion: 1,
+    config: {
+      providerConfigRules: {
+        providerRules: [{
+          providerId,
+          providerName: source.name ?? "Agent Deck",
+          config: {
+            group: "standard-personal",
+            access: { type: "api-key", apiKey },
+            api: { type: "anthropic-messages", baseUrl },
+            personalModelIds: [wanted.modelId],
+            modelOrder: [wanted.modelId],
+          },
+        }],
+      },
+      modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+    },
+  };
+  const directory = join(tmpdir(), "agentdeck-zcode");
+  await mkdir(directory, { recursive: true });
+  const file = join(directory, "provider_config.json");
+  await writeFile(file, JSON.stringify(document, null, 2));
+  return { file, selection: { providerId, modelId: wanted.modelId } };
+}
+
+// 内置 provider 配置在安装目录里，位置随打包形态变化，按候选依次探测。
+async function zcodeBuiltinConfig(entry, explicit) {
+  const scriptDir = dirname(entry);
+  const candidates = [
+    explicit,
+    // 桌面版：<root>/resources/glm/zcode.cjs → <root>/resources/config/provider/zcode-builtin.json
+    join(scriptDir, "..", "config", "provider", "zcode-builtin.json"),
+    // 源码仓库布局：apps/zcode-cli/packages/cli/dist/zcode.cjs → <dist>/provider/zcode-builtin.json
+    join(scriptDir, "provider", "zcode-builtin.json"),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try { if ((await stat(candidate)).isFile()) return candidate; } catch { /* 继续探测 */ }
+  }
+  throw new Error("找不到 ZCode Built-in Provider Config（zcode-builtin.json）");
+}
+
+// 桌面版布局是 <root>/ZCode.exe 配 <root>/resources/glm/zcode.cjs。
+// 官方就是用 ZCode.exe 自己当 Node 跑这个脚本（ELECTRON_RUN_AS_NODE），
+// 拿不到就退回当前 node。
+async function zcodeLauncher(params, entry) {
+  if (params.launcher) return { program: params.launcher, args: params.launcherArgs ?? [] };
+  const electron = join(entry, "..", "..", "..", "ZCode.exe");
+  try { if ((await stat(electron)).isFile()) return { program: electron, args: [] }; }
+  catch { /* 非桌面版布局 */ }
+  return { program: process.execPath, args: [] };
+}
+
+async function zcode(params) {
+  const { file: personalFile, selection } = await zcodeProviderConfig(params.model);
+  const entry = params.launcherEntry ?? params.program;
+  const builtinFile = await zcodeBuiltinConfig(entry, params.zcodeBuiltin);
+  const { program, args } = await zcodeLauncher(params, entry);
+  const child = executable(
+    program,
+    [...args, entry, "app-server", "--stdio", "--surface", "desktop"],
+    {
+      cwd: params.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: builtinFile,
+        ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: personalFile,
+      },
+    },
+  );
+  child.stderr.on("data", (data) => process.stderr.write(data));
+
+  let turn;
+  let text = "";
+  const rpc = new ZcodeRpc(
+    child,
+    (message) => {
+      if (message.method === "session/event") {
+        const { type, payload } = message.params ?? {};
+        if (type === "model.streaming" && payload?.kind === "text_delta") text += payload.delta ?? "";
+        else if (type === "turn.completed") turn = turn ?? { ok: true, response: payload?.response, usage: payload?.usage };
+        else if (type === "turn.failed") turn = turn ?? { ok: false, message: payload?.errorMessage ?? payload?.message ?? "执行失败" };
+        return;
+      }
+      // 终态也会经遥测通道回带，且带结构化 errorCode/errorMessage。
+      if (message.method === "v4/telemetry/event") {
+        const payload = message.params ?? {};
+        if (payload.kind === "turn.terminal") {
+          turn = turn ?? (payload.status === "success"
+            ? { ok: true, tokenCount: payload.tokenCount }
+            : { ok: false, message: payload.errorMessage ?? payload.errorCode ?? "执行失败" });
+        }
+      }
+    },
+    (request) => {
+      if (request.method === "session/requestRuntimePreferences") return { result: ZCODE_RUNTIME_PREFERENCES };
+      // headless 下没有审批 UI；沿用 yolo 语义直接放行。
+      if (request.method === "interaction/requestPermission") return { result: { decision: "allow" } };
+      return { result: {} };
+    },
+  );
+
+  const workspace = { workspacePath: params.cwd, workspaceKey: params.cwd };
+  // reasoningLevel 是必填项，合法取值由模型决定；按候选依次回退。
+  const levels = [...new Set([params.effort, "max", "high", "low"].filter(Boolean))];
+  const waitTurn = async () => {
+    while (!turn) await new Promise((resolve) => setTimeout(resolve, 100));
+    return turn;
+  };
+  try {
+    let sessionId;
+    let lastError;
+    for (const level of levels) {
+      try {
+        const created = await rpc.call("session/create", {
+          workspace,
+          model: { ...selection, options: { reasoningLevel: level } },
+        });
+        sessionId = created?.session?.sessionId;
+        if (!sessionId) throw new Error("ZCode app-server 未返回 sessionId");
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!String(error.message).includes("Reasoning level")) throw error;
+      }
+    }
+    if (!sessionId) throw lastError ?? new Error("ZCode 会话创建失败");
+    // session/event（正文增量与 turn 终态）只在订阅之后推送；不订阅就只有遥测。
+    await rpc.call("session/subscribe", { sessionId, deliveryKind: "desktop-continuous" });
+
+    let finished;
+    for (const level of levels) {
+      turn = undefined;
+      text = "";
+      await rpc.call("session/send", {
+        sessionId,
+        inputId: randomUUID(),
+        content: params.prompt,
+        modelSelection: { ...selection, options: { reasoningLevel: level } },
+      });
+      finished = await waitTurn();
+      // reasoningLevel 猜错时同样报这个错，换个等级重试；其它错误直接失败。
+      if (finished.ok || !String(finished.message).includes("Reasoning level")) break;
+    }
+    if (!finished?.ok) throw new Error(finished?.message ?? "执行失败");
+    if (finished.response) text = finished.response;
+    if (text) output({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+    output({ type: "complete", ok: true });
+  } finally { rpc.close(); await stopChild(child); }
+}
+
 export async function main(params) {
+  if (params.harness === "zcode") return zcode(params);
   if (params.transport === "acp" && params.harness === "opencode") return acp(params);
   if (params.harness === "codex") return codex(params);
   if (params.harness === "opencode") return opencode(params);

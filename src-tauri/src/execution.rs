@@ -123,7 +123,10 @@ fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
     }
     let values = match harness {
         "codex" => {
-            let program = which::which("codex").map_err(|e| e.to_string())?;
+            let program = crate::discovery::locate(crate::executors::Harness::Codex)
+                .ok_or("未找到 codex，请安装并加入 PATH")?
+                .path()
+                .to_path_buf();
             let mut command = std::process::Command::new("node");
             command.arg(ADAPTER.get().ok_or("模型适配器未初始化")?).arg(
                 json!({

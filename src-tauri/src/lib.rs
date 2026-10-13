@@ -3,6 +3,7 @@ mod context_policy;
 mod conversation;
 mod coordination;
 mod diff_watch;
+mod discovery;
 mod execution;
 mod executors;
 mod handoff;
@@ -138,8 +139,16 @@ async fn check_harness(
         }
     } else {
         let runner = Harness::parse(&harness)?;
-        if which::which(runner.program()).is_err() {
-            issues.push(format!("未找到 {}，请安装并加入 PATH", runner.program()));
+        match discovery::locate(runner) {
+            None => issues.push(format!(
+                "未找到 {}（已检查 PATH 与桌面版安装目录），请安装后重试",
+                runner.program()
+            )),
+            // 桌面版内置的 CLI 不在 PATH 上，且 `-p` 一次性模式下它解析不出模型
+            // （provider registry 为空，填它的 legacy 导入只挂在 standalone 发行版上）。
+            // Agent Deck 因此自动改走官方同款通道：app-server + ZCode Protocol，
+            // 由客户端在 session/create 里显式下发模型，不再要求安装独立 CLI。
+            Some(_) => {}
         }
     }
     Ok(HarnessHealth {
@@ -600,9 +609,21 @@ pub(crate) async fn start_task_impl(
             &snapshot_dir_manifest(Path::new(&task_cwd)).to_string(),
         )?;
     }
+    // 只装了 ZCode 桌面版时，捆绑的 zcode.cjs 在 `-p` 模式下解析不出模型：
+    // provider registry 是空的，而填充它的 legacy 导入只挂在 standalone 发行版上
+    // （`...t.standalone ? { importLegacy } : {}`）。官方桌面端自己从来不跑 `-p`，
+    // 它用 `app-server --stdio` 且由客户端在 session/create 里显式下发模型。
+    // 所以捆绑形态一律走协议适配器；PATH 上有独立 zcode 时仍走原来的 `-p`。
+    let zcode_bundled = harness == Harness::Zcode
+        && matches!(
+            crate::discovery::locate(Harness::Zcode),
+            Some(crate::discovery::Located::NodeScript(_))
+        );
     // ZCode 模型选择：CLI 无 --model 旗标，官方机制是持久化 defaultModelSelection
     // （/model 的落盘字段）。选了模型 = 切换 ZCode 默认模型，对该 CLI 后续会话生效。
+    // 走协议适配器时模型随 session/create 显式下发，不必改动用户配置。
     if harness == Harness::Zcode
+        && !zcode_bundled
         && let Some(m) = model.as_deref().filter(|s| !s.is_empty())
     {
         if let Err(e) = write_zcode_default_model(m) {
@@ -615,6 +636,7 @@ pub(crate) async fn start_task_impl(
     let native_adapter = if (matches!(harness, Harness::Codex | Harness::Opencode)
         && native_transport.as_deref() == Some("native"))
         || (harness == Harness::Opencode && native_transport.as_deref() == Some("acp"))
+        || zcode_bundled
     {
         let path = sidecar_path(&app).with_file_name("native-harness.mjs");
         if !path.is_file() {
