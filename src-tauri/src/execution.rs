@@ -153,12 +153,58 @@ fn opencode_catalog_plain(text: &str) -> Vec<ModelCapability> {
         .collect()
 }
 
+/// OpenCode 2 的 `GET /api/model`。
+///
+/// 这是 v2 里**唯一还带档位与上下文**的通道：`models --verbose` 已被移除，
+/// 纯文本目录只有模型名。响应形如
+/// `{"data":[{"providerID":"opencode","modelID":"cat-jam-free",
+///            "variants":[{"id":"low"},…],"limit":{"context":262144}}]}`。
+fn opencode_catalog_api(text: &str) -> Result<Vec<ModelCapability>, String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let data = value["data"]
+        .as_array()
+        .ok_or("OpenCode 模型目录缺少 data 字段")?;
+    Ok(data
+        .iter()
+        .filter_map(|item| {
+            let provider = item["providerID"].as_str()?;
+            let model = item["modelID"].as_str().or_else(|| item["id"].as_str())?;
+            Some(ModelCapability {
+                model: format!("{provider}/{model}"),
+                // v2 的 variants 是对象数组（v1 是对象映射），取各自的 id
+                efforts: item["variants"]
+                    .as_array()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|v| v["id"].as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                context_window: item["limit"]["context"].as_u64(),
+            })
+        })
+        .collect())
+}
+
 /// OpenCode 的模型目录。
 ///
-/// 1.x 用 `models --verbose` 输出 NDJSON，带 variants / limit.context；
-/// 2.x 去掉了这个旗标（也没有 --json / --format），只给一行一个 `provider/model`
-/// 的纯文本，且未知旗标会直接报错退出。所以两条通道依次尝试，先成功的先用。
+/// 依次尝试三条通道，先成功的先用：
+///   1. v2 的 `api GET /api/model` —— 带 variants / limit.context（首选）
+///   2. v1 的 `models --verbose`   —— NDJSON，带 variants / limit.context
+///   3. v2 的 `models`             —— 纯文本一行一个 `provider/model`
+///
+/// 2.x 移除了 `--verbose`（未知旗标会直接报错退出），也没有 --json / --format，
+/// 所以第 2 条在 v2 上必然失败，第 3 条只是兜底（无档位信息）。
 fn opencode_models() -> Result<Vec<ModelCapability>, String> {
+    if let Ok(output) = catalog_output(opencode_command(&["api", "GET", "/api/model"])) {
+        if output.status.success() {
+            if let Ok(values) = opencode_catalog_api(&String::from_utf8_lossy(&output.stdout)) {
+                if !values.is_empty() {
+                    return Ok(values);
+                }
+            }
+        }
+    }
     if let Ok(output) = catalog_output(opencode_command(&["models", "--verbose"])) {
         if output.status.success() {
             if let Ok(values) = opencode_catalog(&String::from_utf8_lossy(&output.stdout)) {
@@ -558,6 +604,29 @@ mod tests {
         assert_eq!(values[0].context_window, None);
     }
     #[test]
+    fn api_catalog_reads_v2_variants_and_context() {
+        // 取自 `opencode api GET /api/model` 的真实响应形状：
+        // variants 是对象数组（v1 是对象映射），档位取各自的 id。
+        let values = opencode_catalog_api(
+            r#"{"location":{"directory":"C:\\w"},"data":[
+                {"id":"cat-jam-free","modelID":"cat-jam-free","providerID":"opencode",
+                 "variants":[{"id":"low","settings":{"reasoningEffort":"low"}},
+                             {"id":"high","settings":{"reasoningEffort":"high"}}],
+                 "limit":{"context":262144,"output":131072}},
+                {"id":"glm-5.3","modelID":"glm-5.3","providerID":"zhipuai-coding-plan"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].model, "opencode/cat-jam-free");
+        assert_eq!(values[0].efforts, vec!["low", "high"]);
+        assert_eq!(values[0].context_window, Some(262144));
+        // 没有 variants 的模型档位留空，不参与报错
+        assert_eq!(values[1].model, "zhipuai-coding-plan/glm-5.3");
+        assert!(values[1].efforts.is_empty());
+        assert_eq!(values[1].context_window, None);
+    }
+    #[test]
     fn explicit_default_clears_inheritance_and_unsupported_effort_is_rejected() {
         let store = Store::in_memory().unwrap();
         store
@@ -689,7 +758,9 @@ mod tests {
             Some("low"),
         );
         assert!(args.windows(2).any(|v| v == ["--agent", "plan"]));
-        assert!(args.windows(2).any(|v| v == ["--variant", "low"]));
+        // OpenCode 2 不认 `--variant`，档位写进模型串
+        assert!(args.windows(2).any(|v| v == ["-m", "opencode/free#low"]));
+        assert!(!args.iter().any(|a| a == "--variant"));
         assert!(args.windows(2).any(|v| v == ["-s", "sid"]));
     }
     #[test]

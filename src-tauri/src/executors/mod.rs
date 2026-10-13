@@ -155,7 +155,15 @@ impl Harness {
                     );
                 }
                 Self::Opencode => {
-                    args.splice(at..at, ["--variant".into(), effort.into()]);
+                    // OpenCode 2 移除了 `--variant`（未知旗标会直接报错退出），档位改为
+                    // 写进模型串：`-m provider/model#variant`。没有显式模型时无法凭空
+                    // 构造这个串，只能让 CLI 用自己的默认档位。
+                    if let Some(at) = args.iter().position(|a| a == "-m") {
+                        if let Some(model) = args.get_mut(at + 1) {
+                            model.push('#');
+                            model.push_str(effort);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -378,6 +386,45 @@ mod tests {
         let args = Harness::Opencode.build_args(None, None, "继续", Some("ses_abc"), &[]);
         assert!(args.windows(2).any(|w| w == ["-s", "ses_abc"]));
         assert!(!args.contains(&"-m".to_string()));
+    }
+
+    #[test]
+    fn opencode_effort_folds_into_model_string_not_a_flag() {
+        // OpenCode 2 不认 `--variant`（Unrecognized flag），档位必须写进模型串。
+        let args = Harness::Opencode.build_execution_args(
+            None,
+            Some("zhipuai-coding-plan/glm-5.3"),
+            "写个脚本",
+            None,
+            &[],
+            Some("high"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "--format",
+                "json",
+                "-m",
+                "zhipuai-coding-plan/glm-5.3#high",
+                "写个脚本"
+            ]
+        );
+        assert!(!args.contains(&"--variant".to_string()));
+        // 空档位不改变模型串
+        let plain = Harness::Opencode.build_execution_args(
+            None,
+            Some("zhipuai-coding-plan/glm-5.3"),
+            "写个脚本",
+            None,
+            &[],
+            Some(""),
+        );
+        assert!(plain.contains(&"zhipuai-coding-plan/glm-5.3".to_string()));
+        // 没有显式模型时不能凭空构造，保持原样
+        let none =
+            Harness::Opencode.build_execution_args(None, None, "继续", None, &[], Some("high"));
+        assert!(!none.iter().any(|a| a.contains('#')));
     }
 
     #[test]
