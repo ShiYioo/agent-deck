@@ -54,12 +54,23 @@ export const EventLine = memo(function EventLine({
           <pre>{event.text}</pre>
         </Disclosure>
       );
-    case "tool_use":
+    case "tool_use": {
+      // bash/shell 类命令：输入必须直接可见（默认展开，不折叠进 Disclosure）
+      const isCommand = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool);
+      if (isCommand) {
+        return (
+          <Disclosure className="activity-event" defaultOpen
+            title={<><ToolIcon tool={event.tool} /><span>{event.tool}</span></>}>
+            <pre>{event.detail}</pre>
+          </Disclosure>
+        );
+      }
       return (
         <Disclosure className="activity-event" title={<><ToolIcon tool={event.tool} /><span>{event.tool}</span></>}>
           <pre>{event.detail}</pre>
         </Disclosure>
       );
+    }
     case "tool_result":
       if (!event.ok) {
         // 失败必须醒目：红色标题 + 失败标志 + 错误信息默认展开（模型据此继续，用户据此判断）
@@ -72,8 +83,10 @@ export const EventLine = memo(function EventLine({
           </div>
         );
       }
+      // bash/shell 类命令的输出也默认展开：输入输出成对可见
+      const isCommandTool = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool);
       return (
-        <Disclosure className="activity-event"
+        <Disclosure className="activity-event" defaultOpen={isCommandTool}
           title={<>{event.ok ? <IconCheckCircle size={13} /> : <IconXCircle size={13} />}<span>{event.tool} · 已完成</span></>}>
           <pre>{event.detail}</pre>
         </Disclosure>

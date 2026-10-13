@@ -1586,7 +1586,13 @@ type DisplayGroup =
 
 const TOOL_RUN_MIN = 2;
 
+const COMMAND_TOOL = /bash|shell|exec|terminal|command|cmd|powershell/i;
+
 function isWorkEvent(e: AgentEvent): boolean {
+  // 命令类工具不折叠：输入输出必须直接可见
+  if ((e.type === "tool_use" || e.type === "tool_result") && COMMAND_TOOL.test(e.tool)) {
+    return false;
+  }
   return e.type === "tool_use" || e.type === "tool_result" || e.type === "thinking";
 }
 
