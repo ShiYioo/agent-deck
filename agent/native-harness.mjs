@@ -5,6 +5,8 @@ import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -127,13 +129,37 @@ export function codexItem(item) {
 }
 
 function executable(program, args, options = {}) {
-  // Only trusted executable paths and static server flags enter cmd.
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(program)) {
-    const quote = (s) => `"${String(s).replaceAll('"', '""')}"`;
-    return spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `"${[program, ...args].map(quote).join(" ")}"`],
-      { windowsHide: true, windowsVerbatimArguments: true, ...options });
+    // Windows + node 24 下任何 cmd 垫片间接启动形态（verbatim 引号/spawn 数组/exec）
+    // 实测都会吞 stdout 或报 ENOENT；唯一可靠形态 = 解析 npm 垫片直达真实入口：
+    // <dir>/node.exe + 垫片里的 node_modules/*.js 脚本。
+    const resolved = resolveNpmCmdShim(program);
+    if (resolved) {
+      return spawn(resolved.node, [resolved.entry, ...args], { windowsHide: true, ...options });
+    }
   }
   return spawn(program, args, { windowsHide: true, ...options });
+}
+
+const readFileSyncCmd = readFileSync;
+const existsSyncPath = existsSync;
+
+/** 解析 npm 风格 .cmd 垫片：抓 "…node_modules….js" 入口与同目录 node.exe。 */
+function resolveNpmCmdShim(cmdPath) {
+  try {
+    const text = readFileSyncCmd(cmdPath, "utf8").toString();
+    const m = text.match(/"([^"]*node_modules[^"]*\.js)"/);
+    if (!m) return null;
+    const dir = dirname(cmdPath);
+    const stripped = m[1].split("%dp0%").pop();
+    const rel = m[1].includes("%dp0%") ? (stripped.startsWith("\\") || stripped.startsWith("/") ? stripped.slice(1) : stripped) : m[1];
+    const entry = resolvePath(dir, rel);
+    const nodeExe = join(dir, "node.exe");
+    const node = existsSyncPath(nodeExe) ? nodeExe : "node";
+    return existsSyncPath(entry) ? { node, entry } : null;
+  } catch {
+    return null;
+  }
 }
 const output = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
@@ -697,3 +723,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exitCode = 1;
   }
 }
+

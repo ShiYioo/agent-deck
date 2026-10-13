@@ -584,7 +584,12 @@ export default function App() {
           [selected]: {
             ...prev[selected],
             queued: [...(prev[selected].queued ?? []), text],
-            queuedConfigs: [...(prev[selected].queuedConfigs ?? []), { model: routeModel ?? "", effort: routeEffort ?? "" }],
+            queuedConfigs: [...(prev[selected].queuedConfigs ?? []), {
+              // 排队轮保持会话当前的执行配置：routeModel 可能被异步偏好加载清空，
+              // 回退到运行中任务的 model（用户点 @deck:fixture:model 后的派发值）
+              model: routeModel || runningTask.model || "",
+              effort: routeEffort || runningTask.effort || "",
+            }],
           },
         }));
         return true;
