@@ -80,6 +80,7 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
   }
   if (t === "deck_run_start") return { type: "status", text: "pi 运行时启动" };
   if (t === "deck_status") return { type: "status", text: String(ev.text ?? "") };
+  // 重连提示（Rust 重连循环直发 status；text 已含「进程异常退出，正在重连（第 N/2 次）…」）
   if (t === "deck_session_file") return { type: "session_id", id: String(ev.path ?? "") };
   if (t === "deck_run_end") return { type: "complete", ok: ev.ok !== false && ev.status !== "cancelled" && ev.status !== "failed" };
   if (t === "deck_approval_decided") {

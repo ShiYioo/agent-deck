@@ -479,29 +479,57 @@ pub(crate) async fn start_task_impl(
         let app2 = app.clone();
         tauri::async_runtime::spawn(async move {
             let _workspace = workspace;
-            let result = pi_session::run_pi_task(
-                app2.clone(),
-                task_id2.clone(),
-                params,
-                store2.clone_handle(),
-                reg.clone(),
-                sidecar,
-            )
-            .await;
-            if let Err(e) = result {
-                reg.remove(&task_id2);
-                let event = serde_json::json!({
-                    "type": "deck_error", "taskId": task_id2, "message": e
-                });
-                let _ = store2.append_event(&task_id2, &event.to_string());
-                store2.finish_task(&task_id2, "failed", Some(1));
-                let _ = app2.emit("pi-event", event);
-                let _ = app2.emit(
-                    "task-exit",
-                    serde_json::json!({
-                        "taskId": task_id2, "code": 1, "status": "failed"
-                    }),
-                );
+            // 崩溃自动重连：sidecar 意外退出（Err）时重拉进程续跑同一任务，
+            // 携带已入库的会话文件句柄；最多 2 次、间隔递增。用户取消不重连。
+            const MAX_RECONNECT: u8 = 2;
+            let mut params = params;
+            for attempt in 0..=MAX_RECONNECT {
+                // 上一次崩溃留下的会话句柄：查库取（sidecar 可能已上报 session_file）
+                if attempt > 0 {
+                    if let Ok(Some(row)) = store2.get_task(&task_id2) {
+                        params.resume_session_file = row.session_id.clone();
+                    }
+                    let note = serde_json::json!({
+                        "type": "status", "taskId": task_id2.clone(),
+                        "text": format!("进程异常退出，正在重连（第 {attempt}/{MAX_RECONNECT} 次）…")
+                    });
+                    let _ = store2.append_event(&task_id2, &note.to_string());
+                    let _ = app2.emit("pi-event", note);
+                    tokio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 2000))
+                        .await;
+                }
+                let result = pi_session::run_pi_task(
+                    app2.clone(),
+                    task_id2.clone(),
+                    params.clone(),
+                    store2.clone_handle(),
+                    reg.clone(),
+                    sidecar.clone(),
+                )
+                .await;
+                match result {
+                    // 完成/取消：终态已由 run_pi_task 上报
+                    Ok((status, _)) if status != "crashed" => return,
+                    // sidecar 崩溃：重连（额度内），耗尽则终态失败
+                    Ok((_, _)) | Err(_) => {
+                        reg.remove(&task_id2);
+                        if attempt == MAX_RECONNECT {
+                            let event = serde_json::json!({
+                                "type": "deck_error", "taskId": task_id2,
+                                "message": format!("进程多次异常退出，已停止重连（共 {MAX_RECONNECT} 次）")
+                            });
+                            let _ = store2.append_event(&task_id2, &event.to_string());
+                            store2.finish_task(&task_id2, "failed", Some(1));
+                            let _ = app2.emit("pi-event", event);
+                            let _ = app2.emit(
+                                "task-exit",
+                                serde_json::json!({
+                                    "taskId": task_id2, "code": 1, "status": "failed"
+                                }),
+                            );
+                        }
+                    }
+                }
             }
         });
         if let Some(turn) = &mut prepared {

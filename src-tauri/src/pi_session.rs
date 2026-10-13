@@ -100,7 +100,7 @@ pub async fn run_pi_task(
     store: Store,
     registry: PiRegistry,
     sidecar_js: std::path::PathBuf,
-) -> Result<i32, String> {
+) -> Result<(String, Option<i64>), String> {
     // Windows 上 node 是 node.exe，可直接 spawn；deck-agent.mjs 用绝对路径
     let node =
         which::which("node").map_err(|_| "未找到 node（deck-agent 需要 Node.js）".to_string())?;
@@ -322,12 +322,26 @@ pub async fn run_pi_task(
         let _ = store.append_event(&task_id, &event.to_string());
         let _ = app.emit("pi-event", event);
     }
-    store.finish_task(&task_id, status_str, code);
-    let _ = app.emit(
-        "task-exit",
-        serde_json::json!({ "taskId": task_id, "code": code, "status": status_str }),
-    );
-    Ok(code.unwrap_or(-1) as i32)
+    // 崩溃场景（outcome=none 且进程早退）延迟终态上报：调用方可能重连。
+    // 返回 (status, code)；status: done | cancelled | crashed
+    let final_status = if outcome.is_none() {
+        "crashed"
+    } else {
+        status_str
+    };
+    if final_status == "crashed" {
+        // 崩溃但可能重连：DB 回到 running，终态交给重连循环裁决
+        store.finish_task(&task_id, "running", None);
+    } else {
+        store.finish_task(&task_id, status_str, code);
+    }
+    if final_status != "crashed" {
+        let _ = app.emit(
+            "task-exit",
+            serde_json::json!({ "taskId": task_id, "code": code, "status": status_str }),
+        );
+    }
+    Ok((final_status.to_string(), code))
 }
 
 /// 向指定 pi 会话发送指令（approve/reject/abort）。
