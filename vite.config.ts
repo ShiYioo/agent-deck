@@ -9,6 +9,11 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      // Cargo 把编译产物写进 src-tauri/target；Windows 下 vite 监听其中的 .exe
+      // 会抛 EBUSY 并直接终止 dev server，导致 tauri dev 的 beforeDevCommand 失败。
+      ignored: ["**/src-tauri/**"],
+    },
   },
   build: {
     outDir: "dist",
