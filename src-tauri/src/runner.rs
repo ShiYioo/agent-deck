@@ -107,7 +107,11 @@ pub async fn spawn(
         .current_dir(cwd)
         .env("NO_COLOR", "1")
         // 原生适配器任务需要 stdin 命令通道（提问作答）；CLI 任务保持 null。
-        .stdin(if native_adapter.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if native_adapter.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

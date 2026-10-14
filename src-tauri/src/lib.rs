@@ -320,11 +320,12 @@ pub(crate) async fn start_task_impl(
         };
     // opencode「可提问」档：只有服务端模式能回答模型的提问，故强制 native 传输
     // （覆盖 transport_opencode 设置）；其余档位不受影响。
-    let transport = if harness.eq_ignore_ascii_case("opencode") && mode.as_deref() == Some("interactive") {
-        "native".to_string()
-    } else {
-        transport
-    };
+    let transport =
+        if harness.eq_ignore_ascii_case("opencode") && mode.as_deref() == Some("interactive") {
+            "native".to_string()
+        } else {
+            transport
+        };
     let model = resolved_execution.model.clone().filter(|s| !s.is_empty());
     let effort = resolved_execution.effort.clone().filter(|s| !s.is_empty());
     let zcode_execution = execution::claim_zcode(&harness)?;
@@ -1855,10 +1856,7 @@ fn task_command(
     let task = guard
         .get(&task_id)
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let sender = task
-        .commands
-        .as_ref()
-        .ok_or("该任务不支持交互指令")?;
+    let sender = task.commands.as_ref().ok_or("该任务不支持交互指令")?;
     let mut message = serde_json::json!({ "cmd": cmd });
     if let Some(id) = id {
         message["id"] = serde_json::json!(id);
