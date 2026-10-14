@@ -159,40 +159,34 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default();
                             // 完成事件不带 input——question 的回答有固定前缀，按它兜底识别；
-                            // 展示层把英文模板解析成「问题：回答」
+                            // 展示层把英文模板解析成「问题：回答」。
+                            // running 时已发过 tool_use（提问文本），completed 只补结果行——
+                            // 再发一对 tool_use+tool_result 会让同一次提问渲染三行。
                             let is_question_done = is_question
                                 || output.starts_with("User has answered your questions");
-                            let title = if is_question_done {
-                                question_answer_detail(output)
+                            if is_question_done {
+                                events.push(AgentEvent::ToolResult {
+                                    tool: "question".into(),
+                                    ok: true,
+                                    detail: question_answer_detail(output),
+                                });
                             } else {
-                                state
+                                let title = state
                                     .get("title")
                                     .and_then(Value::as_str)
                                     .unwrap_or("完成")
-                                    .to_string()
-                            };
-                            events.push(AgentEvent::ToolUse {
-                                tool: if is_question_done {
-                                    "question".into()
-                                } else {
-                                    tool.clone()
-                                },
-                                detail: title.to_string(),
-                                args: None,
-                            });
-                            events.push(AgentEvent::ToolResult {
-                                tool: if is_question_done {
-                                    "question".into()
-                                } else {
-                                    tool
-                                },
-                                ok: true,
-                                detail: if is_question_done {
-                                    question_answer_detail(output)
-                                } else {
-                                    truncate(output, 400)
-                                },
-                            });
+                                    .to_string();
+                                events.push(AgentEvent::ToolUse {
+                                    tool: tool.clone(),
+                                    detail: title,
+                                    args: None,
+                                });
+                                events.push(AgentEvent::ToolResult {
+                                    tool,
+                                    ok: true,
+                                    detail: truncate(output, 400),
+                                });
+                            }
                         }
                         "error" => {
                             let err = state
@@ -412,13 +406,14 @@ mod tests {
                 if tool == "question" && detail == "你喜欢猫还是狗？"
         ));
 
+        // completed 只补结果行（running 已发过 tool_use，重复发会渲染三行）
         let done = events(
             r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","state":{"status":"completed","output":"User has answered your questions: \"你喜欢猫还是狗？\"=\"狗\".","input":{"questions":[{"question":"你喜欢猫还是狗？","options":[{"label":"猫"},{"label":"狗"}]}]}}}}"#,
         );
         assert!(matches!(
             &done[..],
-            [AgentEvent::ToolUse { tool, detail, .. }, AgentEvent::ToolResult { tool: rt, ok: true, .. }]
-                if tool == "question" && detail == "你喜欢猫还是狗？：狗" && rt == "question"
+            [AgentEvent::ToolResult { tool, ok: true, detail }]
+                if tool == "question" && detail == "你喜欢猫还是狗？：狗"
         ));
 
         // 完成事件可能不带 input（仅 output）——按回答前缀兜底识别
@@ -427,8 +422,8 @@ mod tests {
         );
         assert!(matches!(
             &no_input[..],
-            [AgentEvent::ToolUse { tool, detail, .. }, AgentEvent::ToolResult { ok: true, detail: rd, .. }]
-                if tool == "question" && detail == "你喜欢猫还是狗？：猫" && rd == "你喜欢猫还是狗？：猫"
+            [AgentEvent::ToolResult { tool, ok: true, detail: rd }]
+                if tool == "question" && rd == "你喜欢猫还是狗？：猫"
         ));
 
         // 未回答（表单被跳过）：答案显示「未回答」而不是上游英文
@@ -437,8 +432,8 @@ mod tests {
         );
         assert!(matches!(
             &unanswered[..],
-            [AgentEvent::ToolUse { detail, .. }, ..]
-                if detail == "你喜欢猫还是狗？：未回答"
+            [AgentEvent::ToolResult { tool, detail, .. }]
+                if tool == "question" && detail == "你喜欢猫还是狗？：未回答"
         ));
     }
 
