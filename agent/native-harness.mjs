@@ -279,87 +279,138 @@ async function openPort() {
   return port;
 }
 
+/** v2 服务端事件 → 统一输出事件（opencode.rs 已认识的形状）。
+ *  返回 { outputs, form?, formSettled?, permission?, settle? }；纯函数，便于单测。 */
+export function opencodeEventOutputs(event, sessionID) {
+  const type = event?.type;
+  const body = event?.data ?? {};
+  if (!type) return { outputs: [] };
+  if (body.sessionID !== sessionID && body.form?.sessionID !== sessionID) return { outputs: [] };
+  const part = (value) => ({ type: "message.part.updated", sessionID, properties: { part: value, sessionID } });
+  const toolOutput = (content) => Array.isArray(content)
+    ? content.map((item) => (typeof item?.text === "string" ? item.text : "")).join("\n") : "";
+  switch (type) {
+    case "session.step.started":
+      return { outputs: body.model ? [{ type: "message.updated", sessionID, properties: { info: {
+        id: body.assistantMessageID, sessionID, role: "assistant", model: body.model } } }] : [] };
+    case "session.text.ended":
+      return { outputs: typeof body.text === "string" && body.text.trim()
+        ? [part({ type: "text", id: body.assistantMessageID, messageID: body.assistantMessageID, sessionID, text: body.text })] : [] };
+    case "session.reasoning.ended":
+      return { outputs: typeof body.text === "string" && body.text.trim()
+        ? [part({ type: "reasoning", id: body.assistantMessageID, messageID: body.assistantMessageID, sessionID, text: body.text })] : [] };
+    case "session.tool.called":
+      return { outputs: [part({ type: "tool", id: body.id, callID: body.id, tool: body.name, messageID: body.assistantMessageID, sessionID,
+        state: { status: "running", input: body.input, title: body.name } })] };
+    case "session.tool.success":
+      return { outputs: [part({ type: "tool", id: body.id, callID: body.id, tool: body.name, messageID: body.assistantMessageID, sessionID,
+        state: { status: "completed", input: body.input, title: body.name, output: toolOutput(body.content) } })] };
+    case "session.tool.failed":
+      return { outputs: [part({ type: "tool", id: body.id, callID: body.id, tool: body.name, messageID: body.assistantMessageID, sessionID,
+        state: { status: "error", input: body.input, title: body.name, error: body.error?.message ?? "执行出错", output: toolOutput(body.content) } })] };
+    case "form.created":
+      return { outputs: [], form: body.form ?? {} };
+    case "form.replied":
+    case "form.cancelled":
+      return { outputs: [], formSettled: body.id };
+    case "permission.asked":
+      return { outputs: [], permission: body.id };
+    case "session.execution.succeeded":
+      return { outputs: [], settle: { ok: true } };
+    case "session.execution.failed":
+      return { outputs: [], settle: { ok: false, error: body.error } };
+    case "session.execution.interrupted":
+      return { outputs: [], settle: { ok: false, interrupted: true } };
+    default:
+      return { outputs: [] };
+  }
+}
+
 async function opencode(params) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const port = await openPort();
   const password = randomUUID();
   const base = `http://127.0.0.1:${port}`;
   const env = { ...process.env, OPENCODE_SERVER_PASSWORD: password };
-  const child = executable(params.program, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+  // 入口优先用 Rust 解析好的 launcher：Windows 上 opencode 是 npm 的 .cmd 垫片，
+  // 且它指向 .exe 而非 .js，executable() 的 shim 解析救不了，必须经 cmd /C 启动。
+  const launchProgram = params.launcher || params.program;
+  const launchArgs = [...(params.launcherArgs ?? []), "serve", "--hostname", "127.0.0.1", "--port", String(port)];
+  const child = executable(launchProgram, launchArgs, {
     cwd: params.cwd, env, stdio: ["ignore", "pipe", "pipe"],
   });
   child.on("error", () => {});
   child.stderr.on("data", (data) => process.stderr.write(data));
   const headers = { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` };
-  const deadline = Date.now() + 20_000;
-  let schema;
+  const call = async (path, body, method) => {
+    const response = await fetch(`${base}${path}`, {
+      method: method ?? (body === undefined ? "GET" : "POST"),
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(3_600_000),
+    });
+    if (!response.ok) throw new Error(`OpenCode ${response.status}: ${await response.text()}`);
+    return response.status === 204 ? null : response.json();
+  };
   try {
+    // v2 服务端：OpenAPI 在 /openapi.json（需鉴权）；/doc 已是网页，不再是 schema。
+    // 会话作用域路由由会话自带位置，接口不再吃 directory 查询参数。
+    let schema;
+    let authFailed = false;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       try {
-        const response = await fetch(`${base}/doc`, { headers, signal: AbortSignal.timeout(1_000) });
-        if (response.ok) {
-          schema = await response.json();
-          if (schema.paths?.["/session"] && schema.paths?.["/session/{sessionID}/message"]) break;
-          throw new Error("Installed OpenCode OpenAPI lacks required session endpoints");
-        }
-      } catch (error) {
-        if (String(error).includes("OpenAPI")) throw error;
-      }
-      if (child.exitCode !== null) throw new Error("OpenCode Server exited during capability probing");
-      await new Promise((resolve) => setTimeout(resolve, 150));
+        const response = await fetch(`${base}/openapi.json`, { headers, signal: AbortSignal.timeout(1_500) });
+        if (response.ok) { schema = await response.json(); break; }
+        if (response.status === 401 || response.status === 403) authFailed = true;
+      } catch {}
+      if (child.exitCode !== null) throw new Error("OpenCode 服务端在探测阶段退出");
+      await sleep(200);
     }
-    if (!schema) throw new Error("OpenCode Server capability probe timed out");
+    if (!schema) throw new Error(authFailed ? "OpenCode 服务端鉴权失败" : "OpenCode 服务端探测超时");
+    const paths = schema.paths ?? {};
+    const formReply = Boolean(paths["/api/session/{sessionID}/form/{formID}/reply"]?.post);
+    const formCancel = Boolean(paths["/api/session/{sessionID}/form/{formID}"]?.delete);
+    const permissionReply = Boolean(paths["/api/session/{sessionID}/permission/{requestID}/reply"]?.post);
     if (params.probe) {
-      output({ type: "native.capabilities", transport: "opencode-server", version: schema.info?.version, historyImport: false,
-        permissionReply: schema.paths?.["/permission/{requestID}/reply"]?.post?.requestBody });
+      output({ type: "native.capabilities", transport: "opencode-server", version: schema.info?.version,
+        historyImport: false, formReply, formCancel, permissionReply });
       return;
     }
-    if (params.attachments?.length) throw new Error("OpenCode native transport currently requires text-only input; select CLI for attachments");
-    const call = async (path, body) => {
-      const response = await fetch(`${base}${path}?directory=${encodeURIComponent(params.cwd)}`, {
-        method: body === undefined ? "GET" : "POST", headers: { ...headers, "Content-Type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(3_600_000),
-      });
-      if (!response.ok) throw new Error(`OpenCode ${response.status}: ${await response.text()}`);
-      return response.json();
-    };
-    const session = params.resume ? await call(`/session/${encodeURIComponent(params.resume)}`) : await call("/session", {
-      permission: params.mode === "plan" ? [
-        { permission: "edit", pattern: "*", action: "deny" },
-        { permission: "bash", pattern: "*", action: "deny" },
-      ] : [],
-    });
-    const id = session.id;
-    if (!id) throw new Error("OpenCode Server did not return a session ID");
-    output({ type: "session.status", sessionID: id, properties: { sessionID: id, status: { type: "busy" } } });
-    const body = { parts: [{ type: "text", text: params.prompt }], agent: params.mode === "plan" ? "plan" : "build" };
-    if (params.effort) body.variant = params.effort;
+    if (params.attachments?.length) throw new Error("OpenCode 服务端入口暂不支持附件；请改用普通档");
+
+    // 建会话（v2）：模型与 agent 挂在会话上；prompt 只接受文本（异步执行）。
+    const createBody = { location: { directory: params.cwd }, agent: params.mode === "plan" ? "plan" : "build" };
     if (params.model) {
       const slash = params.model.indexOf("/");
-      if (slash < 1) throw new Error("OpenCode model must be provider/model");
-      body.model = { providerID: params.model.slice(0, slash), modelID: params.model.slice(slash + 1) };
+      if (slash < 1) throw new Error("OpenCode 模型必须使用 provider/model");
+      createBody.model = { providerID: params.model.slice(0, slash), id: params.model.slice(slash + 1) };
+      if (params.effort) createBody.model.variant = params.effort;
     }
-    // REST response contains final parts. Never replay streaming snapshots as messages.
+    let id = params.resume;
+    if (params.resume) {
+      const session = await call(`/api/session/${encodeURIComponent(params.resume)}`);
+      id = session?.data?.id ?? params.resume;
+    } else {
+      const created = await call("/api/session", createBody);
+      id = created?.data?.id;
+    }
+    if (!id) throw new Error("OpenCode 服务端未返回会话 ID");
+    output({ type: "session.status", sessionID: id, properties: { sessionID: id, status: { type: "busy" } } });
+
+    // 订阅服务端事件流（信封 {type, data, ...}），过滤本会话。
     const controller = new AbortController();
-    const stream = await fetch(`${base}/event?directory=${encodeURIComponent(params.cwd)}`, { headers, signal: controller.signal });
-    if (!stream.ok || !stream.body) throw new Error("OpenCode event subscription failed");
+    const stream = await fetch(`${base}/api/event`, { headers, signal: controller.signal });
+    if (!stream.ok || !stream.body) throw new Error("OpenCode 事件订阅失败");
     const { Readable } = await import("node:stream");
     const source = Readable.fromWeb(stream.body);
     const lines = createInterface({ input: source });
+    let settle;
+    const settled = new Promise((resolve) => { settle = resolve; });
+    const pendingForms = new Map();
     let streamError;
-    source.on("error", (error) => {
-      if (!controller.signal.aborted) streamError = error;
-      lines.close();
-    });
-    const emitted = new Set();
-    const finalParts = new Map();
-    const roles = new Map();
-    const emitPart = (part) => {
-      const state = ["pending", "running"].includes(part.state?.status) ? "started" : part.state?.status;
-      const key = `${part.id}:${state ?? part.type}`;
-      if (emitted.has(key)) return;
-      emitted.add(key);
-      output({ type: "message.part.updated", sessionID: id, properties: { part, sessionID: id } });
-    };
+    source.on("error", (error) => { if (!controller.signal.aborted) streamError = error; lines.close(); });
+
     const pump = (async () => {
       let data = [];
       try {
@@ -370,47 +421,61 @@ async function opencode(params) {
           data = [];
           let event;
           try { event = JSON.parse(raw); } catch { continue; }
-          if (event.type === "permission.asked" && event.properties?.sessionID === id) {
-            const requestId = event.properties.id;
-            if (typeof requestId !== "string" || !schema.paths?.["/permission/{requestID}/reply"]?.post) {
-              throw new Error("OpenCode permission reply capability is unavailable");
-            }
-            await call(`/permission/${encodeURIComponent(requestId)}/reply`, { reply: "reject" });
-            output({ type: "session.error", properties: { sessionID: id, error: {
-              message: `原生无头入口拒绝审批：${event.properties.permission ?? "tool"}`,
-            } } });
-            continue;
+          const mapped = opencodeEventOutputs(event, id);
+          for (const out of mapped.outputs) output(out);
+          if (mapped.permission && permissionReply && typeof mapped.permission === "string") {
+            // 「可提问」档不做逐次审批：自动放行，避免权限门卡住提问。
+            try { await call(`/api/session/${encodeURIComponent(id)}/permission/${encodeURIComponent(mapped.permission)}/reply`, { decision: "once" }); } catch {}
           }
-          const part = event.properties?.part;
-          const info = event.properties?.info;
-          if (event.type === "message.updated" && info?.sessionID === id) roles.set(info.id, info.role);
-          if (event.type === "message.part.updated" && part?.sessionID === id) {
-            if (part.type === "tool") emitPart(part);
-            else if (part.type === "text") finalParts.set(part.id, part);
+          if (mapped.form) {
+            output({ type: "native_form_request", id: mapped.form.id, sessionID: id, title: mapped.form.title, fields: mapped.form.fields ?? [], metadata: mapped.form.metadata });
+            await new Promise((resolve) => pendingForms.set(mapped.form.id, resolve));
           }
+          if (mapped.formSettled) {
+            pendingForms.delete(mapped.formSettled);
+            output({ type: "native_form_settled", id: mapped.formSettled });
+          }
+          if (mapped.settle) settle(mapped.settle);
         }
-      } catch (error) { if (!controller.signal.aborted) throw error; }
-      if (streamError) throw streamError;
+      } catch (error) {
+        if (!controller.signal.aborted) streamError = streamError ?? error;
+      }
+      if (streamError) settle({ ok: false, error: { message: String(streamError) } });
     })();
-    // Attach rejection handling before the potentially long prompt call.
-    pump.catch(async () => {
-      if (!controller.signal.aborted && schema.paths?.["/session/{sessionID}/abort"]?.post) {
-        try { await call(`/session/${encodeURIComponent(id)}/abort`, {}); } catch {}
+    pump.catch(() => {});
+
+    // stdin：接收 UI 的作答/跳过，转成 form 回复/取消。
+    const stdinLines = createInterface({ input: process.stdin });
+    stdinLines.on("line", (line) => {
+      let command;
+      try { command = JSON.parse(line); } catch { return; }
+      const resolver = command?.id ? pendingForms.get(command.id) : undefined;
+      if (!resolver) return;
+      pendingForms.delete(command.id);
+      const settled_ = (error) => output({ type: "native_form_settled", id: command.id, ...(error ? { error: String(error) } : {}) });
+      const replyPath = `/api/session/${encodeURIComponent(id)}/form/${encodeURIComponent(command.id)}`;
+      if (command.cmd === "approve") {
+        let answer = {};
+        try { answer = JSON.parse(command.answer ?? "{}"); } catch { answer = {}; }
+        call(`${replyPath}/reply`, { answer }).then(() => settled_(), (error) => settled_(error)).finally(() => resolver("answered"));
+      } else {
+        call(replyPath, undefined, "DELETE").then(() => settled_(), (error) => settled_(error)).finally(() => resolver("cancelled"));
       }
     });
-    let result;
-    try { result = await call(`/session/${encodeURIComponent(id)}/message`, body); }
-    finally { controller.abort(); lines.close(); await pump; }
-    if (result.info?.error) throw new Error(JSON.stringify(result.info.error));
-    if (result.info?.id) roles.set(result.info.id, result.info.role);
-    for (const part of result.parts ?? []) {
-      if (part.type === "text") finalParts.set(part.id, part);
-      else emitPart(part);
-    }
-    for (const part of finalParts.values()) {
-      if (roles.get(part.messageID) === "assistant") emitPart(part);
-    }
-    output({ type: "session.status", sessionID: id, properties: { sessionID: id, status: { type: "idle" } } });
+    stdinLines.on("close", () => {
+      for (const resolve of pendingForms.values()) resolve("cancelled");
+      pendingForms.clear();
+    });
+
+    await call(`/api/session/${encodeURIComponent(id)}/prompt`, { text: params.prompt });
+
+    const outcome = await settled;
+    controller.abort();
+    lines.close();
+    stdinLines.close();
+    await pump;
+    if (outcome.interrupted) throw new Error("OpenCode 执行已中断");
+    if (!outcome.ok) throw new Error(outcome.error?.message ?? "OpenCode 执行失败");
   } finally { await stopChild(child); }
 }
 

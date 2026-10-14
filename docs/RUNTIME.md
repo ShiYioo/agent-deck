@@ -51,6 +51,27 @@ stdin EOF 等待当前 SDK 请求完成，避免压缩请求尚未返回就退�
 
 不在编码会话完成后自动追加记忆抽取请求，以免改写待恢复的上下文、执行额外工具或把内部请求显示成用户对话。已有项目记忆仍可注入；会话压缩明确禁用工具。
 
+## opencode 交互提问
+
+opencode 的无头 CLI（`opencode run`）是非交互的：模型一提问就被上游自动取消
+（`This non-interactive run cannot ask the user questions…`），无法作答。可作答的唯一通路是
+opencode 的服务端模式。因此 opencode 的权限下拉新增一档 **「可提问（服务端）」**：选中即强制
+`transport_opencode=native`（覆盖设置），由 `agent/native-harness.mjs` 拉起 `opencode serve`
+（v2 HTTP API，OpenAPI 在 `/openapi.json`，Basic 鉴权）并订阅 `GET /api/event`。
+
+- 事件翻译：适配器把 v2 事件（`session.text/reasoning/tool.*`、`session.execution.*`）翻译成
+  `executors/opencode.rs` 已认识的形状后写 stdout；文本/思考取 `.ended` 的最终内容。
+- 提问通道：收到 `form.created` 时适配器向 stdout 发 `native_form_request`；
+  `runner::read_stream` 拦截该行并 `emit("task-form")`，前端渲染为可作答卡片。用户提交/跳过后，
+  `invokePiCommand` 因任务非 `deck-` 前缀路由到 `task_command`，经 stdin 下发 `{cmd,id,answer}`；
+  适配器 `POST /api/session/{id}/form/{formID}/reply`（`{answer:{key:值}}`）或
+  `DELETE .../form/{formID}` 取消。
+- 权限：该档不做逐次审批，`permission.asked` 自动 `{decision:"once"}` 放行，避免权限门卡住提问。
+- 限制：服务端模式**不支持附件**（适配器对附件直接报错，请改用普通档）；`/api/event` 是服务端
+  全局事件流，按会话 id 过滤。
+- 版本：opencode 2.x 已移除旧版路由（`/doc`、`/session`、`/event`、`/permission/{id}/reply`），
+  原生适配器已随 v2 路由迁移。
+
 ## 反馈与验证
 
 指导协作由 Rust 后端顺序编排：指导方只读计划、执行方修改并测试、指导方只读验收；

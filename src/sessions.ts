@@ -15,7 +15,7 @@ export function sessionKey(task: TaskRow): string {
 
 export function transferMode(source: string, mode: string | null, target: string, permission?: string | null): string {
   if (source === target) return mode ?? "default";
-  const full = ["full", "yolo", "default", ""].includes(mode ?? "");
+  const full = ["full", "yolo", "default", "", "interactive"].includes(mode ?? "");
   // Approval and sandbox modes are not interchangeable across native CLIs.
   const restricted = !full || (source === "deck" && permission === "approved");
   if (target === "codex") return restricted ? "readonly" : "full";
@@ -39,6 +39,7 @@ export const MODE_CATALOG: Record<string, { value: string; label: string }[]> = 
   opencode: [
     { value: "default", label: "完全访问" },
     { value: "plan", label: "只读规划（plan）" },
+    { value: "interactive", label: "可提问（服务端）" },
   ],
   deck: [
     { value: "default", label: "标准执行" },

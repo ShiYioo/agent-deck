@@ -88,6 +88,9 @@ pub struct RunningTask {
     pub label: String,
     pub child: Option<command_group::AsyncGroupChild>,
     pub cancelled: bool,
+    /// 原生适配器任务（opencode 等）的 stdin 命令通道：UI 的提问作答经此下发。
+    /// CLI 任务为 None（stdin 是 null）。
+    pub commands: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// 全局任务表。runner 持有 Arc 克隆以便在流结束后回写退出码。
@@ -315,6 +318,13 @@ pub(crate) async fn start_task_impl(
             .map_err(|e| e.to_string())??;
             (initial_requested, resolved, transport)
         };
+    // opencode「可提问」档：只有服务端模式能回答模型的提问，故强制 native 传输
+    // （覆盖 transport_opencode 设置）；其余档位不受影响。
+    let transport = if harness.eq_ignore_ascii_case("opencode") && mode.as_deref() == Some("interactive") {
+        "native".to_string()
+    } else {
+        transport
+    };
     let model = resolved_execution.model.clone().filter(|s| !s.is_empty());
     let effort = resolved_execution.effort.clone().filter(|s| !s.is_empty());
     let zcode_execution = execution::claim_zcode(&harness)?;
@@ -703,6 +713,28 @@ pub(crate) async fn start_task_impl(
     let mut child = child;
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
+    // 原生适配器任务：stdin 作为命令通道（opencode 的提问作答）。
+    // CLI 任务不开通道，保持 Stdio::null 的原行为。
+    let commands = if native_adapter.is_some() {
+        child.inner().stdin.take().map(|mut stdin| {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+            tauri::async_runtime::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                while let Some(line) = receiver.recv().await {
+                    if stdin.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if stdin.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                }
+            });
+            sender
+        })
+    } else {
+        None
+    };
 
     registry
         .0
@@ -714,6 +746,7 @@ pub(crate) async fn start_task_impl(
                 label: harness.name().to_string(),
                 child: Some(child),
                 cancelled: false,
+                commands,
             },
         );
 
@@ -1808,6 +1841,36 @@ fn pi_command(
     pi_session::send_command(&pi_registry, &task_id, &cmd, id, answer)
 }
 
+/// 前端 → Rust：向原生适配器任务（如 opencode 的提问作答）下发命令。
+/// 与 pi_command 分开：deck 走 PiRegistry，原生适配器走 TaskRegistry 的 stdin 通道。
+#[tauri::command]
+fn task_command(
+    registry: State<'_, TaskRegistry>,
+    task_id: String,
+    cmd: String,
+    id: Option<String>,
+    answer: Option<String>,
+) -> Result<(), String> {
+    let guard = registry.0.lock().map_err(|_| "task registry poisoned")?;
+    let task = guard
+        .get(&task_id)
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let sender = task
+        .commands
+        .as_ref()
+        .ok_or("该任务不支持交互指令")?;
+    let mut message = serde_json::json!({ "cmd": cmd });
+    if let Some(id) = id {
+        message["id"] = serde_json::json!(id);
+    }
+    if let Some(answer) = answer {
+        message["answer"] = serde_json::json!(answer);
+    }
+    sender
+        .send(message.to_string())
+        .map_err(|_| "命令通道已关闭".to_string())
+}
+
 /// 前端 → Rust：读写设置（如 deck API key）。
 #[tauri::command]
 fn get_setting(store: State<'_, Store>, key: String) -> Result<Option<String>, String> {
@@ -2489,6 +2552,7 @@ pub fn run() {
             get_task_diff,
             run_login,
             pi_command,
+            task_command,
             get_setting,
             set_setting,
             get_default_cwd,

@@ -23,6 +23,7 @@ import {
   undoTaskFile,
   openArtifact,
   invokePiCommand,
+  invokeTaskCommand,
   inTauri,
   listTasks,
   listCollaborations,
@@ -39,6 +40,7 @@ import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
 import { ExecutionPicker, effortLabel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
+import QuestionCard, { type QuestionField } from "./components/QuestionCard";
 import CollaborationResults from "./components/CollaborationResults";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
@@ -544,6 +546,22 @@ export default function App() {
           ...previous.filter((item) => item.id !== event.payload.id),
         ]);
         refreshHistory();
+      }),
+      // 原生适配器（opencode）提问：模型提问渲染为可作答卡片
+      listen<{ taskId: string; id: string; title?: string; fields?: unknown[]; metadata?: unknown }>("task-form", (event) => {
+        const { taskId } = event.payload;
+        if (!taskId || deletedTasks.current.has(taskId)) return;
+        setApprovals((prev) => ({ ...prev, [taskId]: {
+          taskId,
+          id: event.payload.id,
+          tool: "question",
+          args: { __form: { title: event.payload.title, fields: event.payload.fields ?? [], metadata: event.payload.metadata } },
+        } }));
+        notify("AgentDeck · 需要你的回答", "Agent 向你提了一个问题");
+      }),
+      listen<{ taskId: string; id: string }>("task-form-settled", (event) => {
+        if (deletedTasks.current.has(event.payload.taskId)) return;
+        clearApproval(event.payload.taskId);
       }),
       listen<string>("context-cleanup-error", (event) => setActionError(event.payload)),
     ];
@@ -1400,6 +1418,21 @@ export default function App() {
                     }}
                     onCancel={() =>
                       invokePiCommand(approval.taskId, "reject", approval.id)
+                        .then(() => clearApproval(approval.taskId))
+                        .catch((e) => setActionError(String(e)))
+                    }
+                  />
+                ) : "__form" in approval.args ? (
+                  <QuestionCard
+                    title={(approval.args.__form as { title?: string }).title}
+                    fields={(approval.args.__form as { fields?: QuestionField[] }).fields ?? []}
+                    onSubmit={(answer) =>
+                      invokeTaskCommand(approval.taskId, "approve", approval.id, JSON.stringify(answer))
+                        .then(() => clearApproval(approval.taskId))
+                        .catch((e) => setActionError(String(e)))
+                    }
+                    onSkip={() =>
+                      invokeTaskCommand(approval.taskId, "reject", approval.id)
                         .then(() => clearApproval(approval.taskId))
                         .catch((e) => setActionError(String(e)))
                     }

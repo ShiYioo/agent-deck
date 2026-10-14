@@ -106,7 +106,8 @@ pub async fn spawn(
         .envs(environment)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
+        // 原生适配器任务需要 stdin 命令通道（提问作答）；CLI 任务保持 null。
+        .stdin(if native_adapter.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -148,6 +149,32 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+                // 原生适配器控制事件（提问通道）：直接转发前端，不进日志/事件模型。
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    match value.get("type").and_then(serde_json::Value::as_str) {
+                        Some("native_form_request") => {
+                            let _ = app.emit(
+                                "task-form",
+                                serde_json::json!({
+                                    "taskId": task_id,
+                                    "id": value.get("id"),
+                                    "title": value.get("title"),
+                                    "fields": value.get("fields"),
+                                    "metadata": value.get("metadata"),
+                                }),
+                            );
+                            continue;
+                        }
+                        Some("native_form_settled") => {
+                            let _ = app.emit(
+                                "task-form-settled",
+                                serde_json::json!({ "taskId": task_id, "id": value.get("id") }),
+                            );
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
                 for event in harness.parse_line(trimmed) {
                     if matches!(
@@ -313,6 +340,7 @@ mod tests {
                 label: "test".into(),
                 child: None,
                 cancelled: true,
+                commands: None,
             },
         );
         tokio::time::timeout(

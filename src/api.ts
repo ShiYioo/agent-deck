@@ -279,6 +279,17 @@ export async function invokePiCommand(
   await invoke("pi_command", { taskId, cmd, id: id ?? null, answer: answer ?? null });
 }
 
+/** 原生适配器任务（opencode 提问作答）的命令通道，经 stdin 下发到适配器。 */
+export async function invokeTaskCommand(
+  taskId: string,
+  cmd: string,
+  id?: string,
+  answer?: string,
+): Promise<void> {
+  if (!inTauri) browserStub("交互操作");
+  await invoke("task_command", { taskId, cmd, id: id ?? null, answer: answer ?? null });
+}
+
 export async function getSetting(key: string): Promise<string | null> {
   if (!inTauri) return null;
   return await invoke<string | null>("get_setting", { key });
