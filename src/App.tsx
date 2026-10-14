@@ -70,6 +70,14 @@ const DiffModal = lazy(() => import("./components/DiffModal").then((module) => (
 const SettingsPage = lazy(() => import("./components/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const CreateProjectModal = lazy(() => import("./components/CreateProjectModal").then((module) => ({ default: module.CreateProjectModal })));
 
+/**
+ * 侧栏转为浮层的最大视口宽度，必须与 styles.css 的 `@media (max-width: 860px)` 一致。
+ * CSS 决定版式，这里决定初始是否展开、以及选中会话后是否自动收起。
+ * 常驻侧栏占 292px（导航栏 52 + 侧栏 240），窄于 860px 时会把内容列压到 570px 以下，
+ * 输入框工具栏随之折行，所以提前让侧栏浮层化。
+ */
+const SIDEBAR_OVERLAY_MAX_WIDTH = 860;
+
 export default function App() {
   const { enabled: motionEnabled } = useMotionPolicy();
   // composer 的全局默认值
@@ -199,7 +207,7 @@ export default function App() {
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecution>({
     planning: inheritedExecution(), executing: inheritedExecution(), reviewing: inheritedExecution(),
   });
-  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > SIDEBAR_OVERLAY_MAX_WIDTH);
   const [sidebarView, setSidebarView] = useState<"projects" | "recent">("projects");
   const [searchRequest, setSearchRequest] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -268,7 +276,7 @@ export default function App() {
       setSelectedProjectId(project.id || null);
       setCwd(project.dir);
     }
-    if (window.innerWidth <= 760) setSidebarOpen(false);
+    if (window.innerWidth <= SIDEBAR_OVERLAY_MAX_WIDTH) setSidebarOpen(false);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".composer-input")?.focus());
   }, []);
 
@@ -737,7 +745,7 @@ export default function App() {
         if (row.harness === "deck") setPermission(row.mode === "approved" ? "approved" : "auto");
       }
       setActionError(null);
-      if (window.innerWidth <= 760) setSidebarOpen(false);
+      if (window.innerWidth <= SIDEBAR_OVERLAY_MAX_WIDTH) setSidebarOpen(false);
       void viewTask(id);
     },
     [viewTask, history, projects],

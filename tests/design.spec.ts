@@ -137,3 +137,38 @@ test("diff and project dialogs share quiet framing and keyboard focus", async ({
   await project.getByRole("textbox", { name: "项目名称", exact: true }).fill("新项目");
   await page.screenshot({ path: "test-results/codex-create-project-desktop.png" });
 });
+
+/**
+ * 侧栏分档回归：常驻侧栏占 292px（导航栏 52 + 侧栏 240），窄于 860px 会把内容列压到
+ * 570px 以下、输入区工具栏折行。既有用例只覆盖 1280 与 390/360，验证不到这一段。
+ */
+test("sidebar becomes an overlay before it pinches the composer toolbar", async ({ page }) => {
+  await mockDesktop(page);
+
+  // 860px 以上：侧栏常驻，占据自己的列，不覆盖正文
+  await page.setViewportSize({ width: 900, height: 816 });
+  await page.goto("/");
+  await page.waitForSelector(".composer-dock");
+  await expect(page.locator(".app-shell")).toHaveClass(/sidebar-open/);
+  const sidebar = (await page.locator(".app-sidebar").boundingBox())!;
+  const main = (await page.locator(".workspace-main").boundingBox())!;
+  expect(sidebar.x + sidebar.width).toBeLessThanOrEqual(main.x + 1);
+
+  // 860px 及以下：侧栏抽离文档流，初始收起，内容区拿回被占的宽度
+  await page.setViewportSize({ width: 800, height: 816 });
+  await page.goto("/");
+  await page.waitForSelector(".composer-dock");
+  await expect(page.locator(".app-shell")).not.toHaveClass(/sidebar-open/);
+  await expect(page.locator(".app-sidebar")).toHaveCount(0);
+  const wideMain = (await page.locator(".workspace-main").boundingBox())!;
+  expect(wideMain.width).toBeGreaterThan(700);
+
+  // 最紧的一档（761px，桌面版式的最窄处）：工具栏必须仍是单行
+  await page.setViewportSize({ width: 761, height: 816 });
+  await page.goto("/");
+  await page.waitForSelector(".composer-dock");
+  const toolbar = (await page.locator(".composer-toolbar").boundingBox())!;
+  expect(toolbar.height).toBeLessThan(60);
+  const composer = (await page.locator(".composer-card").boundingBox())!;
+  expect(composer.width).toBeGreaterThan(600);
+});
