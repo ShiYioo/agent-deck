@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mockDesktop } from "./helpers";
+import { mockDesktop, openSection } from "./helpers";
 
 async function openDetails(page: Page) {
   await page.goto("/");
@@ -12,7 +12,8 @@ async function openDetails(page: Page) {
 test("sharing boundaries and budgets save without replacing original messages", async ({ page }) => {
   await mockDesktop(page, false);
   await openDetails(page);
-  await page.locator("summary").filter({ hasText: /^共享边界与预算$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "共享范围与额度");
   await page.getByRole("checkbox", { name: "opencode", exact: true }).uncheck();
   await page.getByRole("textbox", { name: "禁止共享词", exact: true }).fill("customer-secret\nprivate-note");
   await page.getByRole("spinbutton", { name: "上下文窗口", exact: true }).fill("65536");
@@ -31,7 +32,8 @@ test("sharing boundaries and budgets save without replacing original messages", 
 test("policy conflicts retain the unsaved boundary draft", async ({ page }) => {
   await mockDesktop(page, false);
   await openDetails(page);
-  await page.locator("summary").filter({ hasText: /^共享边界与预算$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "共享范围与额度");
   await page.getByRole("textbox", { name: "禁止共享词", exact: true }).fill("keep-my-draft");
   await page.evaluate(() => { (window as unknown as Record<string, unknown>).__testPolicyConflict = true; });
   await page.getByRole("button", { name: "保存共享策略", exact: true }).click();
@@ -41,7 +43,8 @@ test("policy conflicts retain the unsaved boundary draft", async ({ page }) => {
 test("parallel DAG submits dependencies and cancellation unlocks controls", async ({ page }, testInfo) => {
   await mockDesktop(page, false);
   await openDetails(page);
-  await page.locator("summary").filter({ hasText: /^并行协作$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "多模型并行");
   await page.getByRole("textbox", { name: "task-1 任务要求", exact: true }).fill("审查权限边界");
   await page.getByRole("textbox", { name: "task-2 任务要求", exact: true }).fill("核对审查结果");
   await page.locator(".graph-node-editor").nth(1).getByRole("checkbox", { name: "task-1", exact: true }).check();
@@ -69,7 +72,8 @@ test("parallel DAG submits dependencies and cancellation unlocks controls", asyn
 test("failed graph launch keeps the task requirements", async ({ page }) => {
   await mockDesktop(page, false);
   await openDetails(page);
-  await page.locator("summary").filter({ hasText: /^并行协作$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "多模型并行");
   await page.getByRole("textbox", { name: "task-1 任务要求", exact: true }).fill("保留任务一");
   await page.getByRole("textbox", { name: "task-2 任务要求", exact: true }).fill("保留任务二");
   await page.evaluate(() => { (window as unknown as Record<string, unknown>).__testGraphError = "并行任务需要干净的 Git 基线"; });
@@ -81,7 +85,8 @@ test("graph controls fit a narrow execution panel", async ({ page }, testInfo) =
   await page.setViewportSize({ width: 390, height: 844 });
   await mockDesktop(page, false);
   await openDetails(page);
-  await page.locator("summary").filter({ hasText: /^并行协作$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "多模型并行");
   await page.getByRole("button", { name: "添加协作任务", exact: true }).click();
   const inputs = page.locator(".graph-node-editor textarea");
   await expect(inputs).toHaveCount(3);

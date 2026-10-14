@@ -350,6 +350,11 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
 .handoff-section[open] > div { padding: 8px 0; }
 .handoff-section label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
 .handoff-section select { min-height: 28px; max-width: 140px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-1); font: inherit; }
+/* 合并折叠区内部的段落标题：比 summary 更弱，避免和对话正文抢注意力 */
+.orchestration-heading { padding: 10px 0 4px; font-size: 11px; font-weight: 500; letter-spacing: .02em; color: var(--text-3); }
+.orchestration-heading:first-child { padding-top: 0; }
+/* 折叠区里的一句话说明：解释这块是做什么的，避免只丢一个内部术语给用户 */
+.orchestration-hint { padding: 2px 0 6px; font-size: 11px; line-height: 1.5; color: var(--text-3); }
 .task-controls { max-height: 42%; overflow-y: auto; flex-shrink: 0; padding: 4px 24px 12px; border-bottom: 1px solid #f1f1f1; }
 .task-controls[hidden] { display: none; }
 .task-metadata { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 0; font-size: 12px; }

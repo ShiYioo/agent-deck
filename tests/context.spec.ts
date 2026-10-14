@@ -1,12 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { mockDesktop } from "./helpers";
+import { mockDesktop, openSection } from "./helpers";
 
 test("shared state saves a version and preserves edits after a concurrent update", async ({ page }, testInfo) => {
   await mockDesktop(page, false);
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await page.locator("summary").filter({ hasText: /^共享任务$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "共享目标与约束");
   await page.getByRole("textbox", { name: "共享目标", exact: true }).fill("完成输入区优化");
   await page.getByRole("textbox", { name: "共享约束与决策", exact: true }).fill("不改动用户未提交的文件");
   await page.getByRole("button", { name: "保存共享任务", exact: true }).click();
@@ -42,7 +43,8 @@ test("a damaged native binding can be reset without losing public history", asyn
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await page.locator("summary").filter({ hasText: /^上下文记录$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "模型会话记录");
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "重建 zcode 上下文", exact: true }).click();
   await expect(page.getByRole("button", { name: "重建 zcode 上下文", exact: true })).toHaveCount(0);
@@ -68,7 +70,8 @@ test("original history is searchable and paginated without replacing the convers
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await page.locator("summary").filter({ hasText: /^上下文记录$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "模型会话记录");
   await page.getByRole("textbox", { name: "搜索会话原文", exact: true }).fill("早期约束");
   await page.getByRole("button", { name: "执行原文搜索", exact: true }).click();
   await expect(page.locator(".context-results > details")).toHaveCount(20);
@@ -86,7 +89,8 @@ test("context state stays usable inside a narrow viewport", async ({ page }, tes
   await page.getByRole("button", { name: "展开侧栏", exact: true }).click();
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await page.locator("summary").filter({ hasText: /^共享任务$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "共享目标与约束");
   const goal = page.getByRole("textbox", { name: "共享目标", exact: true });
   await goal.fill("完整共享任务目标");
   await goal.scrollIntoViewIfNeeded();
@@ -108,7 +112,7 @@ test("guided cooperation carries current restrictions and bounds phase duration"
   await page.getByRole("button", { name: "权限模式", exact: true }).click();
   await page.getByRole("option", { name: "只读规划", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await page.locator("summary").filter({ hasText: /^互相指导$/ }).click();
+  await openSection(page, "接力与多模型配合");
   await page.getByRole("spinbutton", { name: "阶段时限（分钟）", exact: true }).fill("10");
   await page.getByRole("button", { name: "开始指导协作", exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).__testCollaborationRequest))

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mockDesktop } from "./helpers";
+import { mockDesktop, openSection } from "./helpers";
 
 test.setTimeout(60_000);
 
@@ -125,7 +125,7 @@ test("handoff button preserves the current restriction and keeps internal instru
   await page.getByRole("button", { name: "权限模式", exact: true }).click();
   await page.getByRole("option", { name: "只读规划", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await page.locator("summary").filter({ hasText: /^会话接力$/ }).click();
+  await openSection(page, "接力与多模型配合");
   await page.getByRole("button", { name: "用 codex 接力", exact: true }).click();
   await expect.poll(async () => (await requests(page)).length).toBe(1);
   expect((await requests(page))[0]).toMatchObject({

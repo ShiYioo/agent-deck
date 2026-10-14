@@ -1162,9 +1162,6 @@ export default function App() {
             </div>
 
             <div className="task-actions">
-              {selectedRow && (detailsOpen || selectedStatus === "failed") && <Suspense fallback={<div role="status">加载上下文…</div>}>
-                <ConversationContext taskId={selectedRow.id} onRecovered={refreshHistory} />
-              </Suspense>}
                  {!selectedRunning && selectedStatus === "failed" && selectedRow && (
                   <button
                     onClick={() => {
@@ -1251,15 +1248,27 @@ export default function App() {
                 )}
             </div>
 
-            {/* 会话接力：把会话记录交给另一个 harness 继续（额度/登录失败时的正解） */}
+            {/* 次级信息的排布（见 docs/DESIGN.md：失败操作与进行中的协作始终可见，
+                会话接力属于次级操作）：
+                  1. 操作按钮留在 .task-actions 里，失败时立即可见；
+                  2. 「接力与多模型配合」是恢复动作，失败或额度耗尽时默认展开；
+                  3. 「上下文与协作设置」是配置，始终默认收起。
+                原来这些各自平铺成同权重的 ▸ 行，配置还排在了按钮上方。 */}
             {!selectedRunning && selectedRow && (
-              <Disclosure className="handoff-section mx-6 mt-2" title="会话接力">
+              <Disclosure
+                key={`orchestration:${selectedRow.id}:${hasQuotaError || selectedStatus === "failed"}`}
+                className="handoff-section mx-6 mt-2"
+                title="接力与多模型配合"
+                defaultOpen={hasQuotaError || selectedStatus === "failed"}
+              >
+                <div className="orchestration-hint">当前模型额度用尽、不可用，或想让另一个模型接手时使用。</div>
+                <div className="orchestration-heading">接力给其他模型</div>
+                <div className="orchestration-hint">
+                  {hasQuotaError
+                    ? "额度可能已耗尽，把已完成的对话交给另一个模型接着做："
+                    : "把已完成的对话交给另一个模型接着做，工作区改动与聊天记录都保留："}
+                </div>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="font-medium text-stone-600">
-                    {hasQuotaError
-                      ? "额度可能已耗尽——把会话记录交给其他 harness 接力："
-                      : "会话接力："}
-                  </span>
                   {(["deck", "zcode", "codex", "opencode"] as const)
                     .filter((h) => h !== selectedRow.harness)
                     .map((h) => (
@@ -1287,11 +1296,8 @@ export default function App() {
                     <span />
                   </div>
                 )}
-              </Disclosure>
-            )}
-
-            {!selectedRunning && selectedRow && (
-              <Disclosure className="handoff-section mx-6 mt-2" title="互相指导">
+                <div className="orchestration-heading">多模型配合</div>
+                <div className="orchestration-hint">一个模型负责规划与验收，另一个负责实施，按反馈返工。</div>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <label>指导方
                     <select aria-label="指导方" value={mentor} onChange={(e) => {
@@ -1333,6 +1339,15 @@ export default function App() {
                   </div>)}
                 </div>
               </Disclosure>
+            )}
+
+            {/* 上下文里的「恢复确认」是动作，必须常在可见处，因此不能把整个
+                ConversationContext 塞进一个折叠项；它自己分栏：动作在外，
+                配置收进内部的「上下文与协作设置」。 */}
+            {selectedRow && (detailsOpen || selectedStatus === "failed") && (
+              <Suspense fallback={<div role="status">加载上下文…</div>}>
+                <ConversationContext taskId={selectedRow.id} onRecovered={refreshHistory} />
+              </Suspense>
             )}
             {collaborations.filter((item) => item.source_task_id === selected
               || (item.conversation_id && item.conversation_id === (selectedRow?.conversation_id ?? selectedConversation?.turns[0]?.id))).map((item) => (

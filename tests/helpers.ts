@@ -1,4 +1,17 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+
+/**
+ * 展开一个折叠项；已经展开时不再点击。
+ * 「接力与多模型配合」在任务失败或额度耗尽时默认展开，无条件 click 会把它收起来。
+ * 判据用父级 <details> 的 open 属性：Disclosure 组件与 CollaborationBoard 里
+ * 手写的原生 <details> 都设置它，而原生 <summary> 没有 aria-expanded。
+ */
+export async function openSection(page: Page, title: string) {
+  const summary = page.locator("summary").filter({ hasText: new RegExp(`^${title}$`) });
+  const details = summary.locator("xpath=..");
+  if ((await details.getAttribute("open")) === null) await summary.click();
+  await expect(details).toHaveAttribute("open", "");
+}
 
 export async function mockDesktop(page: Page, failSend = true) {
   await page.addInitScript(({ failSend }) => {

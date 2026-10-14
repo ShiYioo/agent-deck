@@ -107,7 +107,8 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
   return <div className="collaboration-board">
     {error && <div className="context-error" role="alert">{error}</div>}
     <details className="context-disclosure" onToggle={(e) => setPolicyOpened(e.currentTarget.open)}>
-      <summary>共享边界与预算</summary>
+      <summary>共享范围与额度</summary>
+      <div className="orchestration-hint">跨模型共享哪些内容，以及上下文预算上限。</div>
       {policyOpened && <form className="context-state" onSubmit={(event) => {
         event.preventDefault();
         const current = epoch.current;
@@ -156,7 +157,8 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
       </form>}
     </details>
     <details className="context-disclosure" onToggle={(e) => setOpened(e.currentTarget.open)}>
-      <summary>并行协作</summary>
+      <summary>多模型并行</summary>
+      <div className="orchestration-hint">把任务拆给多个模型同时执行，各自产出后汇总。</div>
       {opened && <>
         <form className="graph-editor" onSubmit={(event) => {
           event.preventDefault();

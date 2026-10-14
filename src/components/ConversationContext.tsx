@@ -72,7 +72,7 @@ export default function ConversationContext({ taskId, onRecovered }: {
       {busy ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}{busy ? "加载中" : "重试"}
     </button>}
     {info && <>
-      <CollaborationBoard taskId={taskId} onChanged={onRecovered} />
+      {/* 恢复确认是动作，留在折叠项之外，保证中断/失败时始终可见 */}
       {!!info.recovery_task_ids.length && <div className="context-recovery">
         <label><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
           已确认旧执行者结束，并核对工作区改动</label>
@@ -85,7 +85,12 @@ export default function ConversationContext({ taskId, onRecovered }: {
           onRecovered();
         })}><Check size={14} />确认恢复</button>
       </div>}
-      <Disclosure title="共享任务" className="context-disclosure">
+      {/* 配置类信息统一收进一个默认收起的折叠项；动作类（上面的恢复确认）不进来 */}
+      <Disclosure title="上下文与协作设置" className="context-disclosure">
+        <div className="orchestration-hint">跨模型共享的目标与约束、各模型上次的会话记录，以及并行与边界设置。</div>
+        <CollaborationBoard taskId={taskId} onChanged={onRecovered} />
+        <Disclosure title="共享目标与约束" className="context-disclosure">
+        <div className="orchestration-hint">写给后续模型看的目标、约束与已定决策，按版本比较后更新。</div>
         <form className="context-state" onSubmit={(event) => {
           event.preventDefault();
           void run("save", async (current) => {
@@ -103,7 +108,8 @@ export default function ConversationContext({ taskId, onRecovered }: {
           </div>
         </form>
       </Disclosure>
-      <Disclosure title="上下文记录" className="context-disclosure">
+      <Disclosure title="模型会话记录" className="context-disclosure">
+        <div className="orchestration-hint">每个模型上次的会话句柄。重建只清除句柄，聊天原文与原生缓存都保留。</div>
         <div className="context-bindings">
           {info.bindings.map((binding) => <div key={`${binding.harness}:${binding.cwd}`}>
             <span>{binding.harness}</span><code title={binding.session_id}>{binding.session_id}</code><span>{binding.status === "done" ? "已完成" : binding.status === "running" ? "运行中" : "未完成"}</span>
@@ -142,6 +148,7 @@ export default function ConversationContext({ taskId, onRecovered }: {
             加载更多
           </button>}
         </div>}
+        </Disclosure>
       </Disclosure>
     </>}
   </section>;

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mockDesktop } from "./helpers";
+import { mockDesktop, openSection } from "./helpers";
 
 async function details(page: Page) {
   await page.goto("/");
@@ -19,7 +19,7 @@ async function choose(page: Page, title: string, option: string) {
 test("handoff uses the recipient model and native reasoning variant", async ({ page }, testInfo) => {
   await mockDesktop(page, false);
   await details(page);
-  await page.locator("summary").filter({ hasText: /^会话接力$/ }).click();
+  await openSection(page, "接力与多模型配合");
   await choose(page, "opencode 接力 模型", "opencode/test-free");
   await choose(page, "opencode 接力 思考强度", "高");
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
@@ -33,7 +33,7 @@ test("handoff uses the recipient model and native reasoning variant", async ({ p
 test("guided phases carry separate execution configurations", async ({ page }) => {
   await mockDesktop(page, false);
   await details(page);
-  await page.locator("summary").filter({ hasText: /^互相指导$/ }).click();
+  await openSection(page, "接力与多模型配合");
   await page.getByLabel("执行方", { exact: true }).selectOption("opencode");
   await choose(page, "planning 模型", "gpt-test");
   await choose(page, "planning 思考强度", "高");
@@ -55,7 +55,8 @@ test("pending node overrides keep a conflicted draft and fit a narrow viewport",
   await page.setViewportSize({ width: 390, height: 844 });
   await mockDesktop(page, false);
   await details(page);
-  await page.locator("summary").filter({ hasText: /^并行协作$/ }).click();
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "多模型并行");
   await page.getByRole("textbox", { name: "task-1 任务要求", exact: true }).fill("review");
   await page.getByRole("textbox", { name: "task-2 任务要求", exact: true }).fill("verify");
   await choose(page, "task-1 模型", "gpt-test");
@@ -87,7 +88,7 @@ test("pending node overrides keep a conflicted draft and fit a narrow viewport",
 test("models without variants do not advertise configurable thinking", async ({ page }) => {
   await mockDesktop(page, false);
   await details(page);
-  await page.locator("summary").filter({ hasText: /^会话接力$/ }).click();
+  await openSection(page, "接力与多模型配合");
   await choose(page, "opencode 接力 模型", "opencode/plain-free");
   await expect(page.getByRole("button", { name: "opencode 接力 思考强度", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "opencode 接力 思考强度", exact: true })).toContainText("不可配置");
