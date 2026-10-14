@@ -55,8 +55,10 @@ export const EventLine = memo(function EventLine({
         </Disclosure>
       );
     case "tool_use": {
-      // bash/shell 类命令：输入必须直接可见（默认展开，不折叠进 Disclosure）
-      const isCommand = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool);
+      // bash/shell 类命令：输入必须直接可见（默认展开，不折叠进 Disclosure）；
+      // question（模型提问）同样默认展开——问题文本是对话的关键节点
+      const isCommand = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool)
+        || event.tool === "question";
       if (isCommand) {
         return (
           <Disclosure className="activity-event" defaultOpen
@@ -83,8 +85,9 @@ export const EventLine = memo(function EventLine({
           </div>
         );
       }
-      // bash/shell 类命令的输出也默认展开：输入输出成对可见
-      const isCommandTool = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool);
+      // bash/shell 类命令的输出也默认展开：输入输出成对可见；提问的回答同此
+      const isCommandTool = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool)
+        || event.tool === "question";
       return (
         <Disclosure className="activity-event" defaultOpen={isCommandTool}
           title={<>{event.ok ? <IconCheckCircle size={13} /> : <IconXCircle size={13} />}<span>{event.tool} · 已完成</span></>}>

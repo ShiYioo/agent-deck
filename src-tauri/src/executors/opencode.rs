@@ -49,14 +49,14 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         "message.updated" => {
             let info = body.get("info").unwrap_or(&Value::Null);
             let role = info.get("role").and_then(Value::as_str).unwrap_or("");
-            // 模型信息：assistant 消息附带 providerID/modelID
+            // 模型信息：assistant 消息附带 providerID/modelID（v1）；v2 起字段名是 id
             let model = info
                 .get("model")
                 .map(|m| {
                     format!(
                         "{}/{}",
                         m.get("providerID").and_then(Value::as_str).unwrap_or("?"),
-                        m.get("modelID").and_then(Value::as_str).unwrap_or("?")
+                        model_name(m)
                     )
                 })
                 .or_else(|| {
@@ -103,17 +103,29 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                     }
                 }
                 "tool" => {
-                    let tool = part
-                        .get("tool")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_string();
                     let state = part.get("state").unwrap_or(&Value::Null);
+                    let input = state.get("input").filter(|v| v.is_object());
+                    // opencode v2 对 question（模型提问表单）的事件不带工具名——
+                    // 以 input.questions 识别它：提问必须在对话流里可读、可回溯
+                    let is_question = input
+                        .and_then(|v| v.get("questions"))
+                        .map(Value::is_array)
+                        .unwrap_or(false);
+                    let tool = if is_question {
+                        "question".to_string()
+                    } else {
+                        part.get("tool")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
+                            .to_string()
+                    };
                     let status = state.get("status").and_then(Value::as_str).unwrap_or("");
                     match status {
                         "pending" | "running" => {
-                            // bash 命令透明：展示命令本身而非 JSON/标题
-                            let detail = if tool == "bash" {
+                            // bash 命令透明：展示命令本身而非 JSON/标题；提问展示问题文本
+                            let detail = if is_question {
+                                question_detail(input)
+                            } else if tool == "bash" {
                                 state
                                     .pointer("/input/command")
                                     .and_then(Value::as_str)
@@ -142,21 +154,44 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                             });
                         }
                         "completed" => {
-                            let title =
-                                state.get("title").and_then(Value::as_str).unwrap_or("完成");
                             let output = state
                                 .get("output")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default();
+                            // 完成事件不带 input——question 的回答有固定前缀，按它兜底识别；
+                            // 展示层把英文模板解析成「问题：回答」
+                            let is_question_done = is_question
+                                || output.starts_with("User has answered your questions");
+                            let title = if is_question_done {
+                                question_answer_detail(output)
+                            } else {
+                                state
+                                    .get("title")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("完成")
+                                    .to_string()
+                            };
                             events.push(AgentEvent::ToolUse {
-                                tool: tool.clone(),
+                                tool: if is_question_done {
+                                    "question".into()
+                                } else {
+                                    tool.clone()
+                                },
                                 detail: title.to_string(),
                                 args: None,
                             });
                             events.push(AgentEvent::ToolResult {
-                                tool,
+                                tool: if is_question_done {
+                                    "question".into()
+                                } else {
+                                    tool
+                                },
                                 ok: true,
-                                detail: truncate(output, 400),
+                                detail: if is_question_done {
+                                    question_answer_detail(output)
+                                } else {
+                                    truncate(output, 400)
+                                },
                             });
                         }
                         "error" => {
@@ -231,6 +266,67 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// 模型对象里的模型名：v1 字段是 modelID，v2 起改名 id。
+fn model_name(m: &Value) -> &str {
+    m.get("modelID")
+        .or_else(|| m.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+}
+
+/// question 工具的可读标题：把 input.questions 的问题文本拼成一行（多问以「 / 」连接）。
+fn question_detail(input: Option<&Value>) -> String {
+    let items = input
+        .and_then(|v| v.get("questions"))
+        .and_then(Value::as_array)
+        .map(|qs| {
+            qs.iter()
+                .filter_map(|q| q.get("question").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if items.is_empty() {
+        "提问".to_string()
+    } else {
+        truncate(&items.join(" / "), 200)
+    }
+}
+
+/// question 回答的可读形态：把上游固定模板
+/// `User has answered your questions: "Q1"="A1", "Q2"="A2".` 解析成「Q1：A1 / Q2：A2」。
+fn question_answer_detail(output: &str) -> String {
+    let Some((_, body)) = output.split_once(':') else {
+        return truncate(output, 200);
+    };
+    // 剥掉模板尾巴，只留 "Q"="A" 对
+    let body = body.split(". You can now continue").next().unwrap_or(body);
+    let pairs = body
+        .trim()
+        .trim_end_matches('.')
+        .split(',')
+        .filter_map(|pair| {
+            let (q, a) = pair.trim().split_once('=')?;
+            let q = q.trim().trim_matches('"');
+            let a = a.trim().trim_matches('"');
+            if q.is_empty() {
+                return None;
+            }
+            let a = if a.is_empty() || a == "Unanswered" {
+                "未回答".to_string()
+            } else {
+                a.to_string()
+            };
+            Some(format!("{q}：{a}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if pairs.is_empty() {
+        truncate(body, 200)
+    } else {
+        truncate(&pairs, 200)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +399,49 @@ mod tests {
         );
     }
 
+    /// opencode v2 的 question 工具事件不带工具名——以 input.questions 识别，
+    /// 问题文本必须成为 detail（提问要在对话流里可读）
+    #[test]
+    fn question_tool_recognized_without_name() {
+        let running = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","state":{"status":"running","input":{"questions":[{"question":"你喜欢猫还是狗？","header":"猫还是狗","options":[{"label":"猫"},{"label":"狗"}]}]}}}}"#,
+        );
+        assert!(matches!(
+            &running[..],
+            [AgentEvent::ToolUse { tool, detail, args: Some(_) }]
+                if tool == "question" && detail == "你喜欢猫还是狗？"
+        ));
+
+        let done = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","state":{"status":"completed","output":"User has answered your questions: \"你喜欢猫还是狗？\"=\"狗\".","input":{"questions":[{"question":"你喜欢猫还是狗？","options":[{"label":"猫"},{"label":"狗"}]}]}}}}"#,
+        );
+        assert!(matches!(
+            &done[..],
+            [AgentEvent::ToolUse { tool, detail, .. }, AgentEvent::ToolResult { tool: rt, ok: true, .. }]
+                if tool == "question" && detail == "你喜欢猫还是狗？：狗" && rt == "question"
+        ));
+
+        // 完成事件可能不带 input（仅 output）——按回答前缀兜底识别
+        let no_input = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","state":{"status":"completed","output":"User has answered your questions: \"你喜欢猫还是狗？\"=\"猫\". You can now continue with the user's answers in mind."}}}"#,
+        );
+        assert!(matches!(
+            &no_input[..],
+            [AgentEvent::ToolUse { tool, detail, .. }, AgentEvent::ToolResult { ok: true, detail: rd, .. }]
+                if tool == "question" && detail == "你喜欢猫还是狗？：猫" && rd == "你喜欢猫还是狗？：猫"
+        ));
+
+        // 未回答（表单被跳过）：答案显示「未回答」而不是上游英文
+        let unanswered = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","state":{"status":"completed","output":"User has answered your questions: \"你喜欢猫还是狗？\"=\"Unanswered\"."}}}"#,
+        );
+        assert!(matches!(
+            &unanswered[..],
+            [AgentEvent::ToolUse { detail, .. }, ..]
+                if detail == "你喜欢猫还是狗？：未回答"
+        ));
+    }
+
     #[test]
     fn reasoning_part_yields_thinking() {
         let evs = events(
@@ -320,6 +459,17 @@ mod tests {
         );
         assert!(evs.contains(&AgentEvent::Status {
             text: "model: zai/glm-4.7".into()
+        }));
+    }
+
+    /// opencode v2 的模型对象字段从 modelID 改名为 id——两种形态都要能读出名字
+    #[test]
+    fn message_updated_reports_v2_model_id() {
+        let evs = events(
+            r#"{"type":"message.updated","info":{"id":"m1","role":"assistant","model":{"id":"mimo-v2.6-flash-free","providerID":"opencode","variant":"default"}}}"#,
+        );
+        assert!(evs.contains(&AgentEvent::Status {
+            text: "model: opencode/mimo-v2.6-flash-free".into()
         }));
     }
 

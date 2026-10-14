@@ -272,6 +272,22 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
   if (t === "bash" && typeof record.command === "string") {
     return String(record.command).slice(0, 800); // bash 命令保持全量透明
   }
+  // 模型提问（opencode question / deck ask_user_question）：问题文本 + 选项可读展示
+  if (t === "question" || t === "ask_user_question") {
+    const questions = Array.isArray(record.questions) ? record.questions : [];
+    const lines = (questions as { question?: string; options?: { label?: string }[] }[])
+      .slice(0, 2)
+      .map((q) => {
+        if (!q?.question) return undefined;
+        const options = (q.options ?? [])
+          .map((o) => o.label)
+          .filter(Boolean)
+          .slice(0, 4)
+          .join(" / ");
+        return previewText(options ? `${q.question}（${options}）` : q.question);
+      });
+    return compactLines(lines);
+  }
   if (t === "read") return compactLines([fieldLine(record, "offset"), fieldLine(record, "limit")]);
   if (t === "write") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "offset"), fieldLine(record, "limit")]);
   if (t === "edit") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "replace_all")]);
