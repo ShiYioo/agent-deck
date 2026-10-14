@@ -14,6 +14,8 @@ export type QuestionField = {
   placeholder?: string;
   minimum?: number;
   maximum?: number;
+  /** 允许选项之外自由作答（上游 question 工具自动附加「Type your own answer」）；默认 true */
+  custom?: boolean;
 };
 
 const fieldLabel = (field: QuestionField) => field.title || field.key;
@@ -92,7 +94,7 @@ export default function QuestionCard({
     if ((field.type === "string" || field.type === "number" || field.type === "integer") && field.options?.length) {
       return (
         <div className="space-y-1.5">
-          {field.options.map((option) => (
+          {(field.options ?? []).map((option) => (
             <button
               key={option.value}
               onClick={() => setValue(field.key, option.value)}
@@ -106,6 +108,16 @@ export default function QuestionCard({
               {option.description && <div className="mt-0.5 text-[11px] text-stone-500">{option.description}</div>}
             </button>
           ))}
+          {/* 自定义回答：上游 question 工具自动附加「Type your own answer」选项（custom 字段），自填值优先于点选 */}
+          {field.custom !== false && (
+            <input
+              aria-label={`${fieldLabel(field)}（自定义回答）`}
+              placeholder="其他（自定义回答）…"
+              value={typeof value === "string" && !field.options?.some((o) => o.value === value) ? value : ""}
+              onChange={(event) => setValue(field.key, event.target.value === "" ? undefined : event.target.value)}
+              className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-700 outline-none focus:border-amber-400"
+            />
+          )}
         </div>
       );
     }

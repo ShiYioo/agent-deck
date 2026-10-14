@@ -679,6 +679,8 @@ async function zcode(params) {
         label: o.label,
         description: o.description,
       })),
+      // AskUserQuestion 语义允许自由作答（上游 question 工具同款 custom 标志）
+      custom: true,
     }));
     output({ type: "native_form_request", id, title: "Questions", fields });
     const decision = await new Promise((resolve) => pendingInputs.set(id, resolve));

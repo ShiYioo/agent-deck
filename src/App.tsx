@@ -1471,6 +1471,36 @@ export default function App() {
                         )}
                       </button>
                     ))}
+                    {/* 自由回答：ZCode AskUserQuestion 语义允许选项之外自填（上游自动附加的「Type your own answer」） */}
+                    <div className="flex items-center gap-2">
+                      <input
+                        aria-label="自定义回答"
+                        placeholder="其他（自定义回答）…"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            const value = e.currentTarget.value.trim();
+                            if (!value) return;
+                            invokePiCommand(approval.taskId, "approve", approval.id, value)
+                              .then(() => clearApproval(approval.taskId))
+                              .catch((err) => setActionError(String(err)));
+                          }
+                        }}
+                        className="min-w-0 flex-1 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-700 outline-none focus:border-amber-400"
+                      />
+                      <button
+                        onClick={(e) => {
+                          const input = (e.currentTarget.previousElementSibling as HTMLInputElement | null);
+                          const value = input?.value.trim();
+                          if (!value) return;
+                          invokePiCommand(approval.taskId, "approve", approval.id, value)
+                            .then(() => clearApproval(approval.taskId))
+                            .catch((err) => setActionError(String(err)));
+                        }}
+                        className="task-action task-action-primary"
+                      >
+                        提交
+                      </button>
+                    </div>
                     <div className="text-[11px] text-stone-400">Agent 正在等待你的选择（也可在输入框直接回复，或跳过此问题）</div>
                   </div>
                 ) : (
