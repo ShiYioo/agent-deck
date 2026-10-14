@@ -137,6 +137,53 @@ fn locate_bundled_zcode() -> Option<Located> {
         })
 }
 
+/// 判定定位到的 zcode 是否桌面版捆绑形态——**包括经 .cmd 垫片间接指向的情况**。
+/// 捆绑脚本在 `-p` 一次性模式下建不出模型（provider registry 为空），
+/// 必须走 app-server 协议适配器。用户常自建垫片把捆绑 CLI 放上 PATH，
+/// 只认 NodeScript 形态会把这类垫片误判成独立 CLI。
+pub fn is_bundled_zcode() -> bool {
+    match locate(Harness::Zcode) {
+        Some(Located::NodeScript(_)) => true,
+        Some(Located::Program(p)) => {
+            let entry = shim_entry(&p).unwrap_or(p);
+            is_bundle_script(&entry)
+        }
+        None => false,
+    }
+}
+
+/// .cmd/.bat 垫片文本里引用的脚本路径（如 `node "…\zcode.cjs" %*`）；非垫片返回 `None`。
+fn shim_entry(p: &Path) -> Option<PathBuf> {
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat") => {}
+        _ => return None,
+    }
+    let text = std::fs::read_to_string(p).ok()?;
+    let mut rest = text.as_str();
+    while let Some(q) = rest.find('"') {
+        let after = &rest[q + 1..];
+        let Some(end) = after.find('"') else { break };
+        let candidate = &after[..end];
+        if candidate.to_ascii_lowercase().ends_with("zcode.cjs") {
+            return Some(PathBuf::from(candidate));
+        }
+        rest = &after[end + 1..];
+    }
+    None
+}
+
+/// 桌面版捆绑布局的识别标志：脚本在 `resources/glm` 下，或同目录有 `.node-bundle-meta.json`。
+fn is_bundle_script(entry: &Path) -> bool {
+    let normalized = entry
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    if normalized.contains("resources/glm/") {
+        return true;
+    }
+    entry.with_file_name(".node-bundle-meta.json").is_file()
+}
+
 /// ZCode 捆绑 CLI 的候选路径，按可信度排序。
 fn bundled_zcode_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -200,6 +247,40 @@ mod tests {
         let (program, prefix) = located.into_command().unwrap();
         assert_eq!(program, PathBuf::from("cmd"));
         assert_eq!(prefix, vec!["/C".to_string(), r"C:\npm\zcode.cmd".into()]);
+    }
+
+    /// 用户自建的 zcode.cmd 垫片（把桌面版捆绑 CLI 放上 PATH）必须被识别成捆绑形态
+    #[test]
+    fn shim_pointing_at_bundle_is_detected() {
+        let dir = std::env::temp_dir().join("agentdeck-zcode-shim-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("zcode.cmd");
+        std::fs::write(
+            &shim,
+            "@echo off\r\nnode \"E:\\Apps\\ZCode\\resources\\glm\\zcode.cjs\" %*\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            shim_entry(&shim),
+            Some(PathBuf::from("E:\\Apps\\ZCode\\resources\\glm\\zcode.cjs"))
+        );
+        // resources/glm 布局即捆绑形态
+        assert!(is_bundle_script(Path::new(
+            "E:\\Apps\\ZCode\\resources\\glm\\zcode.cjs"
+        )));
+    }
+
+    /// 同目录带 .node-bundle-meta.json 也是捆绑布局（路径不含 resources/glm 时兜底）
+    #[test]
+    fn bundle_meta_marker_is_detected() {
+        let dir = std::env::temp_dir().join("agentdeck-zcode-meta-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".node-bundle-meta.json"), "{}").unwrap();
+        assert!(is_bundle_script(&dir.join("zcode.cjs")));
+        // 普通独立安装（无标志）不算
+        assert!(!is_bundle_script(Path::new(
+            "C:\\npm\\node_modules\\zcode\\zcode.cjs"
+        )));
     }
 
     #[test]

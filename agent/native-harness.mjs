@@ -490,7 +490,9 @@ async function opencode(params) {
 const ZCODE_RUNTIME_PREFERENCES = {
   nativeSearchEnhancementsEnabled: false,
   memoryEnabled: false,
-  askUserQuestionAutoResolutionEnabled: true,
+  // AskUserQuestion 不自动跳过：经 interaction/requestUserInput 递给 UI 作答
+  // （accept + 空 answers 是上游的「自动继续」语义，等于放弃提问）
+  askUserQuestionAutoResolutionEnabled: false,
   modelContextBudgetStrategy: "preflight-v1",
 };
 
@@ -625,11 +627,77 @@ async function zcodeLauncher(params, entry) {
   return { program: process.execPath, args: [] };
 }
 
+// 用户常自建 .cmd 垫片把桌面版捆绑 CLI 放上 PATH（node "…\resources\glm\zcode.cjs" %*）。
+// 入参可能是垫片路径——内置配置/启动器都要按垫片引用的真实脚本定位。
+function resolveZcodeEntry(entry) {
+  if (!/\.cmd$/i.test(entry)) return entry;
+  try {
+    const text = readFileSyncCmd(entry, "utf8").toString();
+    const m = text.match(/"([^"]*zcode\.cjs)"/i);
+    if (m && existsSyncPath(m[1])) return m[1];
+  } catch { /* 非垫片形态 */ }
+  return entry;
+}
+
 async function zcode(params) {
   const { file: personalFile, selection } = await zcodeProviderConfig(params.model);
-  const entry = params.launcherEntry ?? params.program;
+  const entry = resolveZcodeEntry(params.launcherEntry ?? params.program);
   const builtinFile = await zcodeBuiltinConfig(entry, params.zcodeBuiltin);
   const { program, args } = await zcodeLauncher(params, entry);
+
+  // AskUserQuestion 的提问通道：interaction/requestUserInput 到达时发 native_form_request，
+  // 等 UI 经 stdin 作答（cmd=approve 携 {q0: 选项}），映射回上游的
+  // content.answers（键 = 问题文本）。无 questions 的请求按上游自动继续语义放行。
+  const pendingInputs = new Map();
+  const stdinLines = createInterface({ input: process.stdin });
+  stdinLines.on("line", (line) => {
+    let command;
+    try { command = JSON.parse(line); } catch { return; }
+    const resolver = command?.id ? pendingInputs.get(String(command.id)) : undefined;
+    if (!resolver) return;
+    pendingInputs.delete(String(command.id));
+    resolver({ cmd: command.cmd ?? "reject", answer: command.answer });
+  });
+  stdinLines.on("close", () => {
+    for (const resolve of pendingInputs.values()) resolve({ cmd: "reject" });
+    pendingInputs.clear();
+  });
+  const askUser = async (request) => {
+    const body = request.params ?? {};
+    const questions = Array.isArray(body.questions) ? body.questions : [];
+    if (!questions.length || !body.requestId) {
+      return { action: "accept", content: { answers: {} } };
+    }
+    const id = String(body.requestId);
+    const fields = questions.map((q, i) => ({
+      key: `q${i}`,
+      title: q.header ?? `问题 ${i + 1}`,
+      description: q.question,
+      type: q.multiSelect ? "multiselect" : "string",
+      options: (q.options ?? []).map((o) => ({
+        value: o.value ?? o.label,
+        label: o.label,
+        description: o.description,
+      })),
+    }));
+    output({ type: "native_form_request", id, title: "Questions", fields });
+    const decision = await new Promise((resolve) => pendingInputs.set(id, resolve));
+    output({ type: "native_form_settled", id });
+    if (decision.cmd !== "approve") {
+      return { action: "decline", reason: "用户跳过了提问" };
+    }
+    let raw = {};
+    try { raw = JSON.parse(decision.answer ?? "{}"); } catch { raw = {}; }
+    const answers = {};
+    questions.forEach((q, i) => {
+      const value = raw[`q${i}`];
+      if (value !== undefined && value !== "") {
+        answers[q.question] = Array.isArray(value) ? value.join(", ") : String(value);
+      }
+    });
+    return { action: "accept", content: { answers } };
+  };
+
   const child = executable(
     program,
     [...args, entry, "app-server", "--stdio", "--surface", "desktop"],
@@ -672,6 +740,9 @@ async function zcode(params) {
       if (request.method === "session/requestRuntimePreferences") return { result: ZCODE_RUNTIME_PREFERENCES };
       // headless 下没有审批 UI；沿用 yolo 语义直接放行。
       if (request.method === "interaction/requestPermission") return { result: { decision: "allow" } };
+      if (request.method === "interaction/requestUserInput") {
+        return askUser(request).then((result) => ({ result }));
+      }
       return { result: {} };
     },
   );
@@ -723,7 +794,7 @@ async function zcode(params) {
     if (finished.response) text = finished.response;
     if (text) output({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
     output({ type: "complete", ok: true });
-  } finally { rpc.close(); await stopChild(child); }
+  } finally { stdinLines.close(); rpc.close(); await stopChild(child); }
 }
 
 export async function main(params) {

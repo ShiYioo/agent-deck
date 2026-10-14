@@ -62,9 +62,12 @@ pub async fn spawn(
             )
         })?;
         let entry = located.path().to_string_lossy().into_owned();
-        // NodeScript 形态的 launcher 交给适配器解析（ZCode 用 Electron 当 Node）。
+        // NodeScript 形态与「垫片指向捆绑脚本」形态的 launcher 都交给适配器解析
+        // （ZCode 用 Electron 当 Node；垫片再包一层 cmd 会双重启动 app-server）。
         let (launcher, launcher_args) =
-            if matches!(located, crate::discovery::Located::NodeScript(_)) {
+            if matches!(located, crate::discovery::Located::NodeScript(_))
+                || (harness == Harness::Zcode && crate::discovery::is_bundled_zcode())
+            {
                 (String::new(), Vec::<String>::new())
             } else {
                 let (program, prefix) = located.into_command()?;

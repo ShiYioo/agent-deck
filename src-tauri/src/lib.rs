@@ -652,11 +652,7 @@ pub(crate) async fn start_task_impl(
     // （`...t.standalone ? { importLegacy } : {}`）。官方桌面端自己从来不跑 `-p`，
     // 它用 `app-server --stdio` 且由客户端在 session/create 里显式下发模型。
     // 所以捆绑形态一律走协议适配器；PATH 上有独立 zcode 时仍走原来的 `-p`。
-    let zcode_bundled = harness == Harness::Zcode
-        && matches!(
-            crate::discovery::locate(Harness::Zcode),
-            Some(crate::discovery::Located::NodeScript(_))
-        );
+    let zcode_bundled = harness == Harness::Zcode && crate::discovery::is_bundled_zcode();
     // ZCode 模型选择：CLI 无 --model 旗标，官方机制是持久化 defaultModelSelection
     // （/model 的落盘字段）。选了模型 = 切换 ZCode 默认模型，对该 CLI 后续会话生效。
     // 走协议适配器时模型随 session/create 显式下发，不必改动用户配置。
