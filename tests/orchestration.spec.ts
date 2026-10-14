@@ -65,7 +65,7 @@ test("parallel DAG submits dependencies and cancellation unlocks controls", asyn
   await expect(page.locator(".graph-run-heading")).toContainText("已停止");
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "移除隔离成果", exact: true }).click();
-  await expect(page.locator(".graph-run-heading")).toContainText("已移除隔离成果");
+  await expect(page.locator(".graph-run-heading")).toContainText("成果已移除");
   expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).__testDiscardRequest))
     .toEqual({ id: "graph-test", confirmed: true });
 });
@@ -97,4 +97,41 @@ test("graph controls fit a narrow execution panel", async ({ page }, testInfo) =
   }
   await page.getByRole("button", { name: "启动并行协作", exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath("graph-mobile.png") });
+});
+
+test("collaboration output reads without opening any settings panel", async ({ page }) => {
+  await mockDesktop(page, false);
+  // 记录随页面加载就存在，模拟「回到一个已经有协作产出的任务」：
+  // 不该需要任何额外点击，更不必展开设置面板
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__testGraphs = [{
+      id: "graph-read", source_task_id: "a", conversation_id: "a", cwd: "C:\\workspace\\agent-deck",
+      base_commit: "0123456789abcdef", status: "done", integrated: false, max_parallel: 2, timeout_secs: 900, error: null,
+      nodes: [
+        { spec: { id: "task-1", harness: "codex", prompt: "把侧栏改成浮层\n并在 860px 以下转浮层", dependencies: [], read_only: true },
+          status: "done", task_id: "child-1", report: "侧栏已在 860px 以下转为浮层。", error: null, patch_path: null, patch_hash: "abcdef1234567890", worktree: null },
+        { spec: { id: "task-2", harness: "opencode", prompt: "补断点回归测试", dependencies: [], read_only: false },
+          status: "failed", task_id: "child-2", report: null, error: "测试环境不可用", patch_path: null, patch_hash: null, worktree: null },
+      ],
+    }];
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
+  const run = page.locator(".graph-run");
+  await expect(run).toBeVisible();
+  // 有节点失败时不能报「都完成了」
+  await expect(run.locator(".graph-run-heading")).toContainText("1/2 个模型完成了，1 个没成");
+  // 每行先说「被派去做什么」，而不是内部节点编号
+  const first = run.locator(".graph-node-result").first();
+  await expect(first.locator("summary")).toContainText("把侧栏改成浮层");
+  await expect(first.locator("summary")).not.toContainText("task-1");
+  await expect(first.locator(".node-source")).toHaveText("codex");
+  await expect(first.locator(".node-status")).toHaveText("已完成");
+  await expect(run.locator(".graph-node-result").nth(1).locator(".node-status")).toHaveText("失败");
+  // 内部标识与整段产出默认不占正文，展开才给
+  await expect(page.getByText("改动记录 abcdef123456")).toBeHidden();
+  await expect(page.getByText("侧栏已在 860px 以下转为浮层。")).toBeHidden();
+  await first.locator("summary").click();
+  await expect(page.getByText("侧栏已在 860px 以下转为浮层。")).toBeVisible();
+  await expect(page.getByText("改动记录 abcdef123456")).toBeVisible();
 });

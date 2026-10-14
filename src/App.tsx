@@ -39,6 +39,7 @@ import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
 import { ExecutionPicker, effortLabel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
+import CollaborationResults from "./components/CollaborationResults";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
 import { applyTaskUpdates, type LogItem, type TaskUpdate } from "./taskState";
@@ -186,6 +187,10 @@ export default function App() {
   // 待审批的工具调用（deck 运行时 approved 模式）
   const [approvals, setApprovals] = useState<Record<string, ApprovalRequest>>({});
   const approval = selected ? approvals[selected] : undefined;
+  // 协作成果的刷新信号：编辑器启动新编排、或编排状态变化时递增，
+  // 让协作成果卡立刻取到新数据（同 RuntimeStatus 的 refreshKey 约定）。
+  const [graphRefresh, setGraphRefresh] = useState(0);
+  const bumpGraphs = useCallback(() => setGraphRefresh((n) => n + 1), []);
   const clearApproval = useCallback((taskId: string) => {
     setApprovals((prev) => {
       const next = { ...prev };
@@ -1355,7 +1360,7 @@ export default function App() {
                 配置收进内部的「上下文与协作设置」。 */}
             {selectedRow && (detailsOpen || selectedStatus === "failed") && (
               <Suspense fallback={<div role="status">加载上下文…</div>}>
-                <ConversationContext taskId={selectedRow.id} onRecovered={refreshHistory} />
+                <ConversationContext taskId={selectedRow.id} onRecovered={() => { refreshHistory(); bumpGraphs(); }} />
               </Suspense>
             )}
             {collaborations.filter((item) => item.source_task_id === selected
@@ -1387,11 +1392,12 @@ export default function App() {
                   <CollaborationPlanCard
                     taskId={approval.taskId}
                     plan={approval.args.__plan as CollaborationPlan}
-                    onSettled={(summary) =>
+                    onSettled={(summary) => {
+                      bumpGraphs();
                       invokePiCommand(approval.taskId, "approve", approval.id, summary)
                         .then(() => clearApproval(approval.taskId))
-                        .catch((e) => setActionError(String(e)))
-                    }
+                        .catch((e) => setActionError(String(e)));
+                    }}
                     onCancel={() =>
                       invokePiCommand(approval.taskId, "reject", approval.id)
                         .then(() => clearApproval(approval.taskId))
@@ -1460,6 +1466,10 @@ export default function App() {
                 )}
               </div>
             )}
+
+            {/* 协作产出卡：与审批卡同在操作区、不随对话滚走。
+                产出属于任务本身，因此不再埋在「上下文与协作设置」里。 */}
+            {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} />}
 
             <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning} loading={!!selected && loadingEvents.has(selected)} footer={artifactsFooter} />
           </MotionLayer>

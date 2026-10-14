@@ -1,22 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { GitMerge, Play, Plus, RefreshCw, Save, Square, Trash2 } from "lucide-react";
+import { Play, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
-  cancelGraphRun, discardGraphRun, getContextPolicy, getSetting, integrateGraphRun, listGraphRuns, resetConversationBinding, setSetting, startGraphRun, updateContextPolicy,
+  getContextPolicy, getSetting, listGraphRuns, resetConversationBinding, setSetting, startGraphRun, updateContextPolicy,
   type ContextPolicy, type GraphNodeSpec, type GraphRun,
 } from "../api";
 import { inheritedExecution } from "../api";
-import { ExecutionPicker, effortLabel } from "./ExecutionPicker";
-import { DelegationExecution } from "./DelegationExecution";
+import { ExecutionPicker } from "./ExecutionPicker";
 
 const harnesses = ["codex", "opencode", "zcode", "deck"];
 const defaults: ContextPolicy = {
   version: 0, allowed_harnesses: harnesses, redact_secrets: true, blocked_terms: [],
   context_window: 32768, output_reserve: 8192, overhead_reserve: 8192,
-};
-const label: Record<string, string> = {
-  pending: "待执行", running: "运行中", done: "已完成", failed: "失败", blocked: "依赖失败",
-  cancelled: "已停止", interrupted: "已中断", needs_attention: "待处理",
-  discarded: "已移除隔离成果",
 };
 const initialNodes = (): GraphNodeSpec[] => [
   { id: "task-1", harness: "codex", prompt: "", dependencies: [], read_only: true },
@@ -192,44 +186,10 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
             <label>并行<input aria-label="并行数量" type="number" min={1} max={3} value={parallel} disabled={locked} onChange={(e) => setParallel(Number(e.target.value))} /></label>
             <label>分钟<input aria-label="协作总时限" type="number" min={1} max={60} value={minutes} disabled={locked} onChange={(e) => setMinutes(Number(e.target.value))} /></label>
             <button type="submit" className="icon-button" aria-label="启动并行协作" title="启动并行协作" disabled={locked}><Play size={16} /></button>
-            <button type="button" className="icon-button" aria-label="刷新协作成果" title="刷新协作成果" disabled={busy} onClick={() => {
-              const current = epoch.current;
-              void action(async () => { const rows = await listGraphRuns(taskId); if (current === epoch.current) setRuns(rows ?? []); });
-            }}><RefreshCw size={16} /></button>
           </div>
         </form>
-        {runs.map((run) => <div className="graph-run" key={run.id}>
-          <div className="graph-run-heading"><span>{label[run.status] ?? run.status}</span><code title={run.base_commit}>{run.base_commit.slice(0, 8)}</code>
-            {run.status === "running" && <button className="icon-button" title="停止任务图" aria-label="停止任务图" disabled={busy}
-              onClick={() => void action(async () => { await cancelGraphRun(run.id); })}><Square size={14} /></button>}
-            {run.status === "done" && !run.integrated && run.nodes.some((n) => !n.spec.read_only) && <button className="context-command" disabled={busy}
-              onClick={() => {
-                if (!window.confirm("将所有隔离成果集成到源工作区？源目录必须保持基线不变。")) return;
-                const current = epoch.current;
-                void action(async () => { const updated = await integrateGraphRun(run.id, true); if (current === epoch.current) { setRuns((p) => p.map((r) => r.id === run.id ? updated : r)); onChanged(); } });
-              }}><GitMerge size={14} />集成成果</button>}
-            {run.integrated && <span>已集成</span>}
-            {!["running", "discarded"].includes(run.status) && <button className="icon-button" aria-label="移除隔离成果" title="移除隔离成果" disabled={busy}
-              onClick={() => {
-                if (!window.confirm("移除本任务图的所有隔离工作树和补丁？聊天记录及已集成到源目录的修改将保留。")) return;
-                const current = epoch.current;
-                void action(async () => { const updated = await discardGraphRun(run.id, true); if (current === epoch.current) { setRuns((p) => p.map((r) => r.id === run.id ? updated : r)); onChanged(); } });
-              }}><Trash2 size={14} /></button>}
-          </div>
-          {run.error && <div className="context-error">{run.error}</div>}
-          {run.nodes.map((node) => <details className="graph-node-result" key={node.spec.id}>
-            <summary>{node.spec.id} · {node.spec.harness} · {label[node.status] ?? node.status}</summary>
-             {run.status === "running" && node.status === "pending" && <DelegationExecution runId={run.id} target={node.spec.id}
-               harness={node.spec.harness} initial={node.spec.execution ?? inheritedExecution()} taskId={taskId} />}
-             {node.task_id && <div className="execution-current">
-               <span title={node.spec.execution?.model ?? ""}>{node.spec.execution?.model || "默认模型"}</span>
-               <span>{effortLabel(node.spec.execution?.effort || "默认")}</span>
-             </div>}
-            {node.error && <div className="context-error">{node.error}</div>}
-            {node.report && <pre>{node.report}</pre>}
-            {node.patch_hash && <code title={node.patch_hash}>{node.patch_hash.slice(0, 12)}</code>}
-          </details>)}
-        </div>)}
+        {/* 成果渲染在对话区的 CollaborationResults 卡里 —— 产出属于任务本身，不属于设置面板。
+            这里只保留编辑器，以及「是否已有协作在跑」这个占用状态（runs 仍用于 locked）。 */}
       </>}
     </details>
   </div>;

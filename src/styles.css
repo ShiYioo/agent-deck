@@ -582,6 +582,28 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
 .graph-run-heading { font-size: 12px; }
 .graph-node-result { padding: 6px 0; font-size: 12px; }
 .graph-node-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
+/* 成果卡节点行：先「被派去做什么」，再来源与状态；内部标识收进展开详情 */
+.graph-node-result > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  padding: 5px 0;
+}
+.node-task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.node-source, .node-status { flex: none; font-size: 11px; color: var(--text-3); }
+.node-detail { padding: 2px 0 8px 14px; }
+.node-prompt {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.node-empty { padding: 4px 0; font-size: 11px; color: var(--text-3); }
+.node-artifact { margin-top: 6px; font-size: 11px; color: var(--text-3); }
 .execution-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
 .execution-picker > div { min-width: 0; max-width: 100%; }
 .execution-picker .dropdown-trigger { max-width: 100%; font-size: 12px; }
