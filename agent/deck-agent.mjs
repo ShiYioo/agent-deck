@@ -354,6 +354,18 @@ async function ensureSessionForProfile(p, { cwd, mode, resumeFile, toolsEnabled 
         .map((c) => c.text ?? "")
         .join("");
       if (text.trim()) lastAssistantText = text;
+      // 上下文用量上报（ZCode 交互层设计）：input+cacheRead ≈ 当前上下文占用
+      const u = event.message.usage;
+      if (u && (u.input || u.cacheRead)) {
+        const used = (u.input || 0) + (u.cacheRead || 0) + (u.output || 0);
+        if (used > 0) {
+          emit({
+            type: "deck_context_usage",
+            usedTokens: used,
+            totalTokens: u.totalTokens ?? null,
+          });
+        }
+      }
     }
   });
   return session;

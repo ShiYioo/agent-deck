@@ -517,6 +517,15 @@ export default function App() {
           const todos = payload.todos as { content: string; status: string }[];
           enqueueUpdate({ taskId, todos });
         }
+        // 上下文用量徽标（ZCode 交互层设计）：随 assistant 回复更新
+        if (payload.type === "deck_context_usage" && typeof payload.usedTokens === "number") {
+          setLive((prev) => prev[taskId]
+            ? { ...prev, [taskId]: { ...prev[taskId], contextUsage: {
+                used: payload.usedTokens as number,
+                window: (payload.totalTokens as number) || null,
+              } } }
+            : prev);
+        }
         const mapped = normalizeAgentEvents(payload as never);
         for (const event of mapped) {
           if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
@@ -1594,6 +1603,7 @@ export default function App() {
             }}
             onSend={handleSend}
             running={selectedRunning}
+            contextUsage={selectedLive?.contextUsage}
             recentModels={recentModels}
             placeholder={
               selectedRunning

@@ -82,6 +82,8 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
     };
   }
   if (t === "deck_run_start") return { type: "status", text: "pi 运行时启动" };
+  // 上下文用量徽标数据（不进日志流；App 拦截到 live 状态）
+  if (t === "deck_context_usage") return null;
   if (t === "deck_status") return { type: "status", text: String(ev.text ?? "") };
   // 重连提示（Rust 重连循环直发 status；text 已含「进程异常退出，正在重连（第 N/2 次）…」）
   if (t === "deck_session_file") return { type: "session_id", id: String(ev.path ?? "") };
@@ -226,6 +228,8 @@ export type LiveTask = {
   queuedConfigs?: import("./api").ExecutionConfig[];
   /** deck 运行时的 todo 清单（todo_write 工具维护） */
   todos?: { content: string; status: string }[];
+  /** 上下文用量（ZCode 式徽标）：used = 当前占用 token，window = 上下文窗口（空=未知） */
+  contextUsage?: { used: number; window: number | null };
 };
 
 

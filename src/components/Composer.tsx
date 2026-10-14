@@ -37,6 +37,7 @@ export const Composer = memo(function Composer({
   onRemoveAttachment,
   onSend,
   running,
+  contextUsage,
   placeholder,
   draftKey,
   onStop,
@@ -67,6 +68,8 @@ export const Composer = memo(function Composer({
   catalogVersion: boolean;
   /** 任务运行中：发送将入队而非直接派发 */
   running?: boolean;
+  /** 运行中上下文用量（ZCode 交互层设计）：deck 运行时随回复实时更新 */
+  contextUsage?: { used: number; window: number | null };
   /** 历史常用模型（按频次），动态列表按此置顶排序 */
   recentModels?: string[];
   placeholder?: string;
@@ -627,6 +630,16 @@ export const Composer = memo(function Composer({
             <span />
             <span />
             <span />
+          </span>
+        )}
+        {running && contextUsage && (
+          <span
+            className="mr-1 rounded-full bg-stone-100 px-2 py-0.5 text-[10px] text-stone-500"
+            title={contextUsage.window
+              ? `上下文已用 ${Math.round(contextUsage.used / 1000)}k / ${Math.round(contextUsage.window / 1000)}k tokens（${Math.min(100, Math.round((contextUsage.used / contextUsage.window) * 100))}%）`
+              : `上下文已用 ${Math.round(contextUsage.used / 1000)}k tokens`}
+          >
+            ctx {Math.round(contextUsage.used / 1000)}k{contextUsage.window ? ` · ${Math.min(100, Math.round((contextUsage.used / contextUsage.window) * 100))}%` : ""}
           </span>
         )}
 
