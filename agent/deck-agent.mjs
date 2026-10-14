@@ -276,6 +276,7 @@ function buildTools(mode, cwd) {
   tools = [
     ...tools,
     ...DELEGATE_TOOLS,
+    PROPOSE_COLLABORATION_TOOL,
     SWITCH_MODEL_TOOL,
     WEBFETCH_TOOL,
     TODO_TOOL,
@@ -747,6 +748,117 @@ const DELEGATE_TOOLS = [
     },
   },
 ];
+
+const PLAN_HARNESSES = ["codex", "opencode", "zcode", "deck"];
+
+/**
+ * 多模型协作规划工具：agent 出计划，用户在界面上确认，再由 Agent Deck 启动编排。
+ * 真正的执行在 Rust 侧（隔离 worktree + DAG + 集成），所以这里不 spawn 任何进程 ——
+ * 与 DELEGATE_TOOLS 的阻塞式单路委派是两条路。
+ * 计划随 deck_approval_request 的 __plan 字段送达 UI，用户的确认/取消沿既有审批通道回来。
+ */
+const PROPOSE_COLLABORATION_TOOL = {
+  name: "propose_collaboration",
+  label: "规划多模型协作",
+  description:
+    "当任务确实值得拆给多个模型时，提出一份协作计划交用户确认：谁做什么、依赖关系、并发与总时限。" +
+    "确认后由 Agent Deck 在隔离工作树中执行并汇总成果，运行状态见任务视图。" +
+    "不要为了多模型而多模型：一次委派能解决的就用 delegate_to_zcode / delegate_to_codex，" +
+    "只有需要多路并行产出后再对比或汇总时才用这个。",
+  parameters: {
+    type: "object",
+    properties: {
+      why: { type: "string", description: "一句话说明为什么值得拆成多路（用户据此决定是否同意）" },
+      nodes: {
+        type: "array",
+        minItems: 2,
+        maxItems: 12,
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "短标识，如 impl / tests / review" },
+            harness: { type: "string", enum: PLAN_HARNESSES, description: "执行该节点的运行时" },
+            prompt: { type: "string", description: "该节点自包含的任务要求（对方看不到当前对话）" },
+            dependencies: {
+              type: "array",
+              items: { type: "string" },
+              description: "必须先完成的节点 id；留空表示可立即开始",
+            },
+            read_only: { type: "boolean", description: "默认 true：只产出结论，不改文件" },
+          },
+          required: ["id", "harness", "prompt"],
+        },
+      },
+      parallel: { type: "number", description: "最多同时执行几个，1-3，默认 2" },
+      minutes: { type: "number", description: "协作总时限（分钟），1-60，默认 15" },
+    },
+    required: ["why", "nodes"],
+  },
+  execute: async (toolCallId, args, signal) => {
+    const id = toolCallId || randomUUID();
+    const raw = Array.isArray(args?.nodes) ? args.nodes : [];
+    if (raw.length < 2) {
+      return {
+        content: [{ type: "text", text: "协作计划至少需要两个节点；单路任务请用 delegate_to_zcode / delegate_to_codex。" }],
+        isError: true,
+      };
+    }
+    const declared = new Set(raw.map((n) => String(n?.id ?? "")));
+    const nodes = raw.slice(0, 12).map((n) => {
+      const nodeId = String(n?.id ?? "");
+      return {
+        id: nodeId,
+        harness: PLAN_HARNESSES.includes(n?.harness) ? n.harness : "codex",
+        prompt: String(n?.prompt ?? ""),
+        // 只保留真实存在且非自身的依赖，别把无效 id 交给 Rust 侧的 DAG 校验
+        dependencies: (Array.isArray(n?.dependencies) ? n.dependencies : [])
+          .map(String)
+          .filter((d) => d !== nodeId && declared.has(d)),
+        read_only: n?.read_only !== false,
+      };
+    });
+    if (nodes.some((n) => !n.id || !n.prompt.trim())) {
+      return { content: [{ type: "text", text: "每个节点都需要非空 id 与 prompt。" }], isError: true };
+    }
+    const plan = {
+      why: String(args?.why ?? ""),
+      nodes,
+      parallel: Math.min(3, Math.max(1, Number(args?.parallel) || 2)),
+      minutes: Math.min(60, Math.max(1, Number(args?.minutes) || 15)),
+    };
+    const answer = await new Promise((resolve) => {
+      const onAbort = () => resolve(null);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      pendingApproval = {
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        info: { id, tool: "propose_collaboration", args },
+      };
+      emit({
+        type: "deck_approval_request",
+        id,
+        tool: "propose_collaboration",
+        args: { __plan: plan },
+      });
+    });
+    pendingApproval = null;
+    if (answer === null || answer === false) {
+      return { content: [{ type: "text", text: "用户取消了这份协作计划。" }], isError: true };
+    }
+    const note = typeof answer === "object" && answer?.choice ? String(answer.choice) : "用户已确认";
+    const shape = nodes.map((n) => `${n.id}(${n.harness})`).join("、");
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${note}。编排已在隔离工作树中启动：${shape}；最多 ${plan.parallel} 路并行、${plan.minutes} 分钟。各节点产出与集成入口见任务视图的「多模型并行」。`,
+        },
+      ],
+    };
+  },
+};
 
 /** 模型自治工具：agent 自己切换底层模型（setModel 保留会话上下文） */
 const SWITCH_MODEL_TOOL = {

@@ -38,6 +38,7 @@ import {
 import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
 import { ExecutionPicker, effortLabel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
+import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
 import { applyTaskUpdates, type LogItem, type TaskUpdate } from "./taskState";
@@ -1382,7 +1383,22 @@ export default function App() {
             {/* 审批卡片：工具授权；ask_user_question 渲染为选项式提问（抄 ZCode AskUserQuestion） */}
             {approval && selectedRunning && (
               <div className="anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
-                {"__question" in approval.args ? (
+                {"__plan" in approval.args ? (
+                  <CollaborationPlanCard
+                    taskId={approval.taskId}
+                    plan={approval.args.__plan as CollaborationPlan}
+                    onSettled={(summary) =>
+                      invokePiCommand(approval.taskId, "approve", approval.id, summary)
+                        .then(() => clearApproval(approval.taskId))
+                        .catch((e) => setActionError(String(e)))
+                    }
+                    onCancel={() =>
+                      invokePiCommand(approval.taskId, "reject", approval.id)
+                        .then(() => clearApproval(approval.taskId))
+                        .catch((e) => setActionError(String(e)))
+                    }
+                  />
+                ) : "__question" in approval.args ? (
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-xs font-medium text-amber-800">
                       <span className="rounded bg-amber-200/70 px-1.5 py-0.5 font-mono text-[10px]">

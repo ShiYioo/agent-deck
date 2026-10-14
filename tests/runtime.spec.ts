@@ -185,3 +185,63 @@ test("changing the harness preserves the conversation without reusing the other 
   expect(await page.evaluate(() =>
     (window as unknown as { __testCalls: string[] }).__testCalls)).not.toContain("build_smart_handoff_prompt");
 });
+
+const planEvent = (id: string) => ({
+  taskId: "new-task", type: "deck_approval_request", id, tool: "propose_collaboration",
+  args: { __plan: {
+    why: "实现与测试互相独立，可并行后再对比",
+    nodes: [
+      { id: "impl", harness: "codex", prompt: "把侧栏改成浮层", dependencies: [], read_only: true },
+      { id: "tests", harness: "opencode", prompt: "补 860px 断点回归测试", dependencies: ["impl"], read_only: true },
+    ],
+    parallel: 2, minutes: 15,
+  } },
+});
+
+test("an agent-proposed collaboration plan starts the shared graph run only after the user confirms", async ({ page }) => {
+  await mockDesktop(page, false);
+  await page.goto("/");
+  await send(page, "@deck 把实现和测试分开做");
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  await emit(page, "pi-event", planEvent("plan-1"));
+  // 计划以自然语言呈现，用户只需判断「要不要这么做」，不必自己搭 DAG
+  await expect(page.getByText("建议这样拆给多个模型")).toBeVisible();
+  await expect(page.getByText("实现与测试互相独立，可并行后再对比")).toBeVisible();
+  await expect(page.getByText("把侧栏改成浮层")).toBeVisible();
+  await expect(page.getByText("补 860px 断点回归测试")).toBeVisible();
+  await expect(page.getByText("等 impl 先完成")).toBeVisible();
+  await expect(page.getByText(/最多 2 路并行，总时限 15 分钟，共 2 个节点/)).toBeVisible();
+  expect(await page.evaluate(() =>
+    (window as unknown as { __testGraphRequest?: unknown }).__testGraphRequest)).toBeUndefined();
+  await page.getByRole("button", { name: "确认并启动", exact: true }).click();
+  await expect.poll(() => page.evaluate(() =>
+    Boolean((window as unknown as { __testGraphRequest?: unknown }).__testGraphRequest))).toBe(true);
+  // 复用既有编排通道（隔离 worktree + DAG），不是给 agent 另开一条执行路径
+  const request = await page.evaluate(() =>
+    (window as unknown as { __testGraphRequest: Record<string, unknown> }).__testGraphRequest);
+  expect(request.sourceTaskId).toBe("new-task");
+  expect(request.nodes).toEqual([
+    { id: "impl", harness: "codex", prompt: "把侧栏改成浮层", dependencies: [], read_only: true },
+    { id: "tests", harness: "opencode", prompt: "补 860px 断点回归测试", dependencies: ["impl"], read_only: true },
+  ]);
+  expect(request.maxParallel).toBe(2);
+  expect(request.timeoutSecs).toBe(900);
+  // agent 阻塞在审批通道上，必须收到回执才会继续
+  expect(await page.evaluate(() =>
+    (window as unknown as { __testCalls: string[] }).__testCalls)).toContain("pi_command");
+  await expect(page.getByRole("button", { name: "确认并启动", exact: true })).toHaveCount(0);
+});
+
+test("cancelling an agent-proposed plan releases the agent without starting a run", async ({ page }) => {
+  await mockDesktop(page, false);
+  await page.goto("/");
+  await send(page, "@deck 把实现和测试分开做");
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  await emit(page, "pi-event", planEvent("plan-2"));
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(page.getByRole("button", { name: "确认并启动", exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() =>
+    (window as unknown as { __testGraphRequest?: unknown }).__testGraphRequest)).toBeUndefined();
+  expect(await page.evaluate(() =>
+    (window as unknown as { __testCalls: string[] }).__testCalls)).toContain("pi_command");
+});
