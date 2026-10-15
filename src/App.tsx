@@ -188,17 +188,21 @@ export default function App() {
   // composer 附件（绝对路径）；发送后清空
   const [attachments, setAttachments] = useState<string[]>([]);
 
-  // 待审批的工具调用（deck 运行时 approved 模式）
-  const [approvals, setApprovals] = useState<Record<string, ApprovalRequest>>({});
-  const approval = selected ? approvals[selected] : undefined;
+  // 待审批队列（每任务 FIFO，ZCode approvalQueue 同款）：审批/提问是 Promise 语义——
+  // 应答一次即按 id 出队；新请求排队而不是覆盖未决请求。队首呈现，其余计数提示。
+  const [approvals, setApprovals] = useState<Record<string, ApprovalRequest[]>>({});
+  const approval = selected ? approvals[selected]?.[0] : undefined;
   // 协作成果的刷新信号：编辑器启动新编排、或编排状态变化时递增，
   // 让协作成果卡立刻取到新数据（同 RuntimeStatus 的 refreshKey 约定）。
   const [graphRefresh, setGraphRefresh] = useState(0);
   const bumpGraphs = useCallback(() => setGraphRefresh((n) => n + 1), []);
-  const clearApproval = useCallback((taskId: string) => {
+  const clearApproval = useCallback((taskId: string, id?: string) => {
     setApprovals((prev) => {
-      const next = { ...prev };
-      delete next[taskId];
+      const queue = prev[taskId];
+      if (!queue) return prev;
+      const nextQueue = id ? queue.filter((a) => a.id !== id) : [];
+      const next = { ...prev, [taskId]: nextQueue };
+      if (!nextQueue.length) delete next[taskId];
       return next;
     });
   }, []);
@@ -500,12 +504,17 @@ export default function App() {
         if (!taskId || deletedTasks.current.has(taskId)) return;
         // 审批请求：单独呈现在操作区
         if (payload.type === "deck_approval_request") {
-          setApprovals((prev) => ({ ...prev, [taskId]: {
+          const request: ApprovalRequest = {
             taskId,
             id: String(payload.id ?? ""),
             tool: String(payload.tool ?? "tool"),
             args: (payload.args as Record<string, unknown>) ?? {},
-          } }));
+          };
+          setApprovals((prev) => {
+            const queue = prev[taskId] ?? [];
+            if (queue.some((a) => a.id === request.id)) return prev; // 重复投递去重
+            return { ...prev, [taskId]: [...queue, request] };
+          });
           notify(
             "AgentDeck · 需要审批",
             `Agent 请求执行工具：${payload.tool ?? "tool"}`,
@@ -564,12 +573,17 @@ export default function App() {
       listen<{ taskId: string; id: string; title?: string; fields?: unknown[]; metadata?: unknown }>("task-form", (event) => {
         const { taskId } = event.payload;
         if (!taskId || deletedTasks.current.has(taskId)) return;
-        setApprovals((prev) => ({ ...prev, [taskId]: {
+        const request: ApprovalRequest = {
           taskId,
           id: event.payload.id,
           tool: "question",
           args: { __form: { title: event.payload.title, fields: event.payload.fields ?? [], metadata: event.payload.metadata } },
-        } }));
+        };
+        setApprovals((prev) => {
+          const queue = prev[taskId] ?? [];
+          if (queue.some((a) => a.id === request.id)) return prev;
+          return { ...prev, [taskId]: [...queue, request] };
+        });
         notify("AgentDeck · 需要你的回答", "Agent 向你提了一个问题");
       }),
       listen<{ taskId: string; id: string }>("task-form-settled", (event) => {
@@ -1469,6 +1483,11 @@ export default function App() {
             {/* 审批卡片：工具授权；ask_user_question 渲染为选项式提问（抄 ZCode AskUserQuestion） */}
             {approval && selectedRunning && (
               <div className="anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
+                {(approvals[approval.taskId]?.length ?? 0) > 1 && (
+                  <div className="mb-2 rounded-md bg-amber-100/80 px-2 py-1 text-[11px] text-amber-800">
+                    还有 {(approvals[approval.taskId]?.length ?? 0) - 1} 个待处理请求（按顺序应答）
+                  </div>
+                )}
                 {"__plan" in approval.args ? (
                   <CollaborationPlanCard
                     taskId={approval.taskId}
@@ -1476,12 +1495,12 @@ export default function App() {
                     onSettled={(summary) => {
                       bumpGraphs();
                       invokePiCommand(approval.taskId, "approve", approval.id, summary)
-                        .then(() => clearApproval(approval.taskId))
+                        .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)));
                     }}
                     onCancel={() =>
                       invokePiCommand(approval.taskId, "reject", approval.id)
-                        .then(() => clearApproval(approval.taskId))
+                        .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)))
                     }
                   />
@@ -1491,12 +1510,12 @@ export default function App() {
                     fields={(approval.args.__form as { fields?: QuestionField[] }).fields ?? []}
                     onSubmit={(answer) =>
                       invokeTaskCommand(approval.taskId, "approve", approval.id, JSON.stringify(answer))
-                        .then(() => clearApproval(approval.taskId))
+                        .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)))
                     }
                     onSkip={() =>
                       invokeTaskCommand(approval.taskId, "reject", approval.id)
-                        .then(() => clearApproval(approval.taskId))
+                        .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)))
                     }
                   />
@@ -1513,7 +1532,7 @@ export default function App() {
                         key={opt.label}
                         onClick={() =>
                           invokePiCommand(approval.taskId, "approve", approval.id, opt.label)
-                            .then(() => clearApproval(approval.taskId))
+                            .then(() => clearApproval(approval.taskId, approval.id))
                             .catch((e) => setActionError(String(e)))
                         }
                         className="block w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-left transition-colors hover:border-amber-400 hover:bg-amber-50/50"
@@ -1535,7 +1554,7 @@ export default function App() {
                             const value = e.currentTarget.value.trim();
                             if (!value) return;
                             invokePiCommand(approval.taskId, "approve", approval.id, value)
-                              .then(() => clearApproval(approval.taskId))
+                              .then(() => clearApproval(approval.taskId, approval.id))
                               .catch((err) => setActionError(String(err)));
                           }
                         }}
@@ -1547,7 +1566,7 @@ export default function App() {
                           const value = input?.value.trim();
                           if (!value) return;
                           invokePiCommand(approval.taskId, "approve", approval.id, value)
-                            .then(() => clearApproval(approval.taskId))
+                            .then(() => clearApproval(approval.taskId, approval.id))
                             .catch((err) => setActionError(String(err)));
                         }}
                         className="task-action task-action-primary"
@@ -1569,7 +1588,7 @@ export default function App() {
                   <button
                     onClick={() =>
                       invokePiCommand(approval.taskId, "approve", approval.id)
-                        .then(() => clearApproval(approval.taskId))
+                        .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)))
                     }
                      className="task-action task-action-primary"
@@ -1579,7 +1598,7 @@ export default function App() {
                   <button
                     onClick={() =>
                       invokePiCommand(approval.taskId, "reject", approval.id)
-                        .then(() => clearApproval(approval.taskId))
+                        .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)))
                     }
                     className="rounded-full border border-red-300 px-3.5 py-1 font-medium text-red-600 transition-colors hover:bg-red-50"

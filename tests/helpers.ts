@@ -36,6 +36,7 @@ export async function mockDesktop(page: Page, failSend = true) {
     const w = window as unknown as Record<string, unknown>;
     const calls: string[] = [];
     w.__testCalls = calls;
+    w.__testInvokes = [];
     w.__testTasks = tasks;
     const deleted: string[][] = [];
     w.__testDeleted = deleted;
@@ -69,6 +70,7 @@ export async function mockDesktop(page: Page, failSend = true) {
       unregisterCallback: (id: number) => callbacks.delete(id),
       invoke: async (cmd: string, args: Record<string, unknown>) => {
         calls.push(cmd);
+        (w.__testInvokes as { cmd: string; args: Record<string, unknown> }[]).push({ cmd, args });
         if (cmd === "check_harness") return { ready: true, issues: [] };
         if (cmd === "get_execution_defaults") return executionDefaults[`${args.taskId ?? "default"}:${args.harness}`] ?? { model: null, effort: null };
         if (cmd === "set_execution_defaults") {
