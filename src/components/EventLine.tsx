@@ -1,6 +1,5 @@
 import { memo, useState } from "react";
 import { Copy, Check, AlertCircle } from "lucide-react";
-import type { AgentEvent } from "../types";
 import { AssistantText } from "./AssistantText";
 import { Disclosure } from "./Disclosure";
 import { ToolIcon } from "./ToolIcon";
@@ -11,18 +10,18 @@ import {
   IconXCircle,
   IconInfo,
 } from "./icons";
+import type { ConversationRow } from "../conversation";
 
-/** Stable event objects keep prior messages out of streaming re-renders. */
+/** 语义行渲染：行由 conversation.ts 归约产生，本组件只做投影。 */
 export const EventLine = memo(function EventLine({
-  event,
+  row,
 }: {
-  event: AgentEvent;
+  row: ConversationRow;
 }) {
-
-  switch (event.type) {
-    case "user_message":
+  switch (row.kind) {
+    case "user":
       // 接力注入的简报/内置提示词：入库留档但不透出，只显示接力标记
-      if (event.hidden) {
+      if (row.hidden) {
         return (
           <div className="activity-event flex items-center gap-1.5">
             <IconInfo size={13} className="shrink-0" />
@@ -32,86 +31,79 @@ export const EventLine = memo(function EventLine({
       }
       return (
         <div className="message-user">
-          <div>{event.text}</div>
+          <div>{row.text}</div>
         </div>
       );
-    case "assistant_message":
+    case "assistant":
       return (
         <div className="assistant-entry">
-          {event.sourceHarness && <div className="message-source">{event.sourceHarness}</div>}
+          {row.sourceHarness && <div className="message-source">{row.sourceHarness}</div>}
           <div className="message-assistant">
-          <AssistantText text={event.text} />
-          <MessageActions text={event.text} />
+          <AssistantText text={row.text} />
+          <MessageActions text={row.text} />
           </div>
         </div>
       );
-    case "thinking":
+    case "thought":
       return (
         <Disclosure
           className="activity-event"
-          title={<><IconSparkle size={13} /><span>思考{event.durationMs && event.durationMs >= 100 ? ` · ${(event.durationMs / 1000).toFixed(1)} 秒` : ""}</span></>}
+          title={<><IconSparkle size={13} /><span>思考{row.durationMs && row.durationMs >= 100 ? ` · ${(row.durationMs / 1000).toFixed(1)} 秒` : ""}</span></>}
         >
-          <pre>{event.text}</pre>
+          <pre>{row.text}</pre>
         </Disclosure>
       );
-    case "tool_use": {
-      // bash/shell 类命令：输入必须直接可见（默认展开，不折叠进 Disclosure）；
-      // question（模型提问）同样默认展开——问题文本是对话的关键节点
-      const isCommand = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool)
-        || event.tool === "question";
-      if (isCommand) {
+    case "tool": {
+      if (row.status === "running") {
+        // 进行中：工具名 + 入参投影（命令默认展开保持可见）
         return (
-          <Disclosure className="activity-event" defaultOpen
-            title={<><ToolIcon tool={event.tool} /><span>{event.tool}</span></>}>
-            <pre>{event.detail}</pre>
+          <Disclosure className="activity-event" defaultOpen={row.isCommand}
+            title={<><ToolIcon tool={row.tool} /><span>{row.tool}</span></>}>
+            <pre>{row.detail ?? ""}</pre>
           </Disclosure>
         );
       }
-      return (
-        <Disclosure className="activity-event" title={<><ToolIcon tool={event.tool} /><span>{event.tool}</span></>}>
-          <pre>{event.detail}</pre>
-        </Disclosure>
-      );
-    }
-    case "tool_result":
-      if (!event.ok) {
-        // 失败必须醒目：红色标题 + 失败标志 + 错误信息默认展开（模型据此继续，用户据此判断）
+      if (row.status === "failed") {
+        const parts = [row.detail, row.output].filter((s): s is string => !!s);
+        const content = parts.filter((s, i) => i === 0 || s !== parts[0]).join("\n");
         return (
-          <div className="event-error">
+          <div role="alert" className="event-error">
             <Disclosure className="activity-event" defaultOpen
-              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{event.tool} 失败</span></>}>
-              <pre className="text-red-600">{event.detail || "（无错误详情）"}</pre>
+              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{row.tool} 失败</span></>}>
+              <pre className="text-red-600">{content || "（无错误详情）"}</pre>
             </Disclosure>
           </div>
         );
       }
-      // bash/shell 类命令的输出也默认展开：输入输出成对可见；提问的回答同此
-      const isCommandTool = /bash|shell|exec|terminal|command|cmd|powershell/i.test(event.tool)
-        || event.tool === "question";
+      // completed：命令类默认展开（输入输出成对可见）；提问同样展开——问题与回答要在流里可见
+      const parts = [row.detail, row.output].filter((s): s is string => !!s);
+      const content = parts.filter((s, i) => i === 0 || s !== parts[0]).join("\n");
+      const defaultOpen = row.isCommand || row.isQuestion;
       return (
-        <Disclosure className="activity-event" defaultOpen={isCommandTool}
-          title={<>{event.ok ? <IconCheckCircle size={13} /> : <IconXCircle size={13} />}<span>{event.tool} · 已完成</span></>}>
-          <pre>{event.detail}</pre>
+        <Disclosure className="activity-event" defaultOpen={defaultOpen}
+          title={<><IconCheckCircle size={13} /><span>{row.tool} · 已完成</span></>}>
+          <pre>{content}</pre>
         </Disclosure>
       );
+    }
     case "status":
       return (
         <div className="activity-event flex items-center gap-1.5">
           <IconInfo size={13} className="shrink-0" />
-          {event.text}
+          {row.text}
         </div>
       );
     case "complete": {
       const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
       return (
         <div className="activity-event flex items-center gap-1.5">
-           {event.ok ? <IconCheckCircle size={14} className="shrink-0" /> : <IconXCircle size={14} className="shrink-0" />}
-          任务{event.ok ? "完成" : "结束"}
-          {event.durationMs ? ` · 工作 ${Math.round(event.durationMs / 1000)} 秒` : ""}
-          {event.tokens && (
-            <span className="text-stone-400" title={`输入 ${event.tokens.input} · 输出 ${event.tokens.output}${event.tokens.reasoning ? ` · 推理 ${event.tokens.reasoning}` : ""}${event.tokens.cached ? ` · 缓存命中 ${event.tokens.cached}` : ""} tokens`}>
-              · tokens ↑{fmtK(event.tokens.input)} ↓{fmtK(event.tokens.output)}
-              {event.tokens.reasoning ? `（思考 ${fmtK(event.tokens.reasoning)}）` : ""}
+           {row.ok ? <IconCheckCircle size={14} className="shrink-0" /> : <IconXCircle size={14} className="shrink-0" />}
+          任务{row.ok ? "完成" : "结束"}
+          {row.durationMs ? ` · 工作 ${Math.round(row.durationMs / 1000)} 秒` : ""}
+          {row.tokens && (
+            <span className="text-stone-400" title={`输入 ${row.tokens.input} · 输出 ${row.tokens.output}${row.tokens.reasoning ? ` · 推理 ${row.tokens.reasoning}` : ""}${row.tokens.cached ? ` · 缓存命中 ${row.tokens.cached}` : ""} tokens`}>
+              · tokens ↑{fmtK(row.tokens.input)} ↓{fmtK(row.tokens.output)}
+              {row.tokens.reasoning ? `（思考 ${fmtK(row.tokens.reasoning)}）` : ""}
             </span>
           )}
         </div>
@@ -121,13 +113,13 @@ export const EventLine = memo(function EventLine({
       return (
         <div role="alert" className="event-error flex items-start gap-1.5 whitespace-pre-wrap text-red-600">
           <IconXCircle size={13} className="mt-0.5 shrink-0" />
-          <span className="min-w-0">{event.message}</span>
+          <span className="min-w-0">{row.message}</span>
         </div>
       );
     case "raw":
       return (
         <Disclosure className="activity-event" title={<><IconTerminal size={13} /><span>运行输出</span></>}>
-          <pre>{event.line}</pre>
+          <pre>{row.line}</pre>
         </Disclosure>
       );
     default:

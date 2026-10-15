@@ -38,6 +38,8 @@ export const Composer = memo(function Composer({
   onSend,
   running,
   contextUsage,
+  historyPrompts = [],
+  onSetAttachments,
   placeholder,
   draftKey,
   onStop,
@@ -70,6 +72,10 @@ export const Composer = memo(function Composer({
   running?: boolean;
   /** 运行中上下文用量（ZCode 交互层设计）：deck 运行时随回复实时更新 */
   contextUsage?: { used: number; window: number | null };
+  /** ↑↓ 历史召回：最近任务提示词（最新在前，已去重） */
+  historyPrompts?: string[];
+  /** 历史召回/快照恢复时整体重置附件 */
+  onSetAttachments?: (paths: string[]) => void;
   /** 历史常用模型（按频次），动态列表按此置顶排序 */
   recentModels?: string[];
   placeholder?: string;
@@ -77,6 +83,49 @@ export const Composer = memo(function Composer({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const drafts = useRef(new Map<string, string>());
+  // ↑↓ 历史召回（ZCode app-input-history 同款）：首次 ↑ 快照当前草稿（含附件），
+  // ↓ 回到尽头完整还原；手动输入随时退出历史态。
+  const historyIndexRef = useRef(0);
+  const historySnapshotRef = useRef<string | null>(null);
+  const historyAttachmentsRef = useRef<string[] | null>(null);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  const resetHistoryNav = () => {
+    historyIndexRef.current = 0;
+    historySnapshotRef.current = null;
+    historyAttachmentsRef.current = null;
+  };
+  const recallHistory = (dir: -1 | 1): boolean => {
+    if (!historyPrompts.length) return false;
+    if (dir === -1) {
+      if (historySnapshotRef.current === null) {
+        historySnapshotRef.current = text;
+        historyAttachmentsRef.current = attachmentsRef.current;
+      }
+      const next = historyIndexRef.current + 1;
+      if (next > historyPrompts.length) return true; // 已到最旧：停留不退出
+      historyIndexRef.current = next;
+      const prompt = historyPrompts[next - 1];
+      setText(prompt);
+      drafts.current.set(draftKey, prompt);
+      onSetAttachments?.([]);
+      return true;
+    }
+    if (historyIndexRef.current <= 0) return false;
+    if (historyIndexRef.current === 1) {
+      const snapshot = historySnapshotRef.current ?? "";
+      setText(snapshot);
+      drafts.current.set(draftKey, snapshot);
+      onSetAttachments?.(historyAttachmentsRef.current ?? []);
+      resetHistoryNav();
+      return true;
+    }
+    historyIndexRef.current -= 1;
+    const prompt = historyPrompts[historyIndexRef.current - 1];
+    setText(prompt);
+    drafts.current.set(draftKey, prompt);
+    return true;
+  };
   // 附件：附加按钮选入，chips 展示可移除；发送后清空由父级负责
   const pickAttachments = async () => {
     const picked = await open({ multiple: true, title: "选择附件（图片/文件）" });
@@ -496,6 +545,7 @@ export const Composer = memo(function Composer({
           onChange={(e) => {
             setText(e.target.value);
             drafts.current.set(draftKey, e.target.value);
+            resetHistoryNav();
             refreshMention(e.target);
           }}
           onKeyDown={(e) => {
@@ -538,6 +588,15 @@ export const Composer = memo(function Composer({
                 setMention(null);
                 return;
               }
+            }
+            // ↑↓ 历史召回：草稿为空或正在浏览历史时才接管（ZCode 同款闸门）
+            if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey
+              && (text === "" || historySnapshotRef.current !== null)) {
+              if (recallHistory(-1)) { e.preventDefault(); return; }
+            }
+            if (e.key === "ArrowDown" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey
+              && historySnapshotRef.current !== null) {
+              if (recallHistory(1)) { e.preventDefault(); return; }
             }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

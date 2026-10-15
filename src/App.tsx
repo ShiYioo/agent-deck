@@ -38,6 +38,7 @@ import {
   inheritedExecution,
 } from "./api";
 import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
+import { buildConversation, foldToolRows } from "./conversation";
 import { ExecutionPicker, effortLabel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
@@ -610,6 +611,14 @@ export default function App() {
         }
         try {
           await compactTask(selected, compact[1]?.trim() || undefined);
+          // 乐观占位（ZCode local-compact 同语义）：真实压缩事件到达后由归约器认领移除
+          const localKey = nextKey();
+          setLive((prev) => prev[selected]
+            ? { ...prev, [selected]: { ...prev[selected], events: [
+                ...(prev[selected].events ?? []),
+                { event: { type: "status", text: "已请求压缩上下文…", compacting: true, retryKey: "local-compact" } as AgentEvent, key: localKey },
+              ] } }
+            : prev);
           setActionNotice("已请求压缩上下文…");
           setTimeout(() => setActionNotice(null), 3500);
           return true;
@@ -783,6 +792,20 @@ export default function App() {
       });
     }
   }, []);
+
+  // ↑↓ 历史召回源：最近任务的提示词（最新在前、去重、上限 100）
+  const historyPrompts = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const t of history) {
+      const p = t.prompt?.trim();
+      if (!p || seen.has(p)) continue;
+      seen.add(p);
+      out.push(p);
+      if (out.length >= 100) break;
+    }
+    return out;
+  }, [history]);
 
   const recentModels = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1668,6 +1691,8 @@ export default function App() {
             onSend={handleSend}
             running={selectedRunning}
             contextUsage={selectedLive?.contextUsage}
+            historyPrompts={historyPrompts}
+            onSetAttachments={setAttachments}
             recentModels={recentModels}
             placeholder={
               selectedRunning
@@ -1704,140 +1729,6 @@ export default function App() {
 
 /** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
 const MAX_RENDER = 500;
-
-/** 耗时派生：每块思考独立计时（上一事件 → 本块到达）；complete 回填本轮工作秒数 */
-function decorateTiming(events: LogItem[]): LogItem[] {
-  const out = events.map(({ event, key }) => ({
-    key,
-    event: { ...event } as AgentEvent & { ts?: number; durationMs?: number },
-  }));
-  let prevTs: number | null = null; // 上一事件的到达时刻
-  let turnStart: number | null = null;
-  for (const item of out) {
-    const ev = item.event;
-    // 思考块：ts = 该块思考结束（message_end 到达）≈ 思考耗时起点是上一事件
-    if (ev.type === "thinking" && ev.ts && prevTs !== null && ev.ts > prevTs) {
-      ev.durationMs = ev.ts - prevTs;
-    }
-    if (ev.ts) prevTs = ev.ts;
-    if (ev.type === "user_message" && !ev.hidden && ev.ts) {
-      turnStart = ev.ts;
-    } else if (ev.type === "complete") {
-      // 一轮的工作耗时：本轮 user_message → complete 的真实间隔
-      if (turnStart !== null && ev.ts && ev.ts > turnStart) {
-        ev.durationMs = ev.ts - turnStart;
-      }
-      turnStart = null;
-    }
-  }
-  return out.map(({ event, key }) => ({ event: event as AgentEvent, key }));
-}
-
-/** 工具段折叠：tool_use/tool_result/thinking 的工作序列归为一段（≥2 次调用收成一行摘要，可展开逐条看）。
- * 紧邻文本输出的最后一段思考保留在外——思考耗时徽标保持可见。 */
-type LogEntry = LogItem;
-type DisplayGroup =
-  | { kind: "single"; item: LogEntry }
-  | { kind: "segment"; items: LogEntry[]; uses: { tool: string; n: number; targets: number | null }[]; failed: boolean };
-
-const TOOL_RUN_MIN = 2;
-
-const COMMAND_TOOL = /bash|shell|exec|terminal|command|cmd|powershell/i;
-
-function isWorkEvent(e: AgentEvent): boolean {
-  // 命令类工具与模型提问不折叠：输入输出/问题回答必须直接可见
-  if (
-    (e.type === "tool_use" || e.type === "tool_result")
-    && (COMMAND_TOOL.test(e.tool) || e.tool === "question")
-  ) {
-    return false;
-  }
-  return e.type === "tool_use" || e.type === "tool_result" || e.type === "thinking";
-}
-
-/** 连续同名重试折叠：相同失败原因的自动重试状态行合并为一条（保留最后一次的计数） */
-function collapseRetries(events: LogEntry[]): LogEntry[] {
-  const out: LogEntry[] = [];
-  for (const item of events) {
-    const ev = item.event;
-    if (ev.type === "status" && ev.retryKey) {
-      const prev = out[out.length - 1];
-      const prevEv = prev?.event;
-      if (prevEv?.type === "status" && prevEv.retryKey === ev.retryKey) {
-        // 同因连续：替换为最新计数（文案里的第 N/M 更新），key 复用第一条
-        out[out.length - 1] = { event: { ...ev }, key: prev.key };
-        continue;
-      }
-    }
-    out.push(item);
-  }
-  return out;
-}
-
-function groupToolRuns(events: LogEntry[]): DisplayGroup[] {
-  const out: DisplayGroup[] = [];
-  let seg: LogEntry[] = [];
-  const flush = (keepTrailingThinking: boolean) => {
-    if (seg.length === 0) return;
-    let tail: LogEntry[] = [];
-    if (keepTrailingThinking) {
-      while (seg.length > 0 && seg[seg.length - 1].event.type === "thinking") {
-        tail.unshift(seg.pop() as LogEntry);
-      }
-    }
-    const uses = new Map<string, number>();
-    const files = new Map<string, Set<string>>();
-    let failed = false;
-    let calls = 0;
-    for (const { event } of seg) {
-      if (event.type === "tool_use") {
-        calls += 1;
-        const tool = event.tool.toLowerCase();
-        uses.set(tool, (uses.get(tool) ?? 0) + 1);
-        // read/grep/ls 类：统计涉及的文件/搜索目标（去重）
-        const a = (event as { args?: Record<string, unknown> }).args;
-        const target =
-          typeof a?.path === "string" ? a.path
-          : typeof a?.file_path === "string" ? a.file_path
-          : typeof a?.pattern === "string" ? `搜索 ${a.path ? a.path + "/" : ""}${a.pattern}`
-          : null;
-        if (target) {
-          const set = files.get(tool) ?? new Set<string>();
-          set.add(target);
-          files.set(tool, set);
-        }
-      } else if (event.type === "tool_result" && !event.ok) {
-        failed = true;
-      }
-    }
-    if (calls >= TOOL_RUN_MIN) {
-      out.push({
-        kind: "segment",
-        items: seg,
-        uses: [...uses.entries()].map(([tool, n]) => {
-          const targets = files.get(tool);
-          return { tool, n, targets: targets ? targets.size : null };
-        }),
-        failed,
-      });
-    } else {
-      for (const item of seg) out.push({ kind: "single", item });
-    }
-    for (const item of tail) out.push({ kind: "single", item });
-    seg = [];
-  };
-  for (const item of events) {
-    const { event } = item;
-    if (isWorkEvent(event)) {
-      seg.push(item);
-    } else {
-      flush(event.type === "assistant_message");
-      out.push({ kind: "single", item });
-    }
-  }
-  flush(false);
-  return out;
-}
 
 /** 事件 → 可复制纯文本（消息/工具/错误摘要） */
 function eventsToText(events: { event: AgentEvent }[]): string {
@@ -1877,8 +1768,9 @@ const LogPanel = memo(function LogPanel({
   const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
 
   const overflow = events.length - MAX_RENDER;
-  const decorated = useMemo(() => collapseRetries(decorateTiming(events)), [events]);
-  const visible = overflow > 0 ? decorated.slice(overflow) : decorated;
+  const visible = overflow > 0 ? events.slice(overflow) : events;
+  // 事件流 → 语义行 → 视图折叠：归约在 useMemo 内一次完成
+  const display = useMemo(() => foldToolRows(buildConversation(visible)), [visible]);
   void overflow;
 
   return (
@@ -1906,12 +1798,10 @@ const LogPanel = memo(function LogPanel({
         </div>
       )}
       <Suspense fallback={<div className="content-loading" role="status">正在加载对话…</div>}>
-      {groupToolRuns(visible).map((group) => {
+      {display.map((group) => {
         if (group.kind === "single") {
-          const { event, key } = group.item;
-          return <EventLine key={key} event={event} />;
+          return <EventLine key={group.row.key} row={group.row} />;
         }
-        const [first] = group.items;
         const summary = group.uses
           .map(({ tool, n, targets }) => {
             const isSearch = tool === "grep" || tool === "find";
@@ -1923,21 +1813,20 @@ const LogPanel = memo(function LogPanel({
           .join(" · ");
         return (
           <Disclosure
-            key={first.key}
+            key={group.rows[0].key}
             className="activity-event"
             title={
               <>
                 <ToolIcon tool="tool" />
                 <span>
-                  工具操作 ×{group.uses.reduce((n, { n: k }) => n + k, 0)}：{summary}
+                  工具操作 ×{group.rows.length}：{summary}
                 </span>
                 {group.failed && <span className="text-red-600">含失败</span>}
               </>
             }
           >
-            {group.items.map(({ event, key }) => (
-              <EventLine key={key} event={event} />
-            ))}
+            {group.thoughts.map((row) => <EventLine key={row.key} row={row} />)}
+            {group.rows.map((row) => <EventLine key={row.key} row={row} />)}
           </Disclosure>
         );
       })}
