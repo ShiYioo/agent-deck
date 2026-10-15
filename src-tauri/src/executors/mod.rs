@@ -238,6 +238,10 @@ pub enum AgentEvent {
     },
     Status {
         text: String,
+        /// 上下文压缩进行中（运行时上报）：Some(true)=压缩开始，Some(false)=压缩结束，
+        /// None = 与压缩无关的普通状态行
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compacting: Option<bool>,
     },
     Complete {
         ok: bool,

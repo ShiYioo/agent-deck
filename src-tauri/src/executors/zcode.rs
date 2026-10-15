@@ -59,6 +59,7 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
                     text: content
                         .and_then(value_to_text)
                         .unwrap_or_else(|| truncate_json(obj)),
+                    compacting: None,
                 }),
             }
         }
@@ -106,6 +107,7 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             if let Some(model) = field_str(obj, &["model", "model_id"]) {
                 events.push(AgentEvent::Status {
                     text: format!("model: {model}"),
+                    compacting: None,
                 });
             }
         }
@@ -137,6 +139,21 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
         }
         // 流式增量等高频事件太吵，跳过
         "deltas" | "stream_event" | "delta" | "ping" => {}
+        // 上下文压缩（ZCode 上报 compact_started / compact_completed / compaction.terminal 等）
+        k if k.contains("compact") => {
+            let running = k.contains("start");
+            let text = if running {
+                "正在压缩上下文…"
+            } else if k.contains("fail") {
+                "上下文压缩失败"
+            } else {
+                "上下文压缩完成"
+            };
+            events.push(AgentEvent::Status {
+                text: text.to_string(),
+                compacting: Some(running),
+            });
+        }
         other => {
             let _ = other;
             events.push(AgentEvent::Raw {
@@ -379,5 +396,32 @@ mod tests {
     fn streaming_deltas_skipped() {
         assert!(events(r#"{"kind":"deltas","text":"a"}"#).is_empty());
         assert!(events(r#"{"type":"stream_event"}"#).is_empty());
+    }
+
+    /// 上下文压缩：ZCode 上报 compact_started / compact_completed / compaction.terminal
+    #[test]
+    fn compaction_events_become_status_lines_with_flag() {
+        let started = events(r#"{"type":"compact_started"}"#);
+        assert!(started.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status { text, compacting: Some(true) } if text == "正在压缩上下文…"
+        )));
+
+        let completed = events(r#"{"type":"compact_completed"}"#);
+        assert!(completed
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(false), .. })));
+
+        let terminal = events(r#"{"kind":"compaction.terminal","status":"completed"}"#);
+        assert!(terminal.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status { text, compacting: Some(false) } if text == "上下文压缩完成"
+        )));
+
+        let failed = events(r#"{"type":"compact_failed"}"#);
+        assert!(failed.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status { text, compacting: Some(false) } if text == "上下文压缩失败"
+        )));
     }
 }

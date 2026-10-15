@@ -163,6 +163,17 @@ function resolveNpmCmdShim(cmdPath) {
 }
 const output = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
+/** 通用 stdin 命令通道：UI 下发的指令（如 /compact）交给各适配器处理。返回关闭函数。 */
+function commandChannel(onCommand) {
+  const lines = createInterface({ input: process.stdin });
+  lines.on("line", (line) => {
+    let command;
+    try { command = JSON.parse(line); } catch { return; }
+    if (command?.cmd) onCommand(command);
+  });
+  return () => lines.close();
+}
+
 async function stopChild(child) {
   child.stdin?.end();
   if (process.platform === "win32" && child.pid && child.exitCode === null) {
@@ -199,6 +210,8 @@ async function codex(params) {
       if (item) output({ type: "item.completed", item });
     }
     if (event.method === "thread/tokenUsage/updated") usage = p.tokenUsage?.last;
+    // 上下文压缩完成（codex 的 app-server 只报终态）：交给 codex.rs 渲染为状态行
+    if (event.method === "thread/compacted") output({ type: "thread.compacted" });
     if (event.method === "turn/completed") {
       if (turnId && p.turn?.id !== turnId) return;
       if (p.turn?.status !== "completed") fail(new Error(JSON.stringify(p.turn?.error ?? p.turn?.status)));
@@ -221,6 +234,13 @@ async function codex(params) {
     return { error: { code: -32601, message: "AgentDeck cannot authorize this request in headless mode" } };
   });
   child.once("exit", () => fail(new Error("App Server exited before completing the turn")));
+  // /compact：手动压缩上下文（codex app-server 的 thread/compact/start）
+  const closeCommands = commandChannel((command) => {
+    if (command.cmd === "compact" && threadId) {
+      rpc.call("thread/compact/start", { threadId }).catch((error) =>
+        output({ type: "error", message: `上下文压缩失败：${error?.message ?? error}` }));
+    }
+  });
   try {
     const initialized = await rpc.call("initialize", { clientInfo: { name: "agentdeck", version: "0.1.0" }, capabilities: { experimentalApi: !params.probe } });
     rpc.write({ method: "initialized", params: {} });
@@ -265,6 +285,7 @@ async function codex(params) {
       cached_input_tokens: usage.cachedInputTokens, reasoning_output_tokens: usage.reasoningOutputTokens,
     } : undefined });
   } finally {
+    closeCommands();
     rpc.close();
     await stopChild(child);
   }
@@ -315,6 +336,12 @@ export function opencodeEventOutputs(event, sessionID) {
       return { outputs: [], formSettled: body.id };
     case "permission.asked":
       return { outputs: [], permission: body.id };
+    case "session.compaction.started":
+      return { outputs: [{ type: "status", sessionID, text: "正在压缩上下文…", compacting: true }] };
+    case "session.compaction.ended":
+      return { outputs: [{ type: "status", sessionID, text: "上下文压缩完成", compacting: false }] };
+    case "session.compaction.failed":
+      return { outputs: [{ type: "status", sessionID, text: "上下文压缩失败", compacting: false }] };
     case "session.execution.succeeded":
       return { outputs: [], settle: { ok: true } };
     case "session.execution.failed":
@@ -449,6 +476,12 @@ async function opencode(params) {
     stdinLines.on("line", (line) => {
       let command;
       try { command = JSON.parse(line); } catch { return; }
+      // /compact：手动压缩上下文（opencode v2 的 session compact 端点）
+      if (command?.cmd === "compact") {
+        call(`/api/session/${encodeURIComponent(id)}/compact`, {}).catch((error) =>
+          output({ type: "session.error", properties: { sessionID: id, error: { message: `上下文压缩失败：${error?.message ?? error}` } } }));
+        return;
+      }
       const resolver = command?.id ? pendingForms.get(command.id) : undefined;
       if (!resolver) return;
       pendingForms.delete(command.id);
@@ -649,10 +682,19 @@ async function zcode(params) {
   // 等 UI 经 stdin 作答（cmd=approve 携 {q0: 选项}），映射回上游的
   // content.answers（键 = 问题文本）。无 questions 的请求按上游自动继续语义放行。
   const pendingInputs = new Map();
+  let activeSessionId;
   const stdinLines = createInterface({ input: process.stdin });
   stdinLines.on("line", (line) => {
     let command;
     try { command = JSON.parse(line); } catch { return; }
+    // /compact：手动压缩上下文（ZCode app-server 的 session/compact）
+    if (command?.cmd === "compact") {
+      if (activeSessionId) {
+        rpc.call("session/compact", { sessionId: activeSessionId }).catch((error) =>
+          output({ type: "error", message: `上下文压缩失败：${error?.message ?? error}` }));
+      }
+      return;
+    }
     const resolver = command?.id ? pendingInputs.get(String(command.id)) : undefined;
     if (!resolver) return;
     pendingInputs.delete(String(command.id));
@@ -726,6 +768,8 @@ async function zcode(params) {
         if (type === "model.streaming" && payload?.kind === "text_delta") text += payload.delta ?? "";
         else if (type === "turn.completed") turn = turn ?? { ok: true, response: payload?.response, usage: payload?.usage };
         else if (type === "turn.failed") turn = turn ?? { ok: false, message: payload?.errorMessage ?? payload?.message ?? "执行失败" };
+        // 上下文压缩（compaction.terminal / compact_started…）：交给 zcode.rs 渲染状态行
+        else if (typeof type === "string" && type.includes("compact")) output({ type });
         return;
       }
       // 终态也会经遥测通道回带，且带结构化 errorCode/errorMessage。
@@ -735,6 +779,8 @@ async function zcode(params) {
           turn = turn ?? (payload.status === "success"
             ? { ok: true, tokenCount: payload.tokenCount }
             : { ok: false, message: payload.errorMessage ?? payload.errorCode ?? "执行失败" });
+        } else if (typeof payload.kind === "string" && payload.kind.includes("compact")) {
+          output({ type: payload.kind });
         }
       }
     },
@@ -775,6 +821,7 @@ async function zcode(params) {
       }
     }
     if (!sessionId) throw lastError ?? new Error("ZCode 会话创建失败");
+    activeSessionId = sessionId;
     // session/event（正文增量与 turn 终态）只在订阅之后推送；不订阅就只有遥测。
     await rpc.call("session/subscribe", { sessionId, deliveryKind: "desktop-continuous" });
 

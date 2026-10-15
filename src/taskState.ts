@@ -31,6 +31,8 @@ export function applyTaskUpdates(task: LiveTask, updates: TaskUpdate[]): LiveTas
       if (index >= 0) events[index] = { ...item, key: events[index].key };
       else events.push(item);
       if (event.type === "session_id") next.sessionId = event.id;
+      // 上下文压缩提示：状态行携带 compacting 标志
+      if (event.type === "status" && typeof event.compacting === "boolean") next.compacting = event.compacting;
     }
     if (update.running !== undefined) next.running = update.running;
     if (update.status !== undefined) next.status = update.status;

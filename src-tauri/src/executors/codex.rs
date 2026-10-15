@@ -94,6 +94,14 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
                 message,
             });
         }
+        // 上下文压缩（codex 上报 thread.compacted / context_compacted 等）
+        k if k.contains("compacted") || k.contains("compaction") => {
+            let running = k.contains("start");
+            events.push(AgentEvent::Status {
+                text: if running { "正在压缩上下文…" } else { "上下文压缩完成" }.to_string(),
+                compacting: Some(running),
+            });
+        }
         _ => events.push(AgentEvent::Raw {
             line: truncate_json(obj),
         }),
@@ -186,6 +194,7 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                 .unwrap_or(0);
             events.push(AgentEvent::Status {
                 text: format!("todo 更新：{n} 项"),
+                compacting: None,
             });
         }
         "mcp_tool_call" => {
@@ -205,6 +214,17 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                     detail: output.chars().take(400).collect(),
                 });
             }
+        }
+        // 上下文压缩条目（codex exec --json 的 ContextCompactionItem）
+        "context_compaction" | "compaction" => {
+            let running = item
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s == "started" || s == "running");
+            events.push(AgentEvent::Status {
+                text: if running { "正在压缩上下文…" } else { "上下文压缩完成" }.to_string(),
+                compacting: Some(running),
+            });
         }
         other => {
             let _ = other;
@@ -372,5 +392,39 @@ mod tests {
             &evs[..],
             [AgentEvent::Error { kind, .. }] if kind == "auth"
         ));
+    }
+
+    /// 上下文压缩：thread.compacted / context_compacted 与 context_compaction 条目
+    #[test]
+    fn compaction_events_become_status_lines_with_flag() {
+        let thread = events(r#"{"type":"thread.compacted"}"#);
+        assert!(thread.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status { text, compacting: Some(false) } if text == "上下文压缩完成"
+        )));
+
+        let v2 = events(r#"{"type":"context_compacted"}"#);
+        assert!(v2
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(false), .. })));
+
+        let started = events(r#"{"type":"compaction_started"}"#);
+        assert!(started
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(true), .. })));
+
+        let item = events(
+            r#"{"type":"item.completed","item":{"type":"context_compaction","status":"completed"}}"#,
+        );
+        assert!(item.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status { text, compacting: Some(false) } if text == "上下文压缩完成"
+        )));
+
+        // 普通 todo 状态行不带压缩标志
+        let todo = events(r#"{"type":"item.completed","item":{"type":"todo_list","todos":[]}}"#);
+        assert!(todo
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { compacting: None, .. })));
     }
 }

@@ -137,3 +137,19 @@ test("opencode execution terminal events settle the run", () => {
     { ok: false, interrupted: true },
   );
 });
+
+test("opencode compaction events become status lines with a compacting flag", () => {
+  const sid = "ses_1";
+  const started = opencodeEventOutputs({ type: "session.compaction.started", data: { sessionID: sid, reason: "threshold" } }, sid);
+  assert.deepEqual(started.outputs, [{ type: "status", sessionID: sid, text: "正在压缩上下文…", compacting: true }]);
+
+  const ended = opencodeEventOutputs({ type: "session.compaction.ended", data: { sessionID: sid, reason: "threshold" } }, sid);
+  assert.deepEqual(ended.outputs, [{ type: "status", sessionID: sid, text: "上下文压缩完成", compacting: false }]);
+
+  const failed = opencodeEventOutputs({ type: "session.compaction.failed", data: { sessionID: sid } }, sid);
+  assert.equal(failed.outputs[0].text, "上下文压缩失败");
+  assert.equal(failed.outputs[0].compacting, false);
+
+  // 其它会话忽略
+  assert.deepEqual(opencodeEventOutputs({ type: "session.compaction.started", data: { sessionID: "ses_other" } }, sid).outputs, []);
+});

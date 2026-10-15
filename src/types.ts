@@ -6,7 +6,7 @@ export type AgentEvent = (
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
   | { type: "tool_use"; tool: string; detail: string; args?: Record<string, unknown> }
   | { type: "tool_result"; tool: string; ok: boolean; detail: string }
-  | { type: "status"; text: string; retryKey?: string | null }
+  | { type: "status"; text: string; retryKey?: string | null; compacting?: boolean }
   | {
       type: "complete";
       ok: boolean;
@@ -84,6 +84,15 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
   if (t === "deck_run_start") return { type: "status", text: "pi 运行时启动" };
   // 上下文用量徽标数据（不进日志流；App 拦截到 live 状态）
   if (t === "deck_context_usage") return null;
+  // 上下文压缩：pi 的自动压缩开始/结束，作为可见的状态行（并驱动交互层提示）
+  if (t === "compaction_start") return { type: "status", text: "正在压缩上下文…", compacting: true };
+  if (t === "compaction_end") {
+    if (ev.errorMessage) {
+      return { type: "status", text: `上下文压缩失败：${providerErrorMessage(String(ev.errorMessage)).slice(0, 120)}`, compacting: false };
+    }
+    if (ev.aborted) return { type: "status", text: "上下文压缩已中止", compacting: false };
+    return { type: "status", text: "上下文压缩完成", compacting: false };
+  }
   if (t === "deck_status") return { type: "status", text: String(ev.text ?? "") };
   // 重连提示（Rust 重连循环直发 status；text 已含「进程异常退出，正在重连（第 N/2 次）…」）
   if (t === "deck_session_file") return { type: "session_id", id: String(ev.path ?? "") };
@@ -230,6 +239,8 @@ export type LiveTask = {
   todos?: { content: string; status: string }[];
   /** 上下文用量（ZCode 式徽标）：used = 当前占用 token，window = 上下文窗口（空=未知） */
   contextUsage?: { used: number; window: number | null };
+  /** 正在压缩上下文（pi auto-compaction / opencode compaction）：交互层提示用 */
+  compacting?: boolean;
 };
 
 

@@ -1132,6 +1132,15 @@ async function handle(msg) {
       } catch {}
       break;
     }
+    // 手动压缩上下文（/compact）：pi 的手动入口会先中止当前 agent 操作
+    case "compact": {
+      try {
+        await session?.compact?.(msg.answer ? String(msg.answer) : undefined);
+      } catch (error) {
+        deckEvent("error", { message: `上下文压缩失败：${error?.message ?? error}` });
+      }
+      break;
+    }
     case "ping":
       deckEvent("pong");
       break;

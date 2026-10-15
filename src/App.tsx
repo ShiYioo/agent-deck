@@ -24,6 +24,7 @@ import {
   openArtifact,
   invokePiCommand,
   invokeTaskCommand,
+  compactTask,
   inTauri,
   listTasks,
   listCollaborations,
@@ -526,6 +527,8 @@ export default function App() {
               } } }
             : prev);
         }
+        // 上下文压缩：交互层提示由 status 事件携带的 compacting 标志驱动（见 taskState）
+
         const mapped = normalizeAgentEvents(payload as never);
         for (const event of mapped) {
           if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
@@ -588,6 +591,26 @@ export default function App() {
   const handleSend = useCallback(
     async (rawText: string) => {
       setActionError(null);
+
+      // /compact [说明]：手动压缩上下文。它不是发给模型的消息，
+      // 而是给正在运行的会话下一条压缩指令（需要活着的运行时进程）。
+      const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(rawText.trim());
+      if (compact) {
+        const target = selected ? liveRef.current[selected] : undefined;
+        if (!selected || !target?.running) {
+          setActionError("压缩只能作用于正在运行的会话");
+          return false;
+        }
+        try {
+          await compactTask(selected, compact[1]?.trim() || undefined);
+          setActionNotice("已请求压缩上下文…");
+          setTimeout(() => setActionNotice(null), 3500);
+          return true;
+        } catch (error) {
+          setActionError(String(error));
+          return false;
+        }
+      }
 
       // @ 路由：@harness 或 @harness:model 唤醒对应智能体（模型粒度指定大脑）
       const at = /^@(deck|zcode|codex|opencode)(?::([^\s]+))?\s+/i.exec(
@@ -1562,6 +1585,9 @@ export default function App() {
               && <button type="button" className="context-command" disabled={busyReconfigure}
                 onClick={() => void reconfigureRunning()}><RotateCcw size={14} />{busyReconfigure ? "等待停止" : "停止并按新配置继续"}</button>}
           </div>}
+          {selectedLive?.compacting && (
+            <div className="compaction-notice" role="status">正在压缩上下文…</div>
+          )}
           {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
             <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
               <span className="text-stone-400">已排队（结束后自动续发）：</span>

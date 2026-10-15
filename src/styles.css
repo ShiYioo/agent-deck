@@ -289,6 +289,7 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
 .action-notice { max-width: var(--content-width); margin: 0 auto 10px; padding: 8px 10px; background: #f0faf5; color: #0d7c52; border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
 .action-error { max-width: var(--content-width); margin: 0 auto 10px; padding: 8px 10px; background: #fff3f3; color: #bb3434; border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
 .action-info { max-width: var(--content-width); margin: 0 auto 10px; padding: 8px 10px; background: #f0faf5; color: #0d7c52; border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
+.compaction-notice { max-width: var(--content-width); margin: 0 auto 10px; padding: 8px 10px; background: #f3f3f4; color: var(--text-2); border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
 .log-scroll { padding: 24px max(28px, calc((100% - var(--content-width)) / 2)) 32px; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
 .log-content > * { margin-bottom: 18px; }
 .log-overflow-note { padding: 8px 24px 0; font-size: 11px; color: var(--text-3); }

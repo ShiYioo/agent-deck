@@ -1852,7 +1852,9 @@ fn task_command(
     let task = guard
         .get(&task_id)
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let sender = task.commands.as_ref().ok_or("该任务不支持交互指令")?;
+    let sender = task.commands.as_ref().ok_or(
+        "当前任务没有命令通道：CLI 一次性进程无法接收指令，请改用服务端/native 传输",
+    )?;
     let mut message = serde_json::json!({ "cmd": cmd });
     if let Some(id) = id {
         message["id"] = serde_json::json!(id);

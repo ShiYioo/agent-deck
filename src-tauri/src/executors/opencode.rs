@@ -69,6 +69,7 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                     if let Some(model) = model {
                         events.push(AgentEvent::Status {
                             text: format!("model: {model}"),
+                            compacting: None,
                         });
                     }
                 }
@@ -214,7 +215,17 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 .unwrap_or("?");
             events.push(AgentEvent::Status {
                 text: format!("等待权限：{permission}"),
+                compacting: None,
             });
+        }
+        // 适配器上报的状态行（上下文压缩开始/结束等）
+        "status" => {
+            if let Some(text) = body.get("text").and_then(Value::as_str) {
+                events.push(AgentEvent::Status {
+                    text: text.to_string(),
+                    compacting: body.get("compacting").and_then(Value::as_bool),
+                });
+            }
         }
         "todo.updated" => {
             let n = body
@@ -224,6 +235,7 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 .unwrap_or(0);
             events.push(AgentEvent::Status {
                 text: format!("todo 更新：{n} 项"),
+                compacting: None,
             });
         }
         "session.error" | "error" => {
@@ -453,7 +465,8 @@ mod tests {
             r#"{"type":"message.updated","info":{"id":"m1","role":"assistant","model":{"providerID":"zai","modelID":"glm-4.7"}}}"#,
         );
         assert!(evs.contains(&AgentEvent::Status {
-            text: "model: zai/glm-4.7".into()
+            text: "model: zai/glm-4.7".into(),
+            compacting: None
         }));
     }
 
@@ -464,8 +477,28 @@ mod tests {
             r#"{"type":"message.updated","info":{"id":"m1","role":"assistant","model":{"id":"mimo-v2.6-flash-free","providerID":"opencode","variant":"default"}}}"#,
         );
         assert!(evs.contains(&AgentEvent::Status {
-            text: "model: opencode/mimo-v2.6-flash-free".into()
+            text: "model: opencode/mimo-v2.6-flash-free".into(),
+            compacting: None
         }));
+    }
+
+    /// 适配器上报的状态行携带 compacting 标志（上下文压缩开始/结束）
+    #[test]
+    fn adapter_status_lines_carry_compaction_flag() {
+        let started = events(r#"{"type":"status","sessionID":"ses_x","text":"正在压缩上下文…","compacting":true}"#);
+        assert!(started.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status { text, compacting: Some(true) } if text == "正在压缩上下文…"
+        )));
+        let ended = events(r#"{"type":"status","sessionID":"ses_x","text":"上下文压缩完成","compacting":false}"#);
+        assert!(ended
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(false), .. })));
+        // 普通状态行不带标志
+        let plain = events(r#"{"type":"status","sessionID":"ses_x","text":"别的话"}"#);
+        assert!(plain
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { compacting: None, .. })));
     }
 
     #[test]

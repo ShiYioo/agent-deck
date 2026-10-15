@@ -290,6 +290,14 @@ export async function invokeTaskCommand(
   await invoke("task_command", { taskId, cmd, id: id ?? null, answer: answer ?? null });
 }
 
+/** 手动压缩上下文（/compact）：deck 走 pi 命令通道，原生适配器走 stdin 命令通道。
+ *  只能作用于正在运行的会话——压缩需要活着的运行时进程。 */
+export async function compactTask(taskId: string, instructions?: string): Promise<void> {
+  if (!inTauri) browserStub("压缩上下文");
+  const command = taskId.startsWith("deck-") ? "pi_command" : "task_command";
+  await invoke(command, { taskId, cmd: "compact", id: null, answer: instructions ?? null });
+}
+
 export async function getSetting(key: string): Promise<string | null> {
   if (!inTauri) return null;
   return await invoke<string | null>("get_setting", { key });

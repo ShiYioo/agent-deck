@@ -352,7 +352,7 @@ pub fn send_command(
     id: Option<String>,
     answer: Option<String>,
 ) -> Result<(), String> {
-    if !matches!(cmd, "approve" | "reject" | "abort") {
+    if !matches!(cmd, "approve" | "reject" | "abort" | "compact") {
         return Err(format!("不支持的运行指令：{cmd}"));
     }
     if matches!(cmd, "approve" | "reject") && id.as_deref().is_none_or(str::is_empty) {

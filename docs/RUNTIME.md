@@ -72,6 +72,35 @@ opencode 的服务端模式。因此 opencode 的权限下拉新增一档 **「�
 - 版本：opencode 2.x 已移除旧版路由（`/doc`、`/session`、`/event`、`/permission/{id}/reply`），
   原生适配器已随 v2 路由迁移。
 
+## 上下文压缩提示
+
+运行时的自动/手动 compaction 都会在交互层提示。统一机制：`status` 事件携带 `compacting` 标志
+（`Some(true)` = 压缩进行中，`Some(false)` = 已结束），前端归约到任务的 `compacting`，输入区上方
+显示「正在压缩上下文…」，状态行同时留档在对话里。
+
+各运行器的来源：
+
+- deck（pi）：`compaction_start` / `compaction_end`（end 区分失败与中止）
+- opencode（v2 服务端）：`session.compaction.started/ended/failed`
+- codex：CLI 的 `context_compaction` 条目与 `thread.compacted` / `context_compacted`；app-server 的 `thread/compacted`
+- zcode：`compact_started` / `compact_completed` / `compact_failed` / `compaction.terminal`（CLI 与 app-server 两路都按名匹配）
+
+只有上报了"开始"的运行器才会亮起进行中提示；只报终态的（如 codex app-server 的 `thread/compacted`）
+仅留一条完成状态行。
+
+## 手动压缩（/compact）
+
+输入框里的 `/compact [说明]` 不是发给模型的消息，而是给**正在运行**的会话下一条压缩指令
+（压缩需要活着的运行时进程；没有运行中的会话会明确提示）。它按任务类型路由：deck 走 pi 命令通道
+（`AgentSession.compact`），原生适配器走 stdin 命令通道：
+
+- opencode：`POST /api/session/{id}/compact`
+- codex：app-server `thread/compact/start`
+- zcode：app-server `session/compact`
+
+CLI 一次性进程没有命令通道，因此 zcode/codex/opencode 在 CLI 传输下按 `/compact` 会提示改用
+服务端/native 传输。压缩过程同样走上面的状态行与交互层提示。
+
 ## 反馈与验证
 
 指导协作由 Rust 后端顺序编排：指导方只读计划、执行方修改并测试、指导方只读验收；
