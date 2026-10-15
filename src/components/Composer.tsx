@@ -174,9 +174,8 @@ export const Composer = memo(function Composer({
     if (agent === "deck") return deckOptions.map((o) => o.value);
     if (agent === "zcode")
       return (modelOptionsBy.zcode ?? []).map((e) => e.split("	")[0]);
-    const discoveredModels = modelOptionsBy[agent] ?? [];
-    if (discoveredModels.length) return discoveredModels;
-    return (MODEL_CATALOG[agent] ?? []).map((o) => o.value).filter(Boolean);
+    // 只认真实发现的模型；发现不到就为空，不兜底静态目录
+    return modelOptionsBy[agent] ?? [];
   };
 
   const refreshMention = (el: HTMLTextAreaElement) => {
@@ -295,10 +294,10 @@ export const Composer = memo(function Composer({
             for (const r of rows) {
               out.push({ value: `${p.id}:${r.model}`, label: r.model, group });
             }
-          } else {
-            const fallback = p.model ?? (p.provider === "glm" ? "glm-4.7" : "gpt-5.1");
-            out.push({ value: `${p.id}:${fallback}`, label: fallback, group });
+          } else if (p.model) {
+            out.push({ value: `${p.id}:${p.model}`, label: p.model, group });
           }
+          // 既无模型目录也未声明模型：不臆造兜底模型（没有就是没有）
         }
         if (alive) setDeckOptions(out);
       } catch {
@@ -309,22 +308,6 @@ export const Composer = memo(function Composer({
       alive = false;
     };
   }, [requestedHarness, catalogVersion]);
-
-  /** 各 harness 的模型目录（"" = 走 CLI 账号默认模型） */
-  const MODEL_CATALOG: Record<string, { value: string; label: string }[]> = {
-    codex: [
-      { value: "", label: "默认模型" },
-      { value: "gpt-5.1-codex", label: "gpt-5.1-codex" },
-      { value: "gpt-5.1", label: "gpt-5.1" },
-      { value: "o4-mini", label: "o4-mini" },
-    ],
-    opencode: [
-      { value: "", label: "默认模型" },
-      { value: "anthropic/claude-sonnet-4-5", label: "claude-sonnet-4.5" },
-      { value: "openai/gpt-5.1", label: "gpt-5.1" },
-      { value: "zai-coding-plan/glm-4.6", label: "glm-4.6" },
-    ],
-  };
 
   return (
     <div className="composer-card">

@@ -181,16 +181,18 @@ function buildModelsJson(profiles) {
           reasoning: false,
           input: ["text", "image"],
         }))
-      : [
-          {
-            id: p.model || (p.provider === "glm" ? "glm-4.7" : "gpt-5.1"),
-            name: p.model || "default",
-            contextWindow: 128000,
-            maxTokens: 8192,
-            reasoning: false,
-            input: ["text", "image"],
-          },
-        ];
+      : p.model
+        ? [
+            {
+              id: p.model,
+              name: p.model,
+              contextWindow: 128000,
+              maxTokens: 8192,
+              reasoning: false,
+              input: ["text", "image"],
+            },
+          ]
+        : [];
     providers[p.id] = {
       name: p.label || p.provider,
       baseUrl:
@@ -221,9 +223,10 @@ async function createRuntimeForProfile(p) {
     fs.rmSync(modelsFile, { force: true });
   }
   const rows = profileModelRows(p);
-  const defaultId =
-    (rows.find((r) => r.id === p.model) ?? rows[0] ?? { id: p.model }).id ||
-    (p.provider === "glm" ? "glm-4.7" : "gpt-5.1");
+  const defaultId = (rows.find((r) => r.id === p.model) ?? rows[0] ?? { id: p.model }).id;
+  if (!defaultId) {
+    throw new Error(`模型档案「${p.label || p.provider}」未配置模型——请到设置添加模型`);
+  }
   const model = runtime.getModel(p.id, defaultId);
   if (!model) {
     throw new Error(`模型 ${p.id}/${defaultId} 未注册成功——检查 Base URL 与上游协议`);

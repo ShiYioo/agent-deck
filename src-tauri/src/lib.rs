@@ -1987,8 +1987,6 @@ fn write_zcode_default_model(model: &str, effort: Option<&str>) -> Result<(), St
     Ok(())
 }
 
-const CODEX_MODEL_FALLBACK: &[&str] = &["gpt-5.1-codex", "gpt-5.1", "o4-mini"];
-
 fn discover_codex_models() -> Vec<String> {
     let mut out = Vec::new();
     if let Some(home) = dirs::home_dir() {
@@ -2021,9 +2019,6 @@ fn discover_codex_models() -> Vec<String> {
     }
     out.sort();
     out.dedup();
-    if out.is_empty() {
-        out = CODEX_MODEL_FALLBACK.iter().map(|s| s.to_string()).collect();
-    }
     out
 }
 
