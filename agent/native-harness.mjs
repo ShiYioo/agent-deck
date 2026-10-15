@@ -362,6 +362,21 @@ async function openPort() {
   return port;
 }
 
+/** v2 只在 session.tool.input.started 带工具名，called/success/failed 只有调用 id——
+ *  记录 id→name 并回填，否则界面只能显示匿名的 "tool"。返回是否记录了新名字（供测试）。 */
+export function trackToolName(event, toolNames) {
+  const etype = event.type;
+  const ebody = event.data ?? event;
+  if (etype === "session.tool.input.started" && ebody?.id && ebody?.name) {
+    toolNames.set(ebody.id, ebody.name);
+    return true;
+  }
+  if (/^session\.tool\.(called|success|failed)$/.test(etype ?? "") && ebody && !ebody.name) {
+    ebody.name = toolNames.get(ebody.id);
+  }
+  return false;
+}
+
 /** v2 服务端事件 → 统一输出事件（opencode.rs 已认识的形状）。
  *  返回 { outputs, form?, formSettled?, permission?, settle? }；纯函数，便于单测。 */
 export function opencodeEventOutputs(event, sessionID) {
@@ -497,6 +512,8 @@ async function opencode(params) {
     let settle;
     const settled = new Promise((resolve) => { settle = resolve; });
     const pendingForms = new Map();
+    // 工具调用 id → 工具名（v2 事件把名字拆在 input.started 里）
+    const toolNames = new Map();
     let streamError;
     source.on("error", (error) => { if (!controller.signal.aborted) streamError = error; lines.close(); });
 
@@ -510,6 +527,7 @@ async function opencode(params) {
           data = [];
           let event;
           try { event = JSON.parse(raw); } catch { continue; }
+          trackToolName(event, toolNames);
           const mapped = opencodeEventOutputs(event, id);
           for (const out of mapped.outputs) output(out);
           if (mapped.permission && permissionReply && typeof mapped.permission === "string") {

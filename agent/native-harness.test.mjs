@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { Rpc, codexItem, historyTool, contextRecords, opencodeEventOutputs } from "./native-harness.mjs";
+import { Rpc, codexItem, historyTool, contextRecords, opencodeEventOutputs, trackToolName } from "./native-harness.mjs";
 
 function fixture() {
   const child = new EventEmitter();
@@ -152,4 +152,28 @@ test("opencode compaction events become status lines with a compacting flag", ()
 
   // 其它会话忽略
   assert.deepEqual(opencodeEventOutputs({ type: "session.compaction.started", data: { sessionID: "ses_other" } }, sid).outputs, []);
+});
+
+test("opencode v2 tool names: input.started records, called/success backfill", () => {
+  const sid = "ses_1";
+  const names = new Map();
+  // 名字只在 input.started 事件上
+  const started = { type: "session.tool.input.started", data: { sessionID: sid, id: "call_1", name: "read" } };
+  assert.equal(trackToolName(started, names), true);
+  assert.equal(names.get("call_1"), "read");
+
+  // called/success 只有 id——回填后能映射出工具名
+  const called = { type: "session.tool.called", data: { sessionID: sid, id: "call_1", input: { path: "package.json" } } };
+  trackToolName(called, names);
+  const mapped = opencodeEventOutputs(called, sid);
+  assert.equal(mapped.outputs[0].properties.part.tool, "read");
+
+  const success = { type: "session.tool.success", data: { sessionID: sid, id: "call_1", content: [{ type: "text", text: "ok" }] } };
+  trackToolName(success, names);
+  assert.equal(opencodeEventOutputs(success, sid).outputs[0].properties.part.tool, "read");
+
+  // 未知 id 仍兜底（opencode.rs 再兜 "tool"）
+  const unknown = { type: "session.tool.called", data: { sessionID: sid, id: "call_9" } };
+  trackToolName(unknown, names);
+  assert.equal(unknown.data.name, undefined);
 });
