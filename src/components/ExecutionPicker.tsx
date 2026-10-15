@@ -58,7 +58,12 @@ export function ExecutionPicker({ harness, value, onChange, label = "", disabled
     ...(allowInherit ? [{ value: inherit, label: "继承会话配置" }] : []),
     ...(modelOptions ?? options).filter((o) => o.value !== ""),
   ];
-  if (value.model && !modelChoices.some((o) => o.value === value.model)) modelChoices.push({ value: value.model, label: value.model });
+  // 当前值不在候选里（如档案模型改名后遗留的旧值）：可读回显，不暴露内部 profileId
+  if (value.model && !modelChoices.some((o) => o.value === value.model)) {
+    const parts = value.model.split(":");
+    const readable = parts.length > 1 && parts[0].startsWith("mp-") ? parts.slice(1).join(":") : value.model;
+    modelChoices.push({ value: value.model, label: `${readable}（不在目录中）` });
+  }
   const effectiveEffort = value.effort ?? base.effort ?? "";
   const unsupported = !!effectiveEffort && !efforts.includes(effectiveEffort);
   return <div className="execution-picker" aria-label={`${label}执行配置`}>
