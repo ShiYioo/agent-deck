@@ -682,7 +682,10 @@ impl Store {
                 )
                 .map_err(|e| e.to_string())?;
             if blocked {
-                return Err("上次运行异常中断，请先确认旧执行者结束并核对工作区后再删除".into());
+                return Err(
+                    "该任务需要恢复确认：先到任务详情勾选「已确认旧执行者结束，并核对工作区改动」"
+                        .into(),
+                );
             }
             tx.execute("DELETE FROM task_events WHERE task_id = ?1", params![id])
                 .map_err(|e| e.to_string())?;

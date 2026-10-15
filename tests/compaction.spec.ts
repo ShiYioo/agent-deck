@@ -1,12 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mockDesktop } from "./helpers";
 
-/** 发一条消息，得到一个运行中的任务（mock 的首个任务 id = new-task）。 */
+/** 发一条消息，得到一个运行中的任务（mock 的首个任务 id = new-task）。
+ *  用 opencode 家：/compact 前端拦截对 zcode 直接劝退（上游不支持手动压缩）。 */
 async function runningTask(page: Page) {
   await page.goto("/");
   if (await page.getByRole("button", { name: "展开侧栏", exact: true }).isVisible()) {
     await page.getByRole("button", { name: "展开侧栏", exact: true }).click();
   }
+  await page.getByRole("button", { name: "选择 harness" }).click();
+  await page.getByRole("option", { name: "OpenCode" }).click();
   await page.getByRole("textbox", { name: "消息", exact: true }).fill("长任务");
   await page.getByRole("textbox", { name: "消息", exact: true }).press("Enter");
   await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();

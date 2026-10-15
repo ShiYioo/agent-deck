@@ -1414,8 +1414,9 @@ export default function App() {
 
             {/* 上下文里的「恢复确认」是动作，必须常在可见处，因此不能把整个
                 ConversationContext 塞进一个折叠项；它自己分栏：动作在外，
-                配置收进内部的「上下文与协作设置」。 */}
-            {selectedRow && (detailsOpen || selectedStatus === "failed") && (
+                配置收进内部的「上下文与协作设置」。选中任务即渲染——
+                中断任务可能是 failed 也可能是 cancelled，恢复锁不挑状态。 */}
+            {selectedRow && (
               <Suspense fallback={<div role="status">加载上下文…</div>}>
                 <ConversationContext taskId={selectedRow.id} onRecovered={() => { refreshHistory(); bumpGraphs(); }} />
               </Suspense>
