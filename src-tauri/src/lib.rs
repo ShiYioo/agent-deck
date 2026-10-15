@@ -1153,6 +1153,67 @@ fn clean_context_archives(app: &AppHandle, paths: &[std::path::PathBuf]) {
     }
 }
 
+/// 剪贴板粘贴图片：dataURL → 临时文件（%TEMP%/agentdeck-attachments/），
+/// 返回可随 start_task 派发的绝对路径。粘贴的图片没有磁盘路径，必须落盘。
+#[tauri::command]
+fn save_paste_image(data_url: String) -> Result<String, String> {
+    let Some((meta, b64)) = data_url.split_once(',') else {
+        return Err("无效的图片数据".into());
+    };
+    let ext = if meta.contains("image/jpeg") {
+        "jpg"
+    } else if meta.contains("image/webp") {
+        "webp"
+    } else if meta.contains("image/gif") {
+        "gif"
+    } else {
+        "png"
+    };
+    let bytes = base64_decode(b64).ok_or("图片解码失败")?;
+    let dir = std::env::temp_dir().join("agentdeck-attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建附件目录失败：{e}"))?;
+    let path = dir.join(format!("paste-{}.{ext}", crate::store::Store::now_millis()));
+    std::fs::write(&path, bytes).map_err(|e| format!("写入图片失败：{e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 标准 base64 解码（容空白与 padding），避免为一次粘贴引入依赖。
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some((byte - b'A') as u32),
+            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() == 1 {
+            return None;
+        }
+        let mut acc: u32 = 0;
+        for &byte in chunk {
+            acc = (acc << 6) | value(byte)?;
+        }
+        acc <<= 6 * (4 - chunk.len());
+        out.push((acc >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((acc >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(acc as u8);
+        }
+    }
+    Some(out)
+}
+
 /// 前端 → Rust：唤起 harness 的登录流程（弹独立控制台跑 `* login`，
 /// 浏览器 OAuth 完成后控制台自动结束，凭据写入各家的共享配置）。
 #[tauri::command]
@@ -2553,6 +2614,7 @@ pub fn run() {
             reset_conversation_binding,
             get_task_diff,
             run_login,
+            save_paste_image,
             pi_command,
             task_command,
             get_setting,

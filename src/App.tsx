@@ -807,15 +807,20 @@ export default function App() {
     }
   }, []);
 
-  // ↑↓ 历史召回源：最近任务的提示词（最新在前、去重、上限 100）
+  // ↑↓ 历史召回源：最近任务的提示词 + 该轮附件（最新在前、去重、上限 100）
   const historyPrompts = useMemo(() => {
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: { text: string; attachments: string[] }[] = [];
     for (const t of history) {
       const p = t.prompt?.trim();
       if (!p || seen.has(p)) continue;
       seen.add(p);
-      out.push(p);
+      let attachments: string[] = [];
+      try {
+        const parsed = t.attachments ? (JSON.parse(t.attachments) as unknown) : [];
+        if (Array.isArray(parsed)) attachments = parsed.filter((a): a is string => typeof a === "string");
+      } catch { /* 无附件或脏数据 */ }
+      out.push({ text: p, attachments });
       if (out.length >= 100) break;
     }
     return out;

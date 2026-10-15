@@ -213,6 +213,8 @@ export type TaskRow = {
   exit_code: number | null;
   created_at: number;
   finished_at: number | null;
+  /** 本轮派发的附件（JSON 字符串，见 store.set_task_attachments） */
+  attachments?: string | null;
 };
 
 /** 前端内存中的运行态任务 */

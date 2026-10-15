@@ -264,6 +264,12 @@ export async function getTaskDiff(taskId: string): Promise<string> {
   return await invoke<string>("get_task_diff", { taskId });
 }
 
+/** 剪贴板粘贴图片：dataURL 落成临时文件，返回可派发的绝对路径。 */
+export async function savePasteImage(dataUrl: string): Promise<string> {
+  if (!inTauri) browserStub("粘贴图片");
+  return await invoke<string>("save_paste_image", { dataUrl });
+}
+
 export async function runLogin(harness: string): Promise<void> {
   if (!inTauri) browserStub("唤起登录");
   await invoke("run_login", { harness });

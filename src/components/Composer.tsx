@@ -7,7 +7,7 @@ import { MotionLayer } from "../motion/MotionProvider";
 import { useTextareaAutosize } from "../hooks/useTextareaAutosize";
 
 import { HARNESS_ACCENT, projectName } from "./Sidebar";
-import { discoverModels, inTauri, listModelProfiles, listProfileModels } from "../api";
+import { discoverModels, inTauri, listModelProfiles, listProfileModels, savePasteImage } from "../api";
 import { IconFolder } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
@@ -72,8 +72,8 @@ export const Composer = memo(function Composer({
   running?: boolean;
   /** 运行中上下文用量（ZCode 交互层设计）：deck 运行时随回复实时更新 */
   contextUsage?: { used: number; window: number | null };
-  /** ↑↓ 历史召回：最近任务提示词（最新在前，已去重） */
-  historyPrompts?: string[];
+  /** ↑↓ 历史召回：最近任务提示词与该轮附件（最新在前，已去重） */
+  historyPrompts?: { text: string; attachments: string[] }[];
   /** 历史召回/快照恢复时整体重置附件 */
   onSetAttachments?: (paths: string[]) => void;
   /** 历史常用模型（按频次），动态列表按此置顶排序 */
@@ -85,6 +85,7 @@ export const Composer = memo(function Composer({
   const drafts = useRef(new Map<string, string>());
   // ↑↓ 历史召回（ZCode app-input-history 同款）：首次 ↑ 快照当前草稿（含附件），
   // ↓ 回到尽头完整还原；手动输入随时退出历史态。
+  const [pasteError, setPasteError] = useState(false);
   const historyIndexRef = useRef(0);
   const historySnapshotRef = useRef<string | null>(null);
   const historyAttachmentsRef = useRef<string[] | null>(null);
@@ -105,10 +106,10 @@ export const Composer = memo(function Composer({
       const next = historyIndexRef.current + 1;
       if (next > historyPrompts.length) return true; // 已到最旧：停留不退出
       historyIndexRef.current = next;
-      const prompt = historyPrompts[next - 1];
-      setText(prompt);
-      drafts.current.set(draftKey, prompt);
-      onSetAttachments?.([]);
+      const entry = historyPrompts[next - 1];
+      setText(entry.text);
+      drafts.current.set(draftKey, entry.text);
+      onSetAttachments?.(entry.attachments);
       return true;
     }
     if (historyIndexRef.current <= 0) return false;
@@ -121,9 +122,9 @@ export const Composer = memo(function Composer({
       return true;
     }
     historyIndexRef.current -= 1;
-    const prompt = historyPrompts[historyIndexRef.current - 1];
-    setText(prompt);
-    drafts.current.set(draftKey, prompt);
+    const entry = historyPrompts[historyIndexRef.current - 1];
+    setText(entry.text);
+    drafts.current.set(draftKey, entry.text);
     return true;
   };
   // 附件：附加按钮选入，chips 展示可移除；发送后清空由父级负责
@@ -131,6 +132,31 @@ export const Composer = memo(function Composer({
     const picked = await open({ multiple: true, title: "选择附件（图片/文件）" });
     if (Array.isArray(picked) && picked.length) onAttach(picked);
     else if (typeof picked === "string") onAttach([picked]);
+  };
+  // 剪贴板贴图（ZCode clipboard-image 同款）：粘贴的图片没有磁盘路径，
+  // 经 Rust 落成临时文件再走统一附件链路；文本粘贴不受影响。
+  const handlePaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const images = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (!images.length) return;
+    event.preventDefault();
+    for (const file of images) {
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => resolve("");
+        reader.readAsDataURL(file);
+      });
+      if (!dataUrl) continue;
+      try {
+        const path = await savePasteImage(dataUrl);
+        onAttach([path]);
+      } catch {
+        setPasteError(true);
+        setTimeout(() => setPasteError(false), 3000);
+      }
+    }
   };
   const currentDraftKey = useRef(draftKey);
   const projectMenuRef = useRef<HTMLDivElement>(null);
@@ -539,6 +565,9 @@ export const Composer = memo(function Composer({
           </MotionLayer>
         )}
         </AnimatePresence>
+        {pasteError && (
+          <div className="action-error" role="alert">图片保存失败</div>
+        )}
         <textarea
           ref={textareaRef}
           value={text}
@@ -548,6 +577,7 @@ export const Composer = memo(function Composer({
             resetHistoryNav();
             refreshMention(e.target);
           }}
+          onPaste={handlePaste}
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (mention) {
@@ -586,6 +616,19 @@ export const Composer = memo(function Composer({
               if (e.key === "Escape") {
                 e.preventDefault();
                 setMention(null);
+                return;
+              }
+            }
+            // Esc 洋葱（ZCode 键盘路由的桌面版）：面板逐层关闭，最后才是中断输出
+            if (e.key === "Escape" && !e.shiftKey) {
+              if (projMenuOpen) {
+                e.preventDefault();
+                setProjMenuOpen(false);
+                return;
+              }
+              if (running && !text.trim()) {
+                e.preventDefault();
+                onStop();
                 return;
               }
             }
