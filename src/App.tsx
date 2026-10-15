@@ -601,6 +601,13 @@ export default function App() {
           setActionError("压缩只能作用于正在运行的会话");
           return false;
         }
+        // zcode 上游只允许空闲会话压缩，而我们的运行时进程随任务结束退出——
+        // 运行中必被拒、结束后无进程，手动压缩在当前架构下不可能成功。
+        // 自动压缩不受影响（compact_* 事件照常上报），提前说清而不是让用户撞上游报错。
+        if (target.harness === "zcode") {
+          setActionError("ZCode 暂不支持手动压缩（上游仅允许空闲会话压缩）；上下文接近上限时会自动压缩");
+          return false;
+        }
         try {
           await compactTask(selected, compact[1]?.trim() || undefined);
           setActionNotice("已请求压缩上下文…");
