@@ -53,9 +53,9 @@ export function ExecutionPicker({ harness, value, onChange, label = "", disabled
   const efforts = models.find((m) => m.model === effectiveModel)?.efforts ?? [];
   const locked = disabled || transport === "acp";
   const modelValue = value.model === null && allowInherit ? inherit : value.model ?? "";
+  // 不提供「默认模型」空选项：必须选具体模型（没有就是没有）
   const modelChoices: DropdownOption[] = [
     ...(allowInherit ? [{ value: inherit, label: "继承会话配置" }] : []),
-    { value: "", label: "默认模型" },
     ...(modelOptions ?? options).filter((o) => o.value !== ""),
   ];
   if (value.model && !modelChoices.some((o) => o.value === value.model)) modelChoices.push({ value: value.model, label: value.model });
@@ -63,7 +63,8 @@ export function ExecutionPicker({ harness, value, onChange, label = "", disabled
   const unsupported = !!effectiveEffort && !efforts.includes(effectiveEffort);
   return <div className="execution-picker" aria-label={`${label}执行配置`}>
     {showModel && <Dropdown title={`${label}模型`} value={modelValue} disabled={locked || loading} searchable
-      options={modelChoices} groupBy={(v) => v === inherit || !v ? "默认" : v.includes("/") ? v.split("/")[0] : harness}
+      displayLabel={modelValue ? undefined : loading ? "加载中" : "选择模型"}
+      options={modelChoices} groupBy={(v) => v === inherit ? "默认" : v.includes("/") ? v.split("/")[0] : harness}
       onChange={(model) => onChange({ model: model === inherit ? null : model, effort: model === inherit ? null : "" })} />}
     <Dropdown title={`${label}思考强度`} icon={<Brain size={14} />} value={value.effort === null && allowInherit ? inherit : value.effort ?? ""}
       displayLabel={loading ? "加载中" : unsupported ? "档位待调整" : efforts.length ? effortLabel(effectiveEffort || "默认") : "不可配置"}
