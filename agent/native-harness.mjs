@@ -163,17 +163,6 @@ function resolveNpmCmdShim(cmdPath) {
 }
 const output = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
-/** 通用 stdin 命令通道：UI 下发的指令（如 /compact）交给各适配器处理。返回关闭函数。 */
-function commandChannel(onCommand) {
-  const lines = createInterface({ input: process.stdin });
-  lines.on("line", (line) => {
-    let command;
-    try { command = JSON.parse(line); } catch { return; }
-    if (command?.cmd) onCommand(command);
-  });
-  return () => lines.close();
-}
-
 async function stopChild(child) {
   child.stdin?.end();
   if (process.platform === "win32" && child.pid && child.exitCode === null) {
@@ -192,6 +181,57 @@ async function codex(params) {
     if (!Array.isArray(archive.records)) throw new Error("Invalid shared history archive");
     history = contextRecords(archive, params.prompt);
   }
+  // request_user_input（codex 的 AskUserQuestion）：服务端经 item/tool/requestUserInput
+  // 请求作答——发 native_form_request 给 UI，stdin 的 approve/reject（带同一 itemId）
+  // 映射回 { answers: { [questionId]: { answers: [...] } } }。无 id 的指令走 /compact。
+  const pendingInputs = new Map();
+  const stdinLines = createInterface({ input: process.stdin });
+  stdinLines.on("line", (line) => {
+    let command;
+    try { command = JSON.parse(line); } catch { return; }
+    const resolver = command?.id ? pendingInputs.get(String(command.id)) : undefined;
+    if (resolver) {
+      pendingInputs.delete(String(command.id));
+      resolver({ cmd: command.cmd ?? "reject", answer: command.answer });
+      return;
+    }
+    if (command?.cmd === "compact" && threadId) {
+      rpc.call("thread/compact/start", { threadId }).catch((error) =>
+        output({ type: "error", message: `上下文压缩失败：${error?.message ?? error}` }));
+    }
+  });
+  stdinLines.on("close", () => {
+    for (const resolve of pendingInputs.values()) resolve({ cmd: "reject" });
+    pendingInputs.clear();
+  });
+  const askUser = async (request) => {
+    const body = request.params ?? {};
+    const questions = Array.isArray(body.questions) ? body.questions : [];
+    if (!questions.length) return { answers: {} };
+    const id = String(body.itemId ?? body.turnId ?? body.threadId ?? Date.now());
+    const fields = questions.map((q) => ({
+      key: q.id,
+      title: q.header ?? "问题",
+      description: q.question,
+      type: "string",
+      // 有选项 = 选择题（可自由作答）；没有 = 纯自由输入（isOther）
+      options: (q.options ?? []).map((o) => ({ value: o.label, label: o.label, description: o.description })),
+      custom: true,
+    }));
+    output({ type: "native_form_request", id, title: "Questions", fields });
+    const decision = await new Promise((resolve) => pendingInputs.set(id, resolve));
+    output({ type: "native_form_settled", id });
+    if (decision.cmd !== "approve") throw new Error("用户跳过了提问");
+    let raw = {};
+    try { raw = JSON.parse(decision.answer ?? "{}"); } catch { raw = {}; }
+    const answers = {};
+    for (const q of questions) {
+      const value = raw[q.id];
+      if (value === undefined || value === "") continue;
+      answers[q.id] = { answers: Array.isArray(value) ? value.map(String) : [String(value)] };
+    }
+    return { answers };
+  };
   const child = executable(params.program, ["app-server", "--stdio"], { cwd: params.cwd, stdio: ["pipe", "pipe", "pipe"] });
   child.stderr.on("data", (data) => process.stderr.write(data));
   let complete;
@@ -230,17 +270,13 @@ async function codex(params) {
       }
     }
     // No inherited approval is ever granted by a native adapter.
+    if (request.method === "item/tool/requestUserInput") {
+      return askUser(request).then((result) => ({ result }), (error) => ({ error: { code: -32800, message: String(error?.message ?? error) } }));
+    }
     if (request.method.endsWith("/requestApproval")) return { result: { decision: "decline" } };
     return { error: { code: -32601, message: "AgentDeck cannot authorize this request in headless mode" } };
   });
   child.once("exit", () => fail(new Error("App Server exited before completing the turn")));
-  // /compact：手动压缩上下文（codex app-server 的 thread/compact/start）
-  const closeCommands = commandChannel((command) => {
-    if (command.cmd === "compact" && threadId) {
-      rpc.call("thread/compact/start", { threadId }).catch((error) =>
-        output({ type: "error", message: `上下文压缩失败：${error?.message ?? error}` }));
-    }
-  });
   try {
     const initialized = await rpc.call("initialize", { clientInfo: { name: "agentdeck", version: "0.1.0" }, capabilities: { experimentalApi: !params.probe } });
     rpc.write({ method: "initialized", params: {} });
@@ -260,7 +296,12 @@ async function codex(params) {
     }
     if (params.probe) return;
     const sandbox = params.mode === "full" ? "danger-full-access" : params.mode === "write" ? "workspace-write" : "read-only";
-    const options = { cwd: params.cwd, approvalPolicy: "never", sandbox };
+    const options = {
+      cwd: params.cwd, approvalPolicy: "never", sandbox,
+      // request_user_input 默认只在 Plan 模式开放；线程级开启 Default 模式支持
+      //（不落用户配置，等效 codex -c features.default_mode_request_user_input=true）
+      config: { "features.default_mode_request_user_input": true },
+    };
     if (!params.resume) options.dynamicTools = historySpecs();
     if (params.model) options.model = params.model;
     const started = await rpc.call(params.resume ? "thread/resume" : "thread/start",
@@ -285,7 +326,7 @@ async function codex(params) {
       cached_input_tokens: usage.cachedInputTokens, reasoning_output_tokens: usage.reasoningOutputTokens,
     } : undefined });
   } finally {
-    closeCommands();
+    stdinLines.close();
     rpc.close();
     await stopChild(child);
   }

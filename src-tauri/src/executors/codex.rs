@@ -98,7 +98,12 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
         k if k.contains("compacted") || k.contains("compaction") => {
             let running = k.contains("start");
             events.push(AgentEvent::Status {
-                text: if running { "正在压缩上下文…" } else { "上下文压缩完成" }.to_string(),
+                text: if running {
+                    "正在压缩上下文…"
+                } else {
+                    "上下文压缩完成"
+                }
+                .to_string(),
                 compacting: Some(running),
             });
         }
@@ -222,7 +227,12 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                 .and_then(Value::as_str)
                 .is_some_and(|s| s == "started" || s == "running");
             events.push(AgentEvent::Status {
-                text: if running { "正在压缩上下文…" } else { "上下文压缩完成" }.to_string(),
+                text: if running {
+                    "正在压缩上下文…"
+                } else {
+                    "上下文压缩完成"
+                }
+                .to_string(),
                 compacting: Some(running),
             });
         }
@@ -404,14 +414,22 @@ mod tests {
         )));
 
         let v2 = events(r#"{"type":"context_compacted"}"#);
-        assert!(v2
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(false), .. })));
+        assert!(v2.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status {
+                compacting: Some(false),
+                ..
+            }
+        )));
 
         let started = events(r#"{"type":"compaction_started"}"#);
-        assert!(started
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(true), .. })));
+        assert!(started.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status {
+                compacting: Some(true),
+                ..
+            }
+        )));
 
         let item = events(
             r#"{"type":"item.completed","item":{"type":"context_compaction","status":"completed"}}"#,
@@ -423,8 +441,12 @@ mod tests {
 
         // 普通 todo 状态行不带压缩标志
         let todo = events(r#"{"type":"item.completed","item":{"type":"todo_list","todos":[]}}"#);
-        assert!(todo
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Status { compacting: None, .. })));
+        assert!(todo.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status {
+                compacting: None,
+                ..
+            }
+        )));
     }
 }

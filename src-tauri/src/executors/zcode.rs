@@ -408,9 +408,13 @@ mod tests {
         )));
 
         let completed = events(r#"{"type":"compact_completed"}"#);
-        assert!(completed
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Status { compacting: Some(false), .. })));
+        assert!(completed.iter().any(|e| matches!(
+            e,
+            AgentEvent::Status {
+                compacting: Some(false),
+                ..
+            }
+        )));
 
         let terminal = events(r#"{"kind":"compaction.terminal","status":"completed"}"#);
         assert!(terminal.iter().any(|e| matches!(

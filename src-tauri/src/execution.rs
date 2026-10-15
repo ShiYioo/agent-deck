@@ -407,12 +407,15 @@ pub(crate) fn resolve(
             }
         }),
     };
+    // codex 默认走 app-server 协议适配器：提问（request_user_input）、上下文压缩、
+    // 推理档位都在协议通道上；exec --json 缺这些能力。显式设置仍可切回 cli。
     let transport = if harness == "deck" {
         "sidecar".into()
     } else {
+        let default = if harness == "codex" { "native" } else { "cli" };
         store
             .get_setting(&format!("transport_{harness}"))?
-            .unwrap_or_else(|| "cli".into())
+            .unwrap_or_else(|| default.into())
     };
     if !matches!(transport.as_str(), "cli" | "native" | "acp" | "sidecar") {
         return Err("未知运行入口".into());
