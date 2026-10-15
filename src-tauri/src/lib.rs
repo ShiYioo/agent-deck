@@ -320,12 +320,22 @@ pub(crate) async fn start_task_impl(
         };
     // opencode「可提问」档：只有服务端模式能回答模型的提问，故强制 native 传输
     // （覆盖 transport_opencode 设置）；其余档位不受影响。
-    let transport =
-        if harness.eq_ignore_ascii_case("opencode") && mode.as_deref() == Some("interactive") {
-            "native".to_string()
-        } else {
-            transport
-        };
+    // opencode 未显式配置传输时也默认 native：提问与 /compact 都在服务端通道上；
+    // 服务端入口暂不支持附件，带附件的任务回退 CLI。
+    let opencode_default_native = harness.eq_ignore_ascii_case("opencode")
+        && attachments.is_empty()
+        && store
+            .get_setting("transport_opencode")
+            .ok()
+            .flatten()
+            .is_none();
+    let transport = if harness.eq_ignore_ascii_case("opencode")
+        && (mode.as_deref() == Some("interactive") || opencode_default_native)
+    {
+        "native".to_string()
+    } else {
+        transport
+    };
     let model = resolved_execution.model.clone().filter(|s| !s.is_empty());
     let effort = resolved_execution.effort.clone().filter(|s| !s.is_empty());
     let zcode_execution = execution::claim_zcode(&harness)?;

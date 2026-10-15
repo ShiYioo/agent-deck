@@ -196,6 +196,7 @@ async function codex(params) {
       return;
     }
     if (command?.cmd === "compact" && threadId) {
+      compactRequested = true;
       rpc.call("thread/compact/start", { threadId }).catch((error) =>
         output({ type: "error", message: `上下文压缩失败：${error?.message ?? error}` }));
     }
@@ -239,6 +240,9 @@ async function codex(params) {
   let threadId;
   let turnId;
   let usage;
+  // /compact 会中断进行中的 turn（codex 语义）——这不算失败：
+  // 等 thread/compacted 到达后干净收尾
+  let compactRequested = false;
   const done = new Promise((resolve, reject) => { complete = resolve; fail = reject; });
   // Register immediately so a very fast notification cannot be lost.
   done.catch(() => {});
@@ -246,16 +250,33 @@ async function codex(params) {
     const p = event.params ?? {};
     if (threadId && p.threadId && p.threadId !== threadId) return;
     if (event.method === "item/completed") {
+      // 压缩终态：thread/compacted 已废弃，现在以 contextCompaction 条目收尾
+      if (p.item?.type === "contextCompaction") {
+        output({ type: "thread.compacted" });
+        if (compactRequested) complete();
+        return;
+      }
       const item = codexItem(p.item ?? {});
       if (item) output({ type: "item.completed", item });
     }
     if (event.method === "thread/tokenUsage/updated") usage = p.tokenUsage?.last;
     // 上下文压缩完成（codex 的 app-server 只报终态）：交给 codex.rs 渲染为状态行
-    if (event.method === "thread/compacted") output({ type: "thread.compacted" });
+    if (event.method === "thread/compacted") {
+      output({ type: "thread.compacted" });
+      if (compactRequested) complete();
+      return;
+    }
     if (event.method === "turn/completed") {
       if (turnId && p.turn?.id !== turnId) return;
-      if (p.turn?.status !== "completed") fail(new Error(JSON.stringify(p.turn?.error ?? p.turn?.status)));
-      else complete();
+      if (p.turn?.status !== "completed") {
+        if (compactRequested) {
+          // 压缩中断 turn 是预期路径；thread/compacted 若 3 分钟没来则按失败收尾
+          const timer = setTimeout(() => fail(new Error("压缩请求后未收到完成通知")), 180_000);
+          done.catch(() => {}).finally(() => clearTimeout(timer));
+          return;
+        }
+        fail(new Error(JSON.stringify(p.turn?.error ?? p.turn?.status)));
+      } else complete();
     }
     if (event.method === "error" && !p.willRetry) fail(new Error(p.error?.message ?? "Native harness error"));
   }, (request) => {
