@@ -123,15 +123,15 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                     let status = state.get("status").and_then(Value::as_str).unwrap_or("");
                     match status {
                         "pending" | "running" => {
-                            // bash 命令透明：展示命令本身而非 JSON/标题；提问展示问题文本
+                            // 命令类工具透明：展示命令本身而非 JSON/标题
+                            //（v2 的 bash 工具名叫 shell，按 input.command 识别而非工具名）；
+                            // 提问展示问题文本。
                             let detail = if is_question {
                                 question_detail(input)
-                            } else if tool == "bash" {
-                                state
-                                    .pointer("/input/command")
-                                    .and_then(Value::as_str)
-                                    .map(|s| truncate(s, 800))
-                                    .unwrap_or_else(|| "bash".into())
+                            } else if let Some(cmd) =
+                                state.pointer("/input/command").and_then(Value::as_str)
+                            {
+                                truncate(cmd, 800)
                             } else {
                                 state
                                     .get("title")
@@ -172,16 +172,20 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                                     detail: question_answer_detail(output),
                                 });
                             } else {
-                                let title = state
-                                    .get("title")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("完成")
-                                    .to_string();
-                                events.push(AgentEvent::ToolUse {
-                                    tool: tool.clone(),
-                                    detail: title,
-                                    args: None,
-                                });
+                                // completed 自带 input（CLI 平铺形态只有一条完成事件）时
+                                // 补 tool_use；服务端形态 running 已发过，只发结果行，
+                                // 否则每次工具调用渲染三行重复。
+                                if let Some(done_input) = input {
+                                    events.push(AgentEvent::ToolUse {
+                                        tool: tool.clone(),
+                                        detail: state
+                                            .get("title")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| "完成".into()),
+                                        args: Some(done_input.clone()),
+                                    });
+                                }
                                 events.push(AgentEvent::ToolResult {
                                     tool,
                                     ok: true,
@@ -403,6 +407,39 @@ mod tests {
             done.iter()
                 .any(|e| matches!(e, AgentEvent::ToolResult { ok: true, .. }))
         );
+
+        // 服务端形态：completed 不带 input（running 已发过 tool_use）——
+        // 只补结果行，再发 tool_use 会三行重复
+        let server_done = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","tool":"read","state":{"status":"completed","output":"line1"}}}"#,
+        );
+        assert!(matches!(
+            &server_done[..],
+            [AgentEvent::ToolResult { tool, ok: true, detail }]
+                if tool == "read" && detail == "line1"
+        ));
+
+        // CLI 平铺形态：completed 自带 input（没有 running 事件）——必须仍发 tool_use
+        let cli_done = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"file1"}}}"#,
+        );
+        assert!(matches!(
+            &cli_done[..],
+            [AgentEvent::ToolUse { tool, args: Some(_), .. }, AgentEvent::ToolResult { ok: true, .. }]
+                if tool == "bash"
+        ));
+    }
+
+    /// 命令透明不挑工具名：v2 的 bash 工具叫 shell，按 input.command 展示命令本身
+    #[test]
+    fn shell_command_transparent_by_input() {
+        let running = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","callID":"c1","tool":"shell","state":{"status":"running","input":{"command":"echo ok"},"title":"shell"}}}"#,
+        );
+        assert!(matches!(
+            &running[..],
+            [AgentEvent::ToolUse { tool, detail, .. }] if tool == "shell" && detail == "echo ok"
+        ));
     }
 
     /// opencode v2 的 question 工具事件不带工具名——以 input.questions 识别，

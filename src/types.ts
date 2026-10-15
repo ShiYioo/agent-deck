@@ -280,8 +280,9 @@ function compactLines(lines: Array<string | undefined>): string {
 export function summarizeToolInput(toolName: string, input: unknown): string {
   const record = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const t = toolName.toLowerCase();
-  if (t === "bash" && typeof record.command === "string") {
-    return String(record.command).slice(0, 800); // bash 命令保持全量透明
+  // 命令类（bash / opencode v2 的 shell）：命令保持全量透明
+  if ((t === "bash" || t === "shell") && typeof record.command === "string") {
+    return String(record.command).slice(0, 800);
   }
   // 模型提问（opencode question / deck ask_user_question）：问题文本 + 选项可读展示
   if (t === "question" || t === "ask_user_question") {
@@ -299,7 +300,12 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
       });
     return compactLines(lines);
   }
-  if (t === "read") return compactLines([fieldLine(record, "offset"), fieldLine(record, "limit")]);
+  // read 必须点名文件（v2 字段 path / pi 字段 file_path 都认）
+  if (t === "read") return compactLines([
+    fieldLine(record, "file_path") ?? fieldLine(record, "path"),
+    fieldLine(record, "offset"),
+    fieldLine(record, "limit"),
+  ]);
   if (t === "write") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "offset"), fieldLine(record, "limit")]);
   if (t === "edit") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "replace_all")]);
   if (t === "grep") return compactLines([fieldLine(record, "pattern"), fieldLine(record, "path"), fieldLine(record, "glob")]);
