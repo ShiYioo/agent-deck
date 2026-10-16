@@ -253,8 +253,9 @@ export type LiveTask = {
   queuedConfigs?: import("./api").ExecutionConfig[];
   /** deck 运行时的 todo 清单（todo_write 工具维护） */
   todos?: { content: string; status: string }[];
-  /** 上下文用量（ZCode 式徽标）：used = 当前占用 token，window = 上下文窗口（空=未知） */
-  contextUsage?: { used: number; window: number | null };
+  /** 上下文用量（ZCode 式徽标）：used = 当前占用 token，window = 上下文窗口（空=未知），
+   *  cacheRate = 命中率（≥78% 才在徽标露出） */
+  contextUsage?: { used: number; window: number | null; cacheRate?: number | null };
   /** 正在压缩上下文（pi auto-compaction / opencode compaction）：交互层提示用 */
   compacting?: boolean;
 };

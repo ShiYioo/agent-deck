@@ -679,3 +679,43 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
   .execution-picker .dropdown-trigger > span { max-width: 140px; }
   .composer-toolbar .execution-picker { flex-shrink: 1; }
 }
+
+/* 上下文用量徽标（ZCode ChatContextUsage）：composer dock 的元信息行 */
+.context-usage-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-subtle, #f5f5f4);
+  color: var(--text-2, #78716c);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* diff 专属语义色（ZCode 令牌规则）：增删行有自己的语义，不许拿 success/danger 顶替。
+   变量供 inline 场景（DiffModal 动态 class）取色，工具类供静态标记使用。 */
+:root {
+  --color-diff-added: #047857;      /* emerald-700：新增行/加号计数 */
+  --color-diff-added-bg: #ecfdf5;   /* emerald-50 */
+  --color-diff-removed: #b91c1c;    /* red-700：删除行/减号计数 */
+  --color-diff-removed-bg: #fef2f2; /* red-50 */
+}
+.text-diff-added { color: var(--color-diff-added); }
+.text-diff-removed { color: var(--color-diff-removed); }
+.bg-diff-added { background-color: var(--color-diff-added-bg); color: var(--color-diff-added); }
+.bg-diff-removed { background-color: var(--color-diff-removed-bg); color: var(--color-diff-removed); }
+
+/* 离底阅读窗（ZCode ConversationTimeline）：底部 96px 全透明，其上 24px 渐变入底色 */
+.detach-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 120px;
+  pointer-events: none;
+  background: linear-gradient(to top, transparent 96px, var(--bg) 120px);
+  z-index: 1;
+}
+.queue-edit { color: var(--text-3, #a8a29e); }
+.queue-edit:hover { color: var(--text-1, #292524); }

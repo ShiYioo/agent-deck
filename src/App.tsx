@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelLeft, SquarePen, ArrowDown, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff } from "lucide-react";
+import { PanelLeft, SquarePen, ArrowDown, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff, PenLine } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
@@ -39,6 +39,7 @@ import {
 } from "./api";
 import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
 import { buildConversation, foldToolRows } from "./conversation";
+import { ContextUsageBadge } from "./components/ContextUsageBadge";
 import { ExecutionPicker, effortLabel, readableModel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
@@ -195,6 +196,8 @@ export default function App() {
   // 协作成果的刷新信号：编辑器启动新编排、或编排状态变化时递增，
   // 让协作成果卡立刻取到新数据（同 RuntimeStatus 的 refreshKey 约定）。
   const [graphRefresh, setGraphRefresh] = useState(0);
+  // 队列「编辑」：撤回完整输入意图到 composer（带版本号驱动注入）
+  const [queuedWithdraw, setQueuedWithdraw] = useState<{ text: string; version: number } | null>(null);
   const bumpGraphs = useCallback(() => setGraphRefresh((n) => n + 1), []);
   const clearApproval = useCallback((taskId: string, id?: string) => {
     setApprovals((prev) => {
@@ -467,6 +470,22 @@ export default function App() {
         const { taskId, event } = e.payload;
         if (deletedTasks.current.has(taskId)) return;
         if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
+        // 上下文用量（ZCode 式徽标）：complete 的 tokens 是所有 harness 的公共数据源——
+        // used ≈ input+output；window 只有 deck（pi）上报，其余 harness 不编造
+        if (event.type === "complete" && event.tokens) {
+          const used = (event.tokens.input ?? 0) + (event.tokens.output ?? 0);
+          if (used > 0) {
+            setLive((prev) => prev[taskId]
+              ? { ...prev, [taskId]: { ...prev[taskId], contextUsage: {
+                  used,
+                  window: prev[taskId].contextUsage?.window ?? null,
+                  cacheRate: event.tokens!.input > 0
+                    ? (event.tokens!.cached ?? 0) / event.tokens!.input
+                    : null,
+                } } }
+              : prev);
+          }
+        }
         enqueueUpdate({ taskId, item: { event, key: nextKey() } });
 
 
@@ -1649,6 +1668,13 @@ export default function App() {
           {actionError && <div className="action-error" role="alert">{actionError}</div>}
           {actionNotice && !actionError && <div className="action-notice">{actionNotice}</div>}
           <RuntimeStatus harness={harness} refreshKey={settingsOpen} onSettings={openSettings} />
+          {selectedLive?.contextUsage && (
+            <ContextUsageBadge
+              used={selectedLive.contextUsage.used}
+              window={selectedLive.contextUsage.window}
+              cacheRate={selectedLive.contextUsage.cacheRate}
+            />
+          )}
           {selectedRow?.execution_config && <div className="execution-current">
             <span>{selectedRunning ? "本轮运行" : "本轮配置"}</span>
             {/* 只显示可读模型名（内部档案 id 不外露）；没有配置就不编造"默认模型" */}
@@ -1671,13 +1697,38 @@ export default function App() {
           )}
           {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
             <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
-              <span className="text-stone-400">已排队（结束后自动续发）：</span>
+              <span className="text-stone-400">待发送消息（{selectedLive.queued.length}）· 结束后自动续发：</span>
               {selectedLive.queued.map((q, i) => (
                 <div
                   key={i}
                   className="flex items-center gap-1 rounded-full border border-stone-200 px-2 py-0.5 text-stone-500"
                 >
                   <span className="max-w-48 truncate">{q}</span>
+                  {!q.trim().startsWith("/") && (
+                    <button
+                      onClick={() => {
+                        // 编辑 = 撤回完整输入意图到 composer（ZCode 队列语义），非原地改
+                        setQueuedWithdraw({ text: q, version: (queuedWithdraw?.version ?? 0) + 1 });
+                        setLive((prev) => {
+                          const t = prev[selected];
+                          if (!t) return prev;
+                          return {
+                            ...prev,
+                            [selected]: {
+                              ...t,
+                              queued: t.queued?.filter((_, j) => j !== i),
+                              queuedConfigs: t.queuedConfigs?.filter((_, j) => j !== i),
+                            },
+                          };
+                        });
+                      }}
+                      className="queue-edit"
+                      title="撤回到输入框编辑"
+                      aria-label={`撤回排队消息 ${i + 1} 到输入框`}
+                    >
+                      <PenLine size={12} />
+                    </button>
+                  )}
                   <ExecutionPicker harness={selectedLive.harness} taskId={executionScope}
                     value={selectedLive.queuedConfigs?.[i] ?? { model: selectedLive.model ?? "", effort: selectedLive.effort ?? "" }}
                     label={`排队 ${i + 1} `} allowInherit={false} onChange={(config) => setLive((prev) => {
@@ -1742,6 +1793,7 @@ export default function App() {
             running={selectedRunning}
             contextUsage={selectedLive?.contextUsage}
             historyPrompts={historyPrompts}
+            injectedDraft={queuedWithdraw}
             onSetAttachments={setAttachments}
             recentModels={recentModels}
             placeholder={
@@ -1818,7 +1870,7 @@ const LogPanel = memo(function LogPanel({
   loading: boolean;
   footer?: React.ReactNode;
 }) {
-  const { viewportRef, contentRef, follow, onScroll, scrollToBottom } = useAutoScroll(events.length);
+  const { viewportRef, contentRef, follow, hasOverflow, onScroll, scrollToBottom } = useAutoScroll(events.length);
 
   const overflow = events.length - MAX_RENDER;
   const visible = overflow > 0 ? events.slice(overflow) : events;
@@ -1890,8 +1942,10 @@ const LogPanel = memo(function LogPanel({
       {footer}
       </div>
       </div>
+      {/* 离底阅读窗：底部 96px 全透明 + 顶部 24px 渐变，流式新内容从渐变下钻出 */}
+      {!follow && <div className="detach-fade" aria-hidden="true" />}
       <AnimatePresence>
-      {!follow && (
+      {!follow && hasOverflow && (
         <MotionLayer className="scroll-latest" preset="menu">
         <button
            onClick={scrollToBottom}
