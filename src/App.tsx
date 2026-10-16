@@ -1635,7 +1635,12 @@ export default function App() {
                 产出属于任务本身，因此不再埋在「上下文与协作设置」里。 */}
             {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} />}
 
-            <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning} loading={!!selected && loadingEvents.has(selected)} footer={artifactsFooter} />
+            {/* 运行指示只在"运行中且无 blocker"时出现（ZCode 同款真值表）：
+                有待答的提问/审批，或正在压缩上下文时，用户已经有明确的事可做/系统在做别的事，
+                再转三点动画就是噪音；blocker 消失后只要还在跑，指示立刻恢复。 */}
+            <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning}
+              blocked={!!approval || !!selectedLive?.compacting}
+              loading={!!selected && loadingEvents.has(selected)} footer={artifactsFooter} />
           </MotionLayer>
         )}
 
@@ -1802,11 +1807,14 @@ function eventsToText(events: { event: AgentEvent }[]): string {
 const LogPanel = memo(function LogPanel({
   events,
   running,
+  blocked,
   loading,
   footer,
 }: {
   events: { event: AgentEvent; key: number }[];
   running: boolean;
+  /** 有 blocker（提问/审批待答、压缩进行中）时不显示运行指示 */
+  blocked: boolean;
   loading: boolean;
   footer?: React.ReactNode;
 }) {
@@ -1831,12 +1839,10 @@ const LogPanel = memo(function LogPanel({
       <div ref={contentRef} className="log-content">
       {events.length === 0 && (
         <div className="py-10 text-center text-stone-400">
-          {loading ? <span role="status">正在加载对话…</span> : running ? (
-            <span className="typing-dots inline-flex items-center">
-              <span />
-              <span />
-              <span />
-            </span>
+          {loading ? (
+            <span role="status">正在加载对话…</span>
+          ) : running ? (
+            blocked ? null : <LoadingIndicator />
           ) : (
             "（暂无日志）"
           )}
@@ -1879,6 +1885,8 @@ const LogPanel = memo(function LogPanel({
         );
       })}
       </Suspense>
+      {/* 有内容时也要看得出"还在跑"：指示挂在转写末尾，随内容一起滚动 */}
+      {events.length > 0 && running && !blocked && <LoadingIndicator />}
       {footer}
       </div>
       </div>
@@ -1896,6 +1904,20 @@ const LogPanel = memo(function LogPanel({
         </MotionLayer>
       )}
       </AnimatePresence>
+    </div>
+  );
+});
+
+/** 转写末尾的运行指示：只放动画，不写"正在思考"之类的文案（ZCode 的 loading 同款约定）；
+ *  无障碍名用通用的"加载中"——状态不许只靠颜色或动画。 */
+const LoadingIndicator = memo(function LoadingIndicator() {
+  return (
+    <div className="transcript-loading" role="status" aria-label="加载中">
+      <span className="typing-dots inline-flex items-center" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
     </div>
   );
 });

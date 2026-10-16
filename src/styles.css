@@ -130,6 +130,23 @@ body,
 
 html[data-document-hidden] .tool-sweep::after { animation: none; }
 
+/* 思考行流式中的"活着"：只让图标呼吸，不加文案噪声（ZCode 的 streaming 思考同款克制） */
+.thought-streaming {
+  animation: activity-pulse 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thought-streaming { animation: none; opacity: 0.7; }
+}
+
+html[data-document-hidden] .thought-streaming { animation: none; }
+
+/* 转写末尾的运行指示：只有动画、没有文案（无障碍名在 DOM 上），随内容一起滚动 */
+.transcript-loading {
+  display: block;
+  padding: 2px 0;
+}
+
 /* 输出截断提示：告诉用户还有多少没显示，而不是悄悄吞掉 */
 .output-truncated {
   padding: 4px 12px 0;

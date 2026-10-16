@@ -64,6 +64,28 @@ test("deck 的文件工具行点名文件、显示状态词与 +/- 行数", asyn
   await expect(page.locator(".tool-sweep")).toHaveCount(0);
 });
 
+const emitEvent = (page: Page, event: unknown) =>
+  page.evaluate(
+    (body) => (window as unknown as { __emit: (name: string, payload: unknown) => void }).__emit("task-event", body),
+    { taskId: "new-task", event },
+  );
+
+test("等待与重试：思考说「正在思考」，前两次 API 重试不占转写", async ({ page }) => {
+  await mockDesktop(page, false);
+  await runningTask(page);
+
+  // 流式思考：只说「正在思考」——耗时还在涨，显示出来只是噪声
+  await emitEvent(page, { type: "thinking", text: "先看布局", streaming: true });
+  await expect(page.locator(".activity-event").filter({ hasText: "正在思考" })).toHaveCount(1);
+
+  // 重试阈值：前两次是瞬时噪音不显示，第 3 次起才说明"这次真的不顺"（ZCode 同款规则）
+  await emitEvent(page, { type: "status", text: "重试 1/5 次：连接中断", retryKey: "pi-retry" });
+  await emitEvent(page, { type: "status", text: "重试 2/5 次：连接中断", retryKey: "pi-retry" });
+  await expect(page.getByText("重试 1/5 次：连接中断")).toHaveCount(0);
+  await emitEvent(page, { type: "status", text: "重试 3/5 次：连接中断", retryKey: "pi-retry" });
+  await expect(page.getByText("重试 3/5 次：连接中断")).toHaveCount(1);
+});
+
 test("折叠后的工具摘要也点名文件、并标出删除", async ({ page }) => {
   await mockDesktop(page, false);
   await runningTask(page);

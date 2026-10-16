@@ -45,10 +45,11 @@ export const EventLine = memo(function EventLine({
         </div>
       );
     case "thought":
+      // 流式中只说「正在思考」：耗时还在涨，显示出来只是噪声；结束后收敛成紧凑的「思考 · Ns」
       return (
         <Disclosure
           className="activity-event"
-          title={<><IconSparkle size={13} /><span>思考{row.durationMs && row.durationMs >= 100 ? ` · ${(row.durationMs / 1000).toFixed(1)} 秒` : ""}</span></>}
+          title={<><IconSparkle size={13} className={row.streaming ? "thought-streaming" : undefined} /><span>{row.streaming ? "正在思考" : `思考${thoughtDuration(row.durationMs)}`}</span></>}
         >
           <pre>{row.text}</pre>
         </Disclosure>
@@ -134,6 +135,13 @@ export const EventLine = memo(function EventLine({
       return null;
   }
 });
+
+/** 思考行耗时：不足 100ms 不显示（读不出来）；10 秒以上取整，避免小数点噪声 */
+function thoughtDuration(durationMs?: number): string {
+  if (!durationMs || durationMs < 100) return "";
+  const seconds = durationMs / 1000;
+  return ` · ${seconds >= 10 ? Math.round(seconds) : Math.round(seconds * 10) / 10}s`;
+}
 
 /** 状态词：执行中/已执行/执行失败——状态不许只靠颜色（ZCode 同款六态语义的子集） */
 function statusWord(status: "running" | "completed" | "failed") {

@@ -10,7 +10,7 @@ export type ToolStatus = "running" | "completed" | "failed";
 export type ConversationRow =
   | { kind: "user"; key: number; text: string; hidden: boolean; sourceHarness?: string }
   | { kind: "assistant"; key: number; text: string; sourceHarness?: string }
-  | { kind: "thought"; key: number; text: string; durationMs?: number }
+  | { kind: "thought"; key: number; text: string; durationMs?: number; streaming?: boolean }
   | {
       kind: "tool";
       key: number;
@@ -78,6 +78,22 @@ function fileTarget(args: Record<string, unknown> | undefined): string | undefin
   return undefined;
 }
 
+/** 重试状态行的可见阈值：照搬 ZCode 的 MIN_VISIBLE_API_RETRY_ATTEMPT = 3。
+ *  前两次 API 重试几乎都是瞬时恢复的进度噪音，只有从第 3 次起才说明"这次真的不顺"，
+ *  值得占用转写空间；判定只看状态行文本里解析出的尝试次数。 */
+const MIN_VISIBLE_API_RETRY_ATTEMPT = 3;
+
+/** 从重试状态行文本里解析尝试次数：后端不给结构化字段，只给文案，已知三种写法各试一次——
+ *  `<n>/<max>`（pi 的「第 2/5 次」）、「第 n 次」、「attempt n」。
+ *  解析不到返回 null：宁可多显示一条，也不能因为格式不认识就把真实重试吞掉。 */
+function retryAttempt(text: string): number | null {
+  for (const pattern of [/(\d+)\s*\/\s*(\d+)/, /第\s*(\d+)\s*次/, /attempt\s*(\d+)/i]) {
+    const matched = text.match(pattern);
+    if (matched) return Number(matched[1]);
+  }
+  return null;
+}
+
 /** 事件流 → 行。入参保持 {event, key} 形状（live 流与 DB 回放同构）。 */
 export function buildConversation(items: { event: AgentEvent; key: number }[]): ConversationRow[] {
   const rows: ConversationRow[] = [];
@@ -100,7 +116,8 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
         // 思考块耗时 = 上一事件到达 → 本块到达（ts 由入库统一打点）
         let durationMs: number | undefined;
         if (ev.ts && prevTs !== null && ev.ts > prevTs) durationMs = ev.ts - prevTs;
-        rows.push({ kind: "thought", key, text: ev.text, durationMs });
+        // streaming 由渲染层用来区分「正在思考」与「思考 · Ns」：流式中的耗时还在涨，显示出来只是噪声
+        rows.push({ kind: "thought", key, text: ev.text, durationMs, streaming: ev.streaming });
         break;
       }
       case "tool_use": {
@@ -140,6 +157,11 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
         break;
       }
       case "status": {
+        // 本地压缩占位（local-compact）不是 API 重试，不参与阈值过滤
+        if (ev.retryKey && ev.retryKey !== "local-compact") {
+          const attempt = retryAttempt(ev.text);
+          if (attempt !== null && attempt < MIN_VISIBLE_API_RETRY_ATTEMPT) break;
+        }
         // 连续同因重试合并：保留最新计数，key 复用首条
         const prev = rows[rows.length - 1];
         if (
