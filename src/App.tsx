@@ -26,6 +26,7 @@ import {
   invokeTaskCommand,
   compactTask,
   inTauri,
+  discoverModels,
   listTasks,
   listCollaborations,
   listGraphRuns,
@@ -40,6 +41,7 @@ import {
 import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
 import { buildConversation, foldToolRows } from "./conversation";
 import { ContextUsageBadge } from "./components/ContextUsageBadge";
+import { detectExecutorMention } from "./executorMention";
 import { ExecutionPicker, effortLabel, readableModel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
@@ -677,6 +679,34 @@ export default function App() {
       if (!text.trim()) {
         setActionError("请输入任务描述");
         return false;
+      }
+      // 自然语言执行器指名（“用/让 ZCode 的 xxx 模型 …”）：语义同 @ 路由——
+      // 原生 harness 没有跨执行器委派工具，不拦就变成对方自己的 subagent。
+      if (!atTarget && harness !== "deck") {
+        const mention = detectExecutorMention(text, harness);
+        if (mention) {
+          let mentionModel: string | null = null;
+          if (mention.modelHint) {
+            try {
+              const norm = mention.modelHint.toLowerCase().replace(/[^a-z0-9]/g, "");
+              const list = await discoverModels(mention.harness);
+              const hit = list.find((entry: string) => {
+                const raw = entry.split("	")[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+                const label = (entry.split("	")[2] ?? entry).toLowerCase().replace(/[^a-z0-9]/g, "");
+                return label.includes(norm) || raw.includes(norm);
+              });
+              if (hit) mentionModel = hit.split("	")[0];
+            } catch {
+              // 模型目录发现失败就不指定模型，交给目标执行器的默认
+            }
+          }
+          atTarget = mention.harness;
+          atModel = mentionModel;
+          text = mention.rest;
+          setActionNotice(
+            `已按你的指示改派 ${mention.harness}${mentionModel ? ` · ${mentionModel.split("/").pop()}` : ""}（原会话执行器 ${harness}）`,
+          );
+        }
       }
 
       const row = selected ? history.find((t) => t.id === selected) : undefined;

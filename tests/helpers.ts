@@ -77,6 +77,14 @@ export async function mockDesktop(page: Page, failSend = true) {
           executionDefaults[`${args.taskId ?? "default"}:${args.harness}`] = args.config as { model: string | null; effort: string | null };
           return;
         }
+        if (cmd === "discover_models") return args.harness === "codex" ? [
+          "gpt-test", "gpt-no-effort",
+        ] : args.harness === "opencode" ? [
+          "opencode/test-free", "opencode/plain-free",
+        ] : args.harness === "zcode" ? [
+          "zhipuai-coding-plan/GLM-5.3-Flash	智谱 Coding Plan	GLM-5.3-Flash",
+          "zhipuai-coding-plan/GLM-5	智谱 Coding Plan	GLM-5",
+        ] : [];
         if (cmd === "discover_execution_models") return args.harness === "codex" ? [
           { model: "gpt-test", efforts: ["low", "medium", "high"], context_window: 128000 },
           { model: "gpt-no-effort", efforts: [], context_window: 32000 },
@@ -84,6 +92,9 @@ export async function mockDesktop(page: Page, failSend = true) {
         ] : args.harness === "opencode" ? [
           { model: "opencode/test-free", efforts: ["low", "high"], context_window: 64000 },
           { model: "opencode/plain-free", efforts: [], context_window: 32000 },
+        ] : args.harness === "zcode" ? [
+          { model: "zhipuai-coding-plan/GLM-5.3-Flash", efforts: [], context_window: 128000 },
+          { model: "zhipuai-coding-plan/GLM-5", efforts: [], context_window: 128000 },
         ] : [];
         if (cmd === "list_execution_overrides") return structuredClone(executionOverrides[String(args.runId)] ?? []);
         if (cmd === "update_delegation_execution") {
