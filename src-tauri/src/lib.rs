@@ -1576,6 +1576,84 @@ pub(crate) fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value 
     serde_json::json!({ "entries": entries })
 }
 
+/// 本任务事件流里"被工具改过的文件"——跨会话隔离的权威来源。
+/// 目录状态分不出谁改的，但事件是按 taskId 记的：只认会写文件的工具，
+/// 路径字段各家不同（pi 的 path、opencode 的 filePath、apply_patch 的
+/// operation.path、codex 的 changes[].path）。
+fn touched_files_from_events(events: &[String], dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+    let mut touched = std::collections::BTreeSet::new();
+    let mut push = |path: &str| {
+        let p = std::path::Path::new(path);
+        let rel = if p.is_absolute() {
+            p.strip_prefix(dir)
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string())
+        } else {
+            path.trim_start_matches("./").to_string()
+        };
+        if !rel.is_empty() {
+            touched.insert(rel);
+        }
+    };
+    for raw in events {
+        let Ok(ev) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        if ev.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+            continue;
+        }
+        let tool = ev
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let args = ev.get("args");
+        // 文件变更数组（codex file_change）：逐项 path
+        if let Some(changes) = args
+            .and_then(|a| a.get("changes"))
+            .and_then(|v| v.as_array())
+        {
+            for c in changes {
+                if let Some(p) = c.get("path").and_then(|v| v.as_str()) {
+                    push(p);
+                }
+            }
+            continue;
+        }
+        // apply_patch（zcode）：operation.path
+        if let Some(p) = args
+            .and_then(|a| a.get("operation"))
+            .and_then(|o| o.get("path"))
+            .and_then(|v| v.as_str())
+        {
+            push(p);
+            continue;
+        }
+        // 只认会写文件的工具（read/grep/find 不算）
+        if !matches!(
+            tool.as_str(),
+            "write"
+                | "edit"
+                | "multiedit"
+                | "apply_patch"
+                | "patch"
+                | "delete_file"
+                | "remove_file"
+                | "notebook_edit"
+                | "str_replace_editor"
+        ) {
+            continue;
+        }
+        for key in ["path", "file_path", "filePath", "file"] {
+            if let Some(p) = args.and_then(|a| a.get(key)).and_then(|v| v.as_str()) {
+                push(p);
+                break;
+            }
+        }
+    }
+    touched
+}
+
 /// 按基线分类本轮改动：基线没有 = added；mtime/size 变了 = modified；基线有现在没了 = deleted。
 /// git 仓库内 modified 文件的 diff 对 HEAD（可能含早前轮次对该文件的编辑，文件级归属仍准确）。
 fn classify_turn_changes(
@@ -1764,7 +1842,16 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
     if let Some(manifest) =
         manifest.filter(|m| m.get("entries").map(|v| v.is_object()).unwrap_or(false))
     {
-        let files = classify_turn_changes(dir_path, &manifest, frozen.as_ref());
+        let mut files = classify_turn_changes(dir_path, &manifest, frozen.as_ref());
+        // 运行中（还没有冻结快照）：目录对比分不出"谁改的"——别的会话此刻的改动会被算进来。
+        // 只保留本任务自己的工具事件碰过的文件，做到跨会话隔离。
+        if frozen.is_none() {
+            let events = store.get_events(&task_id, 0, 20_000)?;
+            if !events.is_empty() {
+                let touched = touched_files_from_events(&events, dir_path);
+                files.retain(|f| touched.contains(&f.path));
+            }
+        }
         let mut artifacts = Vec::new();
         for f in &files {
             if let Some(kind) = artifact_kind(&f.path) {
