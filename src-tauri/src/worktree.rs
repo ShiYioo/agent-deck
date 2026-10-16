@@ -57,23 +57,67 @@ pub fn branch_for(task_id: &str) -> String {
     format!("agentdeck/{}", task_id)
 }
 
-/// worktree 目录：~/AgentDeck/worktrees/<repo 名>/<task id>
-pub fn dir_for(main_dir: &Path, task_id: &str) -> PathBuf {
-    let repo_root = run_git_in(main_dir, &["rev-parse", "--show-toplevel"])
+/// 目录所在仓库的根（不在仓库内时返回原目录）。
+/// `cwd` 落在子目录里时，项目归属仍应算到仓库根——对齐 ZCode 的
+/// `findWorktreeRoot`：从 cwd 向上找到 `.git` 再判定项目。
+pub fn project_root(dir: &Path) -> PathBuf {
+    run_git_in(dir, &["rev-parse", "--show-toplevel"])
         .map(|s| PathBuf::from(s.trim().to_string()))
-        .unwrap_or_else(|_| main_dir.to_path_buf());
+        .unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// 受管 worktree 的根：用户可配置（设置里的「Worktree 根目录」），留空用默认
+/// `~/AgentDeck/worktrees`。
+pub fn root(configured: Option<&str>) -> PathBuf {
+    match configured.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => dirs::home_dir()
+            .map(|h| h.join("AgentDeck").join("worktrees"))
+            .unwrap_or_else(|| PathBuf::from(".agentdeck-worktrees")),
+    }
+}
+
+/// worktree 目录：<root>/<repo 名>/<task id>
+pub fn dir_for(root: &Path, main_dir: &Path, task_id: &str) -> PathBuf {
+    let repo_root = project_root(main_dir);
     let name = repo_root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".into());
-    dirs::home_dir()
-        .map(|h| {
-            h.join("AgentDeck")
-                .join("worktrees")
-                .join(name)
-                .join(task_id)
-        })
-        .unwrap_or_else(|| main_dir.join(".agentdeck-worktrees").join(task_id))
+    root.join(name).join(task_id)
+}
+
+/// 列出受管 worktree：<root>/<repo 名>/<task id>。
+/// 返回 (目录, task id, 目录 mtime)——mtime 用于按"最近使用"淘汰。
+pub fn managed(root: &Path) -> Vec<(PathBuf, String, std::time::SystemTime)> {
+    let mut out = Vec::new();
+    let Ok(repos) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for repo in repos.flatten() {
+        if !repo.path().is_dir() {
+            continue;
+        }
+        let Ok(items) = std::fs::read_dir(repo.path()) else {
+            continue;
+        };
+        for item in items.flatten() {
+            let path = item.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let mtime = item
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            out.push((
+                path,
+                item.file_name().to_string_lossy().to_string(),
+                mtime,
+            ));
+        }
+    }
+    out
 }
 
 /// 主目录必须干净（有未提交改动时，隔离边界会漏掉用户自己的改动）
@@ -88,13 +132,13 @@ fn assert_clean(main_dir: &Path) -> Result<(), String> {
 }
 
 /// 创建 worktree + 任务分支。返回任务 cwd、分支名、base commit。
-pub fn create(main_dir: &Path, task_id: &str) -> Result<WorktreePaths, String> {
+pub fn create(main_dir: &Path, task_id: &str, root: &Path) -> Result<WorktreePaths, String> {
     assert_clean(main_dir)?;
     let base_commit = run_git_in(main_dir, &["rev-parse", "HEAD"])?
         .trim()
         .to_string();
     let branch = branch_for(task_id);
-    let dir = dir_for(main_dir, task_id);
+    let dir = dir_for(root, main_dir, task_id);
     if dir.exists() {
         return Err(format!("worktree 目录已存在：{}", dir.display()));
     }
@@ -128,8 +172,31 @@ pub fn merge(main_dir: &Path, branch: &str) -> Result<String, String> {
 }
 
 /// 任务完成后清理：移除 worktree、删除任务分支（-D 允许丢弃未合并）。
-pub fn remove(main_dir: &Path, task_id: &str, delete_branch: bool) -> Result<(), String> {
-    let dir = dir_for(main_dir, task_id);
+/// `dir` 为已记录的目录（权威）；未知时按 root 推导。
+pub fn remove(
+    main_dir: &Path,
+    task_id: &str,
+    root: &Path,
+    dir: Option<&Path>,
+) -> Result<(), String> {
+    let target = dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dir_for(root, main_dir, task_id));
+    remove_inner(main_dir, &target, task_id, true)
+}
+
+/// 自动清理用：只移除目录与登记，**保留分支**——目录才是磁盘成本，
+/// 分支留着重启后仍能用 `git worktree add <分支>` 复原或直接合并（对齐 Codex 的可恢复语义）。
+pub fn prune_dir(main_dir: &Path, dir: &Path, task_id: &str) -> Result<(), String> {
+    remove_inner(main_dir, dir, task_id, false)
+}
+
+fn remove_inner(
+    main_dir: &Path,
+    dir: &Path,
+    task_id: &str,
+    delete_branch: bool,
+) -> Result<(), String> {
     if dir.exists() {
         // 任务可能留下未提交产物，强制移除；用户已手删目录时 git 报错，
         // 此时 prune 清登记后再物理删除（若有残留）
@@ -141,12 +208,12 @@ pub fn remove(main_dir: &Path, task_id: &str, delete_branch: bool) -> Result<(),
         {
             let _ = run_git_in(main_dir, &["worktree", "prune"]);
             if dir.exists() {
-                std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+                std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
             }
         }
     }
     // .git/worktrees/<name> 元数据残留清理（抄 VK force_cleanup_worktree_metadata）
-    cleanup_worktree_metadata(main_dir, &dir);
+    cleanup_worktree_metadata(main_dir, dir);
     if delete_branch {
         let branch = branch_for(task_id);
         let _ = run_git_in(main_dir, &["branch", "-D", &branch]);
@@ -206,6 +273,46 @@ mod tests {
         dir
     }
 
+    /// 每个用例独立的受管根目录（不污染默认的 ~/AgentDeck/worktrees）
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdeck-wtroot-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn root_uses_configuration_and_falls_back_to_default() {
+        assert_eq!(root(Some("D:/wt")).join("x"), PathBuf::from("D:/wt").join("x"));
+        assert!(root(Some("   ")).ends_with(Path::new("AgentDeck").join("worktrees")));
+        assert!(root(None).ends_with(Path::new("AgentDeck").join("worktrees")));
+    }
+
+    /// 自动清理只删目录、保留分支：目录是磁盘成本，分支保证可复原/可合并
+    #[test]
+    fn managed_lists_entries_and_prune_keeps_the_branch() {
+        let repo = temp_repo("managed");
+        let wt_root = temp_root("managed");
+        let paths = create(&repo, "t-prune", &wt_root).unwrap();
+
+        let entries = managed(&wt_root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, "t-prune");
+        assert_eq!(entries[0].0, paths.dir);
+
+        prune_dir(&repo, &paths.dir, "t-prune").unwrap();
+        assert!(!paths.dir.exists());
+        assert!(
+            run_git_in(&repo, &["rev-parse", "--verify", &paths.branch]).is_ok(),
+            "清理必须保留分支以便复原"
+        );
+    }
+
     #[test]
     fn is_git_repo_detects() {
         let repo = temp_repo("detect");
@@ -215,18 +322,34 @@ mod tests {
         assert!(!is_git_repo(&non));
     }
 
+    /// 子目录里派任务时，项目根要向上落到仓库根（默认原地工作后，项目归属靠它判定）
+    #[test]
+    fn project_root_resolves_upward_from_a_subdirectory() {
+        let repo = temp_repo("root");
+        let nested = repo.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let root = project_root(&nested);
+        assert_eq!(root.file_name(), repo.file_name(), "root: {}", root.display());
+        assert_ne!(root, nested);
+
+        // 非仓库目录：原样返回
+        let plain = std::env::temp_dir().join("agentdeck-non-git-root-probe");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(project_root(&plain), plain);
+    }
+
     #[test]
     fn create_refuses_dirty_main_dir() {
         let repo = temp_repo("dirty");
         std::fs::write(repo.join("dirty.txt"), "uncommitted").unwrap();
-        let err = create(&repo, "t-dirty").unwrap_err();
+        let err = create(&repo, "t-dirty", &temp_root("dirty")).unwrap_err();
         assert!(err.contains("未提交"), "err: {err}");
     }
 
     #[test]
     fn create_works_and_isolates() {
         let repo = temp_repo("create");
-        let paths = create(&repo, "t1").unwrap();
+        let paths = create(&repo, "t1", &temp_root("create")).unwrap();
 
         assert!(paths.dir.join("a.txt").exists());
         let branch_out = run_git_in(&paths.dir, &["branch", "--show-current"]).unwrap();
@@ -247,7 +370,8 @@ mod tests {
     #[test]
     fn merge_and_remove_roundtrip() {
         let repo = temp_repo("merge");
-        let paths = create(&repo, "t2").unwrap();
+        let wt_root = temp_root("merge");
+        let paths = create(&repo, "t2", &wt_root).unwrap();
 
         // 任务在 worktree 里改文件并提交
         std::fs::write(paths.dir.join("a.txt"), "agent work").unwrap();
@@ -267,7 +391,7 @@ mod tests {
         );
 
         // 清理：worktree 与分支都消失
-        remove(&repo, "t2", true).unwrap();
+        remove(&repo, "t2", &wt_root, Some(&paths.dir)).unwrap();
         assert!(!paths.dir.exists());
         assert!(run_git_in(&repo, &["rev-parse", "--verify", &paths.branch]).is_err());
     }

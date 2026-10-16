@@ -26,6 +26,8 @@ import {
   createWriteTool as m_createWriteTool,
   createEditTool as m_createEditTool,
   createBashTool as m_createBashTool,
+  createPowerShellTool as m_createPowerShellTool,
+  getShellConfig,
   createGrepTool as m_createGrepTool,
   createFindTool as m_createFindTool,
   createLsTool as m_createLsTool,
@@ -77,7 +79,7 @@ function buildAttachments(msg) {
     paths.push(a);
   }
   const note = paths.length
-    ? "\n\n（附件文件（可用 read/bash 查看）：" + paths.join("；") + "）"
+    ? "\n\n（附件文件（可用 read 或命令工具查看）：" + paths.join("；") + "）"
     : "";
   return { images, note };
 }
@@ -253,13 +255,29 @@ function profileModelRows(p) {
 
 
 
+/** Windows 上 bash 会落到 WSL 吗？pi 的 shell 解析顺序是 Git Bash → PATH 上的 bash.exe，
+ *  没有 Git Bash 时就会命中 C:\Windows\System32\bash.exe（WSL）。WSL 里 Windows 路径
+ *  （C:/…）与 cwd 都不可用，因此这种情况改注册 PowerShell 工具（对齐 ZCode 的
+ *  「绝不退到 WSL bash，改用系统 shell」）。 */
+function usesWslBash() {
+  if (process.platform !== "win32") return false;
+  try {
+    const { shell } = getShellConfig();
+    const normalized = String(shell).replace(/\//g, "\\").toLowerCase();
+    return /\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(normalized) || /\\windowsapps\\bash\.exe$/.test(normalized);
+  } catch {
+    // 找不到任何 bash：pi 会直接报错，不属于"静默落到 WSL"
+    return false;
+  }
+}
+
 /** deck 自持工具集（抄 OpenCode 工具形态）：读/写/改/命令/搜索/定位/列表 */
 function buildTools(mode, cwd) {
   const factories = [
     m_createReadTool,
     m_createWriteTool,
     m_createEditTool,
-    m_createBashTool,
+    usesWslBash() ? m_createPowerShellTool : m_createBashTool,
     m_createGrepTool,
     m_createFindTool,
     m_createLsTool,

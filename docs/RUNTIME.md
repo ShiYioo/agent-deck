@@ -101,6 +101,32 @@ opencode 的服务端模式。因此 opencode 的权限下拉新增一档 **「�
 CLI 一次性进程没有命令通道，因此 zcode/codex/opencode 在 CLI 传输下按 `/compact` 会提示改用
 服务端/native 传输。压缩过程同样走上面的状态行与交互层提示。
 
+## deck 的命令工具与 shell
+
+pi 的 bash 工具只认 bash 一族，解析顺序是 Git Bash 已知路径 → PATH 上的 `bash.exe`。Windows 上若没装
+Git Bash，就会命中 `C:\Windows\System32\bash.exe`（WSL）——而 WSL 里 Windows 路径（`C:/…`）与 `cwd`
+都不可用，命令会整片失败。因此 deck 在 Windows 上检测到这种情形时，**不注册 bash 工具，改注册 pi 自带的
+PowerShell 工具**（对齐 ZCode「绝不退到 WSL bash，改用系统 shell」的做法）。这是静默降级，不作为
+运行器问题提示用户；装上 Git for Windows 即恢复 bash 工具。
+
+## 工作位置（默认原地）
+
+默认**不做 worktree 隔离**：任务在用户选定的目录里原地改，文件留在原处（对齐 ZCode 的原地工作方式）。
+设置里的「Worktree 隔离」显式打开后，git 仓库内派发的任务才改在
+`<Worktree 根目录>/<仓库名>/<task id>`（默认根 `~/AgentDeck/worktrees`）的独立分支
+`agentdeck/<taskId>` 上，完成后合并或放弃。
+
+项目归属按**仓库根**判定（从 cwd 向上找 `.git`）：在仓库的子目录里派任务也落到同一个项目。
+
+受管 worktree 有两处清理（对齐 Codex 的 worktree 生命周期）：
+
+- **删除会话**时连同它的 worktree 与分支一起清掉（等价于放弃这份工作）；
+- **超出保留数量**时自动淘汰最旧的（设置项「自动清理旧 worktree」默认开、「保留数量」默认 15，
+  即 Codex 的 `worktree-keep-count`）。这种淘汰**只删目录、保留分支**，所以被清掉的工作仍能用
+  `git worktree add <分支>` 复原或直接合并。
+
+「Worktree 根目录」可配置，留空使用默认。
+
 ## 反馈与验证
 
 指导协作由 Rust 后端顺序编排：指导方只读计划、执行方修改并测试、指导方只读验收；

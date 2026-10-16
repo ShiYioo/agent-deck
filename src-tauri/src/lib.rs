@@ -117,6 +117,89 @@ struct HarnessHealth {
     issues: Vec<String>,
 }
 
+/// 任务目录所在仓库的根——worktree 与任务分支都登记在那个仓库里。
+fn worktree_main_dir(cwd: &str) -> Option<std::path::PathBuf> {
+    Path::new(cwd)
+        .ancestors()
+        .find(|p| worktree::is_git_repo(p))
+        .map(Path::to_path_buf)
+}
+
+/// 受管 worktree 的自动清理（对齐 Codex 的 worktree-keep-count）：保留最近
+/// `worktree_prune_limit` 个（默认 15），更旧的淘汰。只清不在运行中的任务，且
+/// **只删目录、保留分支**——目录才是磁盘成本，分支留着重启后仍可复原或直接合并。
+/// 设置项：`worktree_auto_prune`（默认开，`off` 关闭）、`worktree_prune_limit`。
+fn prune_managed_worktrees(store: &Store, root: &Path) {
+    if store
+        .get_setting("worktree_auto_prune")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("off")
+    {
+        return;
+    }
+    let limit: usize = store
+        .get_setting("worktree_prune_limit")
+        .ok()
+        .flatten()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(15);
+    if limit == 0 {
+        return;
+    }
+    let mut entries = worktree::managed(root);
+    if entries.len() <= limit {
+        return;
+    }
+    entries.sort_by(|a, b| b.2.cmp(&a.2));
+    for (dir, task_id, _) in entries.into_iter().skip(limit) {
+        let row = store.get_task(&task_id).ok().flatten();
+        if row.as_ref().is_some_and(|task| task.status == "running") {
+            continue;
+        }
+        match row.as_ref().and_then(|task| worktree_main_dir(&task.cwd)) {
+            Some(main_dir) => {
+                let _ = worktree::prune_dir(&main_dir, &dir, &task_id);
+            }
+            // 任务记录已不在：清掉目录即可（分支留在原仓库里）
+            None => {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+}
+
+/// 会话删除时一并清掉它的 worktree（对齐 Codex「归档对话 → 删除 worktree」的触发）。
+/// 这里连同分支一起删：用户显式删了聊天，等同于放弃这份工作。
+fn drop_task_worktrees(store: &Store, turns: &[TaskRow]) {
+    let root = worktree::root(
+        store
+            .get_setting("worktree_root")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    for turn in turns {
+        let Some(dir) = turn
+            .worktree_dir
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            continue;
+        };
+        match worktree_main_dir(&turn.cwd) {
+            Some(main_dir) => {
+                let _ = worktree::remove(&main_dir, &turn.id, &root, Some(Path::new(dir)));
+            }
+            None => {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+        let _ = store.set_task_worktree(&turn.id, "", "", "");
+    }
+}
+
 #[tauri::command]
 async fn check_harness(
     app: AppHandle,
@@ -378,8 +461,18 @@ pub(crate) async fn start_task_impl(
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
-        let deck_project =
-            project_id.or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
+        // 项目归属按仓库根判定（子目录里派任务也落到同一个项目）
+        let repo_root = worktree::project_root(Path::new(&cwd))
+            .to_string_lossy()
+            .to_string();
+        let deck_project = project_id.or_else(|| {
+            store
+                .find_project_by_dir(&repo_root)
+                .ok()
+                .flatten()
+                .or_else(|| store.find_project_by_dir(&cwd).ok().flatten())
+                .map(|p| p.id)
+        });
         // 模型池：启用的配置档案按创建顺序构成自治链（sidecar 内自动降级）
         let profiles: Vec<pi_session::ModelProfileParam> = store
             .list_model_profiles(true)?
@@ -563,7 +656,15 @@ pub(crate) async fn start_task_impl(
     let harness = Harness::parse(&harness)?;
     let task_id = runner::new_task_id(harness);
 
-    // git 仓库内派发的任务：自动 worktree 隔离（改动圈在任务分支里）
+    let worktree_root = worktree::root(
+        store
+            .get_setting("worktree_root")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    // worktree 隔离是**显式开启**的（默认关）：默认在用户的项目目录里原地改，
+    // 用户的文件留在原处（对齐 ZCode 的原地工作方式）。
     let mut worktree: Option<WorktreePaths> = None;
     if resume_session_id.is_none()
         && conversation_id.is_none()
@@ -575,10 +676,14 @@ pub(crate) async fn start_task_impl(
             .ok()
             .flatten()
             .as_deref()
-            != Some("off")
+            == Some("on")
     {
-        match worktree::create(Path::new(&cwd), &task_id) {
-            Ok(paths) => worktree = Some(paths),
+        match worktree::create(Path::new(&cwd), &task_id, &worktree_root) {
+            Ok(paths) => {
+                worktree = Some(paths);
+                // 超限时淘汰最旧的受管 worktree（只删目录、保留分支）
+                prune_managed_worktrees(&store, &worktree_root);
+            }
             Err(e) => {
                 return Err(format!("worktree 创建失败：{e}（可在设置关闭隔离）"));
             }
@@ -589,8 +694,18 @@ pub(crate) async fn start_task_impl(
         .as_ref()
         .map(|w| w.dir.to_string_lossy().to_string())
         .unwrap_or_else(|| cwd.clone());
-    let cli_project =
-        project_id.or_else(|| store.find_project_by_dir(&cwd).ok().flatten().map(|p| p.id));
+    // 项目归属按仓库根判定：在子目录里派任务也落到同一个项目
+    let repo_root = worktree::project_root(Path::new(&cwd))
+        .to_string_lossy()
+        .to_string();
+    let cli_project = project_id.or_else(|| {
+        store
+            .find_project_by_dir(&repo_root)
+            .ok()
+            .flatten()
+            .or_else(|| store.find_project_by_dir(&cwd).ok().flatten())
+            .map(|p| p.id)
+    });
     store.create_task(
         &task_id,
         harness.name(),
@@ -711,7 +826,7 @@ pub(crate) async fn start_task_impl(
     .inspect_err(|_| {
         store.finish_task(&task_id, "failed", None);
         if let Some(w) = &worktree {
-            let _ = worktree::remove(Path::new(&cwd), &task_id, true);
+            let _ = worktree::remove(Path::new(&cwd), &task_id, &worktree_root, Some(&w.dir));
             eprintln!("worktree cleaned after spawn failure: {}", w.dir.display());
         }
     })
@@ -1072,6 +1187,8 @@ async fn delete_task(
     }
     await_stopped(&store, std::slice::from_ref(&task_id)).await?;
     let archives = conversation::archive_paths(&store, std::slice::from_ref(&task_id))?;
+    // 任务没了，它的 worktree 也一并清掉
+    drop_task_worktrees(&store, std::slice::from_ref(&row));
     store.delete_task(&task_id)?;
     clean_context_archives(&app, &archives);
     let _ = app.emit("task-deleted", &task_id);
@@ -1109,6 +1226,8 @@ async fn delete_session(
     }
     await_stopped(&store, &ids).await?;
     let archives = conversation::archive_paths(&store, &ids)?;
+    // 会话没了，它的 worktree 也一并清掉（连同分支：删聊天 ≈ 放弃这份工作）
+    drop_task_worktrees(&store, &turns);
     store.delete_tasks(&ids)?;
     clean_context_archives(&app, &archives);
     for id in &ids {
@@ -2512,13 +2631,21 @@ fn merge_task_worktree(store: State<'_, Store>, task_id: String) -> Result<Strin
     let branch = row
         .base_branch
         .ok_or_else(|| "该任务没有关联的 worktree".to_string())?;
-    let main_dir = Path::new(&row.cwd)
-        .ancestors()
-        .find(|p| worktree::is_git_repo(p))
-        .ok_or_else(|| "主目录不是 git 仓库".to_string())?
-        .to_path_buf();
+    let main_dir = worktree_main_dir(&row.cwd).ok_or_else(|| "主目录不是 git 仓库".to_string())?;
     let out = worktree::merge(&main_dir, &branch)?;
-    worktree::remove(&main_dir, &task_id, true)?;
+    let root = worktree::root(
+        store
+            .get_setting("worktree_root")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    let recorded = row
+        .worktree_dir
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(Path::new);
+    worktree::remove(&main_dir, &task_id, &root, recorded)?;
     store.set_task_worktree(&task_id, "", "", "")?;
     Ok(out)
 }
@@ -2529,12 +2656,20 @@ fn discard_task_worktree(store: State<'_, Store>, task_id: String) -> Result<(),
     let row = store
         .get_task(&task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let main_dir = Path::new(&row.cwd)
-        .ancestors()
-        .find(|p| worktree::is_git_repo(p))
-        .ok_or_else(|| "主目录不是 git 仓库".to_string())?
-        .to_path_buf();
-    worktree::remove(&main_dir, &task_id, true)?;
+    let main_dir = worktree_main_dir(&row.cwd).ok_or_else(|| "主目录不是 git 仓库".to_string())?;
+    let root = worktree::root(
+        store
+            .get_setting("worktree_root")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    let recorded = row
+        .worktree_dir
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(Path::new);
+    worktree::remove(&main_dir, &task_id, &root, recorded)?;
     store.set_task_worktree(&task_id, "", "", "")?;
     Ok(())
 }
@@ -2572,6 +2707,15 @@ pub fn run() {
             store.recover_interrupted()?;
             app.manage(instance);
             let cleanup_root = store.get_setting("default_cwd").ok().flatten();
+            // 受管 worktree 的根与自动清理要在 store 移交前读出来
+            let managed_root = worktree::root(
+                store
+                    .get_setting("worktree_root")
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+            );
+            let store_handle = store.clone_handle();
             app.manage(store);
             // Git maintenance must not delay window creation.
             if let Some(root) = cleanup_root {
@@ -2579,6 +2723,9 @@ pub fn run() {
                     worktree::prune_stale(Path::new(&root))
                 });
             }
+            tauri::async_runtime::spawn_blocking(move || {
+                prune_managed_worktrees(&store_handle, &managed_root)
+            });
             Ok(())
         })
         .manage(TaskRegistry::default())

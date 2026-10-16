@@ -233,7 +233,11 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
   // 常规
   const [defaultCwd, setDefaultCwd] = useState("");
-  const [isolation, setIsolation] = useState(true);
+  const [isolation, setIsolation] = useState(false);
+  // 受管 worktree：根目录可配置 + 超限自动清理（对齐 Codex 的 worktree 设置）
+  const [worktreeRoot, setWorktreeRoot] = useState("");
+  const [autoPrune, setAutoPrune] = useState(true);
+  const [pruneLimit, setPruneLimit] = useState("15");
   const [notifyOn, setNotifyOn] = useState(true);
 
   // 模型池
@@ -277,7 +281,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     getDefaultCwd().then(setDefaultCwd).catch(() => {});
-    getSetting("worktree_isolation").then((v) => setIsolation(v !== "off"));
+    getSetting("worktree_isolation").then((v) => setIsolation(v === "on"));
+    getSetting("worktree_root").then((v) => setWorktreeRoot(v ?? ""));
+    getSetting("worktree_auto_prune").then((v) => setAutoPrune(v !== "off"));
+    getSetting("worktree_prune_limit").then((v) => setPruneLimit(v ?? "15"));
     getSetting("notifications_enabled").then((v) => setNotifyOn(v !== "off"));
     loadProfiles();
   }, [loadProfiles]);
@@ -309,6 +316,40 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       setIsolation(previous);
       flash(String(error));
     } finally { setSavingPreference(false); }
+  };
+
+  const saveWorktreeRoot = async () => {
+    try {
+      await setSetting("worktree_root", worktreeRoot.trim());
+      flash(worktreeRoot.trim() ? "Worktree 根目录已更新" : "已恢复默认根目录");
+    } catch (error) { flash(String(error)); }
+  };
+
+  const saveAutoPrune = async (v: boolean) => {
+    if (savingPreference) return;
+    const previous = autoPrune;
+    setSavingPreference(true);
+    setAutoPrune(v);
+    try {
+      await setSetting("worktree_auto_prune", v ? "on" : "off");
+      flash(v ? "已开启自动清理" : "已关闭自动清理");
+    } catch (error) {
+      setAutoPrune(previous);
+      flash(String(error));
+    } finally { setSavingPreference(false); }
+  };
+
+  const savePruneLimit = async () => {
+    const value = Number(pruneLimit);
+    if (!Number.isFinite(value) || value < 1) {
+      setPruneLimit("15");
+      flash("保留数量必须是不小于 1 的整数");
+      return;
+    }
+    try {
+      await setSetting("worktree_prune_limit", String(Math.floor(value)));
+      flash("保留数量已更新");
+    } catch (error) { flash(String(error)); }
   };
 
   const saveNotify = async (v: boolean) => {
@@ -641,9 +682,45 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 {section === "general" && (
                 <Row
                   label="Worktree 隔离"
-                  desc="git 仓库内派发的任务在独立 worktree 分支中运行，完成后可合并或放弃"
+                  desc="默认关闭：任务直接在你的项目目录里改，文件留在原处。开启后，git 仓库内派发的任务改在独立 worktree 分支（~/AgentDeck/worktrees/）里进行，完成后可合并或放弃"
                 >
                   <Toggle label="Worktree 隔离" on={isolation} onChange={saveIsolation} disabled={savingPreference} />
+                </Row>)}
+                {section === "general" && (
+                <Row
+                  label="Worktree 根目录"
+                  desc="受管 worktree 的存放位置，留空使用默认（~/AgentDeck/worktrees）"
+                >
+                  <input
+                    aria-label="Worktree 根目录"
+                    value={worktreeRoot}
+                    placeholder="~/AgentDeck/worktrees"
+                    onChange={(event) => setWorktreeRoot(event.target.value)}
+                    onBlur={() => void saveWorktreeRoot()}
+                    className="w-full rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
+                  />
+                </Row>)}
+                {section === "general" && (
+                <Row
+                  label="自动清理旧 worktree"
+                  desc="超出保留数量的旧 worktree 会自动删除目录；分支保留在仓库里，随时可复原或合并"
+                >
+                  <Toggle label="自动清理旧 worktree" on={autoPrune} onChange={saveAutoPrune} disabled={savingPreference} />
+                </Row>)}
+                {section === "general" && (
+                <Row
+                  label="保留数量"
+                  desc="保留最近使用的受管 worktree 数量，更旧的被淘汰"
+                >
+                  <input
+                    aria-label="保留数量"
+                    type="number"
+                    min={1}
+                    value={pruneLimit}
+                    onChange={(event) => setPruneLimit(event.target.value)}
+                    onBlur={() => void savePruneLimit()}
+                    className="w-24 rounded-lg border border-stone-200 px-3 py-2 text-xs outline-none focus:border-stone-400"
+                  />
                 </Row>)}
                 <Row
                   label="任务完成通知"

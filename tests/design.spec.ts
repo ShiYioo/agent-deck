@@ -61,7 +61,11 @@ test("reference-sized settings keep opaque chrome and searchable functional sect
   await page.getByRole("button", { name: "打开设置", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "设置", exact: true });
   await expect(dialog).toHaveCSS("opacity", "1");
-  await expect(page.getByRole("switch", { name: "Worktree 隔离", exact: true })).toHaveCSS("background-color", "rgb(50, 150, 255)");
+  // Worktree 隔离默认关闭；打开后开关用品牌色（断言不依赖默认值）
+  const isolation = page.getByRole("switch", { name: "Worktree 隔离", exact: true });
+  await expect(isolation).toBeVisible();
+  await isolation.click();
+  await expect(isolation).toHaveCSS("background-color", "rgb(50, 150, 255)");
   await expect(page.locator(".settings-sidebar")).toHaveCSS("width", "288px");
   await page.locator(".settings-main h1").click();
   await page.screenshot({ path: "test-results/codex-settings-desktop.png" });
