@@ -840,13 +840,76 @@ async function zcode(params) {
 
   let turn;
   let text = "";
+  // toolCallId → { name, input, shown }：app-server 的 result/error 只带 ID，
+  // 工具名与入参在 scheduled 里（文件路径、apply_patch 的 operation.diff 都在这儿）。
+  const zcodeTools = new Map();
+  const showZcodeTool = (id, name, input) => {
+    if (!id) return;
+    const known = zcodeTools.get(id) ?? {};
+    const merged = {
+      ...known,
+      name: name ?? known.name ?? "tool",
+      input: input === undefined ? known.input : input,
+    };
+    zcodeTools.set(id, merged);
+    if (merged.shown) return;
+    merged.shown = true;
+    // 交给 zcode.rs 的 tool_use 分支：tool.name/tool.input + parameters（摘要）都要在
+    output({
+      kind: "tool_use",
+      tool: { name: merged.name, input: merged.input },
+      name: merged.name,
+      parameters: merged.input,
+      id,
+    });
+  };
+  const zcodeToolResult = (id, payload, isError) => {
+    const known = zcodeTools.get(id) ?? {};
+    const name = payload?.toolName ?? known.name ?? "tool";
+    const input = known.input;
+    // apply_patch 的 operation（create_file/update_file/delete_file）在入参里：
+    // diff 拿出来算 ±行数，path 让行标题能点名文件
+    const operation = input?.operation ?? {};
+    const patch = typeof operation.diff === "string" ? operation.diff : typeof input?.diff === "string" ? input.diff : "";
+    let body;
+    if (isError) body = payload?.error?.message ?? payload?.error?.type ?? "执行失败";
+    else if (typeof payload?.result === "string") body = payload.result;
+    else if (typeof payload?.result?.output === "string") body = payload.result.output;
+    else if (payload?.result !== undefined) body = JSON.stringify(payload.result).slice(0, 2000);
+    else body = typeof payload?.payload === "string" ? payload.payload : JSON.stringify(payload?.payload ?? {}).slice(0, 2000);
+    output({
+      kind: "tool_result",
+      tool: { name },
+      name,
+      id,
+      is_error: isError,
+      output: body,
+      diff: patch,
+    });
+    zcodeTools.delete(id);
+  };
   const rpc = new ZcodeRpc(
     child,
     (message) => {
       if (message.method === "session/event") {
         const { type, payload } = message.params ?? {};
-        if (type === "model.streaming" && payload?.kind === "text_delta") text += payload.delta ?? "";
-        else if (type === "turn.completed") turn = turn ?? { ok: true, response: payload?.response, usage: payload?.usage };
+        if (type === "model.streaming") {
+          if (payload?.kind === "text_delta") text += payload.delta ?? "";
+          // 部分版本的工具调用经 model.streaming 上报（kind = tool_call）
+          else if (payload?.kind === "tool_call") showZcodeTool(payload.toolCallId, payload.toolName, payload.input);
+        }
+        // 工具生命周期：scheduled（名字 + 入参）/ started / progress / result / error
+        else if (type === "tool.updated") {
+          if (payload?.kind === "scheduled") showZcodeTool(payload.toolCallId, payload.toolName, payload.input);
+          else if (payload?.kind === "result" || payload?.kind === "error" || payload?.kind === "raw") {
+            // raw 只带 payload（后台任务输出），按成功处理
+            zcodeToolResult(payload.toolCallId, payload, payload.kind === "error");
+          }
+        }
+        // 审批请求兜底：极少数调用不发 scheduled，但这里一定有工具名与入参
+        else if (type === "permission.requested") {
+          showZcodeTool(payload?.toolCallId, payload?.toolName, payload?.input);
+        } else if (type === "turn.completed") turn = turn ?? { ok: true, response: payload?.response, usage: payload?.usage };
         else if (type === "turn.failed") turn = turn ?? { ok: false, message: payload?.errorMessage ?? payload?.message ?? "执行失败" };
         // 上下文压缩（compaction.terminal / compact_started…）：交给 zcode.rs 渲染状态行
         else if (typeof type === "string" && type.includes("compact")) output({ type });

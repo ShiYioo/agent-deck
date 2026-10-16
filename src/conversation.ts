@@ -49,19 +49,31 @@ function isCommandTool(tool: string): boolean {
   return COMMAND_TOOL.test(tool);
 }
 
-/** 删除语义：工具名或 changes[].kind —— 四种运行器统一（deck 的 delete_file、
- *  codex 的 changes[].kind=delete、CLI 工具名的 rm/remove/unlink）。 */
+/** 删除语义：工具名或操作类型 —— 四种运行器统一（deck 的 delete_file、
+ *  codex 的 changes[].kind=delete、zcode/codex 的 apply_patch operation.type=delete_file）。 */
 export function isDeleteTool(tool: string, args?: Record<string, unknown>): boolean {
   const changes = args?.changes;
   const kind = Array.isArray(changes) ? (changes[0] as { kind?: string } | undefined)?.kind : undefined;
-  return kind === "delete" || kind === "remove" || /delete|remove|unlink/.test(tool.toLowerCase());
+  const operation = (args?.operation as { type?: string } | undefined)?.type;
+  return (
+    kind === "delete" ||
+    kind === "remove" ||
+    operation === "delete_file" ||
+    /delete|remove|unlink/.test(tool.toLowerCase())
+  );
 }
 
-/** 文件类工具的目标路径（pi 用 path、opencode 用 filePath、其它用 file_path） */
+/** 文件类工具的目标路径（pi 用 path、opencode 用 filePath、apply_patch 用 operation.path） */
 function fileTarget(args: Record<string, unknown> | undefined): string | undefined {
   const record = args ?? {};
   for (const key of ["path", "file_path", "filePath", "file"]) {
     if (typeof record[key] === "string") return record[key] as string;
+  }
+  const operation = record.operation as { path?: string } | undefined;
+  if (typeof operation?.path === "string") return operation.path;
+  const changes = record.changes;
+  if (Array.isArray(changes) && typeof (changes[0] as { path?: string } | undefined)?.path === "string") {
+    return (changes[0] as { path: string }).path;
   }
   return undefined;
 }
