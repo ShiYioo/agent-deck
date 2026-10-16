@@ -32,7 +32,12 @@ fn zcode_tool(obj: &Value, inner: &Value) -> (String, Option<Value>) {
                 .iter()
                 .find_map(|k| inner.get(*k).filter(|v| v.is_object()).cloned())
         })
-        .or_else(|| nested.and_then(|t| t.get("input")).filter(|v| v.is_object()).cloned());
+        .or_else(|| {
+            nested
+                .and_then(|t| t.get("input"))
+                .filter(|v| v.is_object())
+                .cloned()
+        });
     (name, args)
 }
 

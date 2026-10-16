@@ -110,11 +110,7 @@ pub fn managed(root: &Path) -> Vec<(PathBuf, String, std::time::SystemTime)> {
                 .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            out.push((
-                path,
-                item.file_name().to_string_lossy().to_string(),
-                mtime,
-            ));
+            out.push((path, item.file_name().to_string_lossy().to_string(), mtime));
         }
     }
     out
@@ -288,7 +284,10 @@ mod tests {
 
     #[test]
     fn root_uses_configuration_and_falls_back_to_default() {
-        assert_eq!(root(Some("D:/wt")).join("x"), PathBuf::from("D:/wt").join("x"));
+        assert_eq!(
+            root(Some("D:/wt")).join("x"),
+            PathBuf::from("D:/wt").join("x")
+        );
         assert!(root(Some("   ")).ends_with(Path::new("AgentDeck").join("worktrees")));
         assert!(root(None).ends_with(Path::new("AgentDeck").join("worktrees")));
     }
@@ -329,7 +328,12 @@ mod tests {
         let nested = repo.join("src").join("deep");
         std::fs::create_dir_all(&nested).unwrap();
         let root = project_root(&nested);
-        assert_eq!(root.file_name(), repo.file_name(), "root: {}", root.display());
+        assert_eq!(
+            root.file_name(),
+            repo.file_name(),
+            "root: {}",
+            root.display()
+        );
         assert_ne!(root, nested);
 
         // 非仓库目录：原样返回

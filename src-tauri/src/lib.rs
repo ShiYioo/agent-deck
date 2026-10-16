@@ -173,13 +173,7 @@ fn prune_managed_worktrees(store: &Store, root: &Path) {
 /// 会话删除时一并清掉它的 worktree（对齐 Codex「归档对话 → 删除 worktree」的触发）。
 /// 这里连同分支一起删：用户显式删了聊天，等同于放弃这份工作。
 fn drop_task_worktrees(store: &Store, turns: &[TaskRow]) {
-    let root = worktree::root(
-        store
-            .get_setting("worktree_root")
-            .ok()
-            .flatten()
-            .as_deref(),
-    );
+    let root = worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
     for turn in turns {
         let Some(dir) = turn
             .worktree_dir
@@ -656,13 +650,8 @@ pub(crate) async fn start_task_impl(
     let harness = Harness::parse(&harness)?;
     let task_id = runner::new_task_id(harness);
 
-    let worktree_root = worktree::root(
-        store
-            .get_setting("worktree_root")
-            .ok()
-            .flatten()
-            .as_deref(),
-    );
+    let worktree_root =
+        worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
     // worktree 隔离是**显式开启**的（默认关）：默认在用户的项目目录里原地改，
     // 用户的文件留在原处（对齐 ZCode 的原地工作方式）。
     let mut worktree: Option<WorktreePaths> = None;
@@ -1498,22 +1487,27 @@ fn turn_git_ok(dir: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 /// `git diff --numstat` 输出 → path → (added, removed)；二进制文件计为 "-"（None）
-fn parse_numstat(
-    out: &str,
-) -> std::collections::BTreeMap<String, (Option<u64>, Option<u64>)> {
+fn parse_numstat(out: &str) -> std::collections::BTreeMap<String, (Option<u64>, Option<u64>)> {
     let mut map = std::collections::BTreeMap::new();
     for line in out.lines() {
         let mut parts = line.split('\t');
-        let (Some(added), Some(removed), Some(path)) =
-            (parts.next(), parts.next(), parts.next())
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
         map.insert(
             path.to_string(),
             (
-                if added == "-" { None } else { added.parse().ok() },
-                if removed == "-" { None } else { removed.parse().ok() },
+                if added == "-" {
+                    None
+                } else {
+                    added.parse().ok()
+                },
+                if removed == "-" {
+                    None
+                } else {
+                    removed.parse().ok()
+                },
             ),
         );
     }
@@ -1580,7 +1574,10 @@ pub(crate) fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value 
 /// 目录状态分不出谁改的，但事件是按 taskId 记的：只认会写文件的工具，
 /// 路径字段各家不同（pi 的 path、opencode 的 filePath、apply_patch 的
 /// operation.path、codex 的 changes[].path）。
-fn touched_files_from_events(events: &[String], dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+fn touched_files_from_events(
+    events: &[String],
+    dir: &std::path::Path,
+) -> std::collections::BTreeSet<String> {
     let mut touched = std::collections::BTreeSet::new();
     let mut push = |path: &str| {
         let p = std::path::Path::new(path);
@@ -1682,55 +1679,55 @@ fn classify_turn_changes(
             );
         }
     } else {
-    let skip = |name: &str| {
-        matches!(
-            name,
-            "node_modules"
-                | "target"
-                | "dist"
-                | "build"
-                | "__pycache__"
-                | ".venv"
-                | "vendor"
-                | "worktrees"
-        ) || name.starts_with('.')
-    };
-    let mut stack = vec![dir.to_path_buf()];
-    let mut visited = 0usize;
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else {
-            continue;
+        let skip = |name: &str| {
+            matches!(
+                name,
+                "node_modules"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | "__pycache__"
+                    | ".venv"
+                    | "vendor"
+                    | "worktrees"
+            ) || name.starts_with('.')
         };
-        for entry in rd.flatten() {
-            visited += 1;
-            if visited > 5000 {
-                break;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let p = entry.path();
-            if p.is_dir() {
-                if !skip(&name) {
-                    stack.push(p);
+        let mut stack = vec![dir.to_path_buf()];
+        let mut visited = 0usize;
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                visited += 1;
+                if visited > 5000 {
+                    break;
                 }
-                continue;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let p = entry.path();
+                if p.is_dir() {
+                    if !skip(&name) {
+                        stack.push(p);
+                    }
+                    continue;
+                }
+                if skip(&name) {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let rel = p
+                    .strip_prefix(dir)
+                    .map(|x| x.to_string_lossy().to_string())
+                    .unwrap_or(name.clone());
+                current.insert(rel, (mtime, meta.len()));
             }
-            if skip(&name) {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else { continue };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let rel = p
-                .strip_prefix(dir)
-                .map(|x| x.to_string_lossy().to_string())
-                .unwrap_or(name.clone());
-            current.insert(rel, (mtime, meta.len()));
         }
-    }
     } // 无冻结快照（运行中）：扫当前目录
 
     let git_inside = {
@@ -1772,7 +1769,10 @@ fn classify_turn_changes(
             (None, None)
         } else if is_new {
             // 新增文件：全部行数即新增
-            (Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1), Some(0))
+            (
+                Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1),
+                Some(0),
+            )
         } else if let Some((a, r)) = numstat.get(rel) {
             // 修改文件：用 git numstat 的真实 +/-，不再拿文件总行数冒充
             (*a, *r)
@@ -2778,13 +2778,7 @@ fn merge_task_worktree(store: State<'_, Store>, task_id: String) -> Result<Strin
         .ok_or_else(|| "该任务没有关联的 worktree".to_string())?;
     let main_dir = worktree_main_dir(&row.cwd).ok_or_else(|| "主目录不是 git 仓库".to_string())?;
     let out = worktree::merge(&main_dir, &branch)?;
-    let root = worktree::root(
-        store
-            .get_setting("worktree_root")
-            .ok()
-            .flatten()
-            .as_deref(),
-    );
+    let root = worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
     let recorded = row
         .worktree_dir
         .as_deref()
@@ -2802,13 +2796,7 @@ fn discard_task_worktree(store: State<'_, Store>, task_id: String) -> Result<(),
         .get_task(&task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
     let main_dir = worktree_main_dir(&row.cwd).ok_or_else(|| "主目录不是 git 仓库".to_string())?;
-    let root = worktree::root(
-        store
-            .get_setting("worktree_root")
-            .ok()
-            .flatten()
-            .as_deref(),
-    );
+    let root = worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
     let recorded = row
         .worktree_dir
         .as_deref()
@@ -2853,13 +2841,8 @@ pub fn run() {
             app.manage(instance);
             let cleanup_root = store.get_setting("default_cwd").ok().flatten();
             // 受管 worktree 的根与自动清理要在 store 移交前读出来
-            let managed_root = worktree::root(
-                store
-                    .get_setting("worktree_root")
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-            );
+            let managed_root =
+                worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
             let store_handle = store.clone_handle();
             app.manage(store);
             // Git maintenance must not delay window creation.
