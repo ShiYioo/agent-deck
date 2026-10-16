@@ -152,7 +152,7 @@ fn prune_managed_worktrees(store: &Store, root: &Path) {
     if entries.len() <= limit {
         return;
     }
-    entries.sort_by(|a, b| b.2.cmp(&a.2));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.2));
     for (dir, task_id, _) in entries.into_iter().skip(limit) {
         let row = store.get_task(&task_id).ok().flatten();
         if row.as_ref().is_some_and(|task| task.status == "running") {
