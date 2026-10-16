@@ -39,7 +39,7 @@ import {
 } from "./api";
 import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
 import { buildConversation, foldToolRows } from "./conversation";
-import { ExecutionPicker, effortLabel } from "./components/ExecutionPicker";
+import { ExecutionPicker, effortLabel, readableModel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
 import QuestionCard, { type QuestionField } from "./components/QuestionCard";
@@ -1646,8 +1646,15 @@ export default function App() {
           <RuntimeStatus harness={harness} refreshKey={settingsOpen} onSettings={openSettings} />
           {selectedRow?.execution_config && <div className="execution-current">
             <span>{selectedRunning ? "本轮运行" : "本轮配置"}</span>
-            <span title={selectedRow.execution_config.resolved.model ?? ""}>{selectedRow.harness} · {selectedRow.execution_config.resolved.model || "默认模型"}</span>
-            <span>{effortLabel(selectedRow.execution_config.resolved.effort || "默认")}</span>
+            {/* 只显示可读模型名（内部档案 id 不外露）；没有配置就不编造"默认模型" */}
+            <span title={readableModel(selectedRow.execution_config.resolved.model)}>
+              {readableModel(selectedRow.execution_config.resolved.model)
+                ? `${selectedRow.harness} · ${readableModel(selectedRow.execution_config.resolved.model)}`
+                : selectedRow.harness}
+            </span>
+            {selectedRow.execution_config.resolved.effort && (
+              <span>{effortLabel(selectedRow.execution_config.resolved.effort)}</span>
+            )}
             {selectedRunning && harness === selectedRow.harness
               && ((selectedRow.execution_config.resolved.model ?? "") !== model
                 || (selectedRow.execution_config.resolved.effort ?? "") !== effort)

@@ -8,6 +8,13 @@ export const effortLabel = (value: string | null | undefined) => ({
   minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "极高", none: "关闭",
 } as Record<string, string>)[value ?? ""] ?? value ?? "默认";
 
+/** 模型显示名：内部档案 id（mp-…:模型）不对外暴露，只显示模型本身 */
+export const readableModel = (value: string | null | undefined) => {
+  if (!value) return "";
+  const parts = value.split(":");
+  return parts.length > 1 && parts[0].startsWith("mp-") ? parts.slice(1).join(":") : value;
+};
+
 const inherit = "__inherit__";
 export function ExecutionPicker({ harness, value, onChange, label = "", disabled = false, taskId = null,
   allowInherit = true, modelOptions, showModel = true }: {
@@ -60,9 +67,7 @@ export function ExecutionPicker({ harness, value, onChange, label = "", disabled
   ];
   // 当前值不在候选里（如档案模型改名后遗留的旧值）：可读回显，不暴露内部 profileId
   if (value.model && !modelChoices.some((o) => o.value === value.model)) {
-    const parts = value.model.split(":");
-    const readable = parts.length > 1 && parts[0].startsWith("mp-") ? parts.slice(1).join(":") : value.model;
-    modelChoices.push({ value: value.model, label: `${readable}（不在目录中）` });
+    modelChoices.push({ value: value.model, label: `${readableModel(value.model)}（不在目录中）` });
   }
   const effectiveEffort = value.effort ?? base.effort ?? "";
   const unsupported = !!effectiveEffort && !efforts.includes(effectiveEffort);
