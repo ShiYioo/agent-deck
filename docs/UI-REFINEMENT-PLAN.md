@@ -100,7 +100,20 @@ ZCode 的两个产品面，本仓库已调研完（结论见下，不必重新�
 - 重试阈值：`conversation.ts` 的 `MIN_VISIBLE_API_RETRY_ATTEMPT = 3` + `retryAttempt()` 解析
   `<n>/<max>`、`第 n 次`、`attempt n`；`retryKey === "local-compact"` 豁免；解析不到则照常显示
 
-## 3. 待完成批次
+## 3. 批次 3-7 完成情况（2026-10-16）
+
+| 批次 | 状态 | 提交/说明 |
+| --- | --- | --- |
+| 3 上下文用量徽章 | ✅ | `02fbd89`：complete.tokens → used（input+output），window 仅 deck 上报；cache 命中率 ≥78% 才露出 |
+| 4 diff 语义色 | ✅ | `2727b1d`：`--color-diff-added/removed(+bg)` 令牌；opBadge/±计数/DiffModal 行全部改走语义色 |
+| 5 文件变更汇总 | ✅ | 标题「N 个文件已更改」；diff 按钮改「审查」语义；删除文件无审查入口但保留状态词 |
+| 6 子代理单行摘要 | ✅（架构上已满足） | 我们的 delegate/协作事件从不下沉 child 工具行进父转录（协作面板独立渲染），父流里的 delegate 本来就是单行 tool 摘要——无 child 物化问题可修 |
+| 7 滚动状态机+队列 | ✅ | 48px 离底阈值、贴底 instant（删 smooth 中间帧误读）、离底 96px 透明+24px 渐变 mask、回底按钮需有溢出；队列标题「待发送消息（N）」、编辑=撤回完整意图回 composer（/compact 项无编辑） |
+
+注意：批次 3 的提交（02fbd89）里 App.tsx 已引用批次 7 的 Composer `injectedDraft` prop，
+该 prop 在批次 7 提交（本提交）才入库——02fbd89..本提交 之间单独 checkout 会 tsc 失败，tip 完整。
+
+## 4. 待完成批次
 
 > 每批：实现 → `tsc` + **相关 spec** → 独立提交（用户明确要求别每批跑全量 UI）。
 

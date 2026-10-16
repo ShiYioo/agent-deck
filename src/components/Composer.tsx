@@ -40,6 +40,7 @@ export const Composer = memo(function Composer({
   contextUsage,
   historyPrompts = [],
   onSetAttachments,
+  injectedDraft,
   placeholder,
   draftKey,
   onStop,
@@ -76,6 +77,8 @@ export const Composer = memo(function Composer({
   historyPrompts?: { text: string; attachments: string[] }[];
   /** 历史召回/快照恢复时整体重置附件 */
   onSetAttachments?: (paths: string[]) => void;
+  /** 队列「编辑」撤回：把完整输入意图注回 composer（版本号驱动，只应用更新版本） */
+  injectedDraft?: { text: string; version: number } | null;
   /** 历史常用模型（按频次），动态列表按此置顶排序 */
   recentModels?: string[];
   placeholder?: string;
@@ -158,6 +161,17 @@ export const Composer = memo(function Composer({
       }
     }
   };
+  const appliedInjectRef = useRef(0);
+  useEffect(() => {
+    if (!injectedDraft || injectedDraft.version <= appliedInjectRef.current) return;
+    appliedInjectRef.current = injectedDraft.version;
+    setText(injectedDraft.text);
+    drafts.current.set(draftKey, injectedDraft.text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    });
+  }, [injectedDraft, draftKey]);
   const currentDraftKey = useRef(draftKey);
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const projectPopupRef = useRef<HTMLDivElement>(null);

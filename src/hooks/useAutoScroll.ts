@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useMotionPolicy } from "../motion/MotionProvider";
 
 export function useAutoScroll(revision: number) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -9,7 +8,9 @@ export function useAutoScroll(revision: number) {
   const smoothScroll = useRef(false);
   const smoothTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [follow, setFollow] = useState(true);
-  const { enabled } = useMotionPolicy();
+  const [hasOverflow, setHasOverflow] = useState(false);
+  /** 离底判定阈值（ZCode ConversationTimeline 同款 48px） */
+  const DETACH_THRESHOLD_PX = 48;
 
   const cancel = useCallback(() => {
     if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -26,7 +27,9 @@ export function useAutoScroll(revision: number) {
   const onScroll = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const nearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 60;
+    const distance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    setHasOverflow(viewport.scrollHeight > viewport.clientHeight + 4);
+    const nearBottom = distance < DETACH_THRESHOLD_PX;
     if (smoothScroll.current && !nearBottom) return;
     if (nearBottom) smoothScroll.current = false;
     if (following.current !== nearBottom) {
@@ -50,14 +53,11 @@ export function useAutoScroll(revision: number) {
     following.current = true;
     setFollow(true);
     if (smoothTimer.current !== null) clearTimeout(smoothTimer.current);
-    smoothScroll.current = enabled;
-    // Do not treat intermediate smooth-scroll positions as an upward gesture.
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior: enabled ? "smooth" : "auto" });
-    if (enabled) smoothTimer.current = setTimeout(() => {
-      smoothScroll.current = false;
-      schedule();
-    }, 500);
-  }, [cancel, enabled, schedule]);
+    smoothScroll.current = false;
+    // 贴底必须 instant（scrollTop 赋值）：smooth 的中间帧会被 scroll 判定
+    // 误读为「离底」，把用户刚点的回底又变成 detached（ZCode ConversationTimeline）。
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [cancel, schedule]);
 
   useLayoutEffect(schedule, [revision, schedule]);
   useEffect(() => {
@@ -84,6 +84,7 @@ export function useAutoScroll(revision: number) {
     viewport.addEventListener("touchstart", touchStart, { passive: true });
     viewport.addEventListener("touchmove", touchMove, { passive: true });
     document.addEventListener("visibilitychange", visibility);
+    setHasOverflow(viewport.scrollHeight > viewport.clientHeight + 4);
     return () => {
       cancel();
       if (smoothTimer.current !== null) clearTimeout(smoothTimer.current);
@@ -96,5 +97,5 @@ export function useAutoScroll(revision: number) {
     };
   }, [cancel, pause, schedule]);
 
-  return { viewportRef, contentRef, follow, onScroll, scrollToBottom };
+  return { viewportRef, contentRef, follow, hasOverflow, onScroll, scrollToBottom };
 }
