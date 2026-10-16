@@ -52,6 +52,7 @@ function FileRow({
   };
   const statusLabel =
     file.status === "added" ? "新增" : file.status === "deleted" ? "删除" : "修改";
+  const reviewable = file.status !== "deleted";
   return (
     <div className="flex items-center gap-2 py-1 text-xs">
       <span className="min-w-0 flex-1 truncate font-mono text-stone-700" title={file.path}>
@@ -59,19 +60,19 @@ function FileRow({
       </span>
       <span className="shrink-0 text-stone-400">{statusLabel}</span>
       {file.added !== null && file.added > 0 && (
-        <span className="shrink-0 font-mono text-emerald-600">+{file.added}</span>
+        <span className="shrink-0 font-mono text-diff-added">+{file.added}</span>
       )}
       {file.removed !== null && file.removed > 0 && (
-        <span className="shrink-0 font-mono text-red-600">-{file.removed}</span>
+        <span className="shrink-0 font-mono text-diff-removed">-{file.removed}</span>
       )}
-      {file.status !== "deleted" && (
+      {reviewable && (
         <button
           onClick={() => onViewDiff(file)}
           className="flex shrink-0 items-center gap-1 rounded border border-stone-200 px-1.5 py-0.5 text-stone-600 hover:bg-stone-100"
-          title="查看 diff"
+          title={`审查 ${baseName(file.path)} 的改动`}
         >
           <FileDiff size={12} />
-          diff
+          审查
         </button>
       )}
       {file.status !== "deleted" && (
@@ -118,7 +119,11 @@ export function TurnArtifactsPanel({
   return (
     <div className="turn-artifacts space-y-2 rounded-xl border border-stone-200 bg-stone-50/60 p-3 text-xs">
       <div className="flex items-center justify-between">
-        <span className="font-semibold text-stone-500">本轮产出</span>
+        <span className="font-semibold text-stone-500">
+          {data.files.length > 0
+            ? `${data.files.length} 个文件已更改`
+            : `本轮产出 · ${data.artifacts.length} 个工件`}
+        </span>
         <button
           onClick={() => onOpen(data.base_dir, true)}
           className="flex items-center gap-1 rounded border border-stone-200 px-1.5 py-0.5 text-stone-500 hover:bg-stone-100"

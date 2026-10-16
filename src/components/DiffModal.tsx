@@ -107,8 +107,8 @@ export function DiffModal({
         <pre className="min-h-0 flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed">
           {lines.map((line, i) => {
             let cls = "text-stone-700";
-            if (line.startsWith("+") && !line.startsWith("+++")) cls = "bg-emerald-50 text-emerald-700";
-            else if (line.startsWith("-") && !line.startsWith("---")) cls = "bg-red-50 text-red-700";
+            if (line.startsWith("+") && !line.startsWith("+++")) cls = "bg-diff-added";
+            else if (line.startsWith("-") && !line.startsWith("---")) cls = "bg-diff-removed";
             else if (line.startsWith("@@")) cls = "text-blue-600";
             else if (line.startsWith("diff ") || line.startsWith("index ")) cls = "text-stone-400";
             return (

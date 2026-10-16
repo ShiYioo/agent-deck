@@ -178,7 +178,7 @@ function opBadge(row: { tool: string; args?: Record<string, unknown> }) {
       : undefined;
   if (!label) return null;
   return (
-    <span className={`shrink-0 ${label === "删除" ? "text-red-600" : "text-emerald-600"}`}>{label}</span>
+    <span className={`shrink-0 ${label === "删除" ? "text-diff-removed" : "text-diff-added"}`}>{label}</span>
   );
 }
 
@@ -187,8 +187,8 @@ function diffBadge(row: { added?: number; removed?: number }) {
   if (!row.added && !row.removed) return null;
   return (
     <span className="shrink-0 font-mono text-[11px]">
-      {row.added ? <span className="text-emerald-600">+{row.added}</span> : null}
-      {row.removed ? <span className="ml-1 text-red-600">−{row.removed}</span> : null}
+      {row.added ? <span className="text-diff-added">+{row.added}</span> : null}
+      {row.removed ? <span className="ml-1 text-diff-removed">−{row.removed}</span> : null}
     </span>
   );
 }
