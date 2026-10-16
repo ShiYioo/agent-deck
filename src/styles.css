@@ -98,6 +98,45 @@ body,
   50% { opacity: 1; }
 }
 
+/* 工具执行中的"扫光"条：运行中的行必须有活着的反馈（ZCode 的 indeterminate 条同款语义） */
+@keyframes tool-sweep {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(420%); }
+}
+
+.tool-sweep {
+  position: relative;
+  height: 2px;
+  margin: 3px 0 1px 20px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.06);
+}
+
+.tool-sweep::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+  border-radius: 999px;
+  background: currentColor;
+  animation: tool-sweep 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-sweep::after { animation: none; width: 100%; opacity: 0.45; }
+}
+
+html[data-document-hidden] .tool-sweep::after { animation: none; }
+
+/* 输出截断提示：告诉用户还有多少没显示，而不是悄悄吞掉 */
+.output-truncated {
+  padding: 4px 12px 0;
+  font-size: 11px;
+  color: #8a8a8a;
+}
+
 @keyframes typing-dot {
   0%,
   60%,

@@ -55,22 +55,28 @@ export const EventLine = memo(function EventLine({
       );
     case "tool": {
       if (row.status === "running") {
-        // 进行中：工具名 + 入参投影（命令默认展开保持可见）
+        // 进行中：工具名 + 状态词 + 入参投影；命令默认展开保持可见。
+        // 运行中的行必须"活着"：状态词 + 扫光条（不只靠颜色，也带可读状态）
         return (
-          <Disclosure className="activity-event" defaultOpen={row.isCommand}
-            title={<><ToolIcon tool={row.tool} /><span>{row.tool}</span>{opBadge(row)}{targetLabel(row)}</>}>
-            <pre>{row.detail ?? ""}</pre>
-          </Disclosure>
+          <>
+            <Disclosure className="activity-event" defaultOpen={row.isCommand}
+              title={<><ToolIcon tool={row.tool} /><span>{row.tool} · {statusWord(row.status)}</span>{opBadge(row)}{targetLabel(row)}</>}>
+              <pre>{row.detail ?? ""}</pre>
+            </Disclosure>
+            <div className="tool-sweep text-stone-400" role="progressbar" aria-label={`${row.tool} 执行中`} />
+          </>
         );
       }
       if (row.status === "failed") {
         const parts = [row.detail, row.output].filter((s): s is string => !!s);
         const content = parts.filter((s, i) => i === 0 || s !== parts[0]).join("\n");
+        const shown = capOutput(content);
         return (
           <div role="alert" className="event-error">
             <Disclosure className="activity-event" defaultOpen
-              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{row.tool} 失败</span>{targetLabel(row)}</>}>
-              <pre className="text-red-600">{content || "（无错误详情）"}</pre>
+              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{row.tool} · {statusWord(row.status)}</span>{targetLabel(row)}</>}>
+              <pre className="text-red-600">{shown.text || "（无错误详情）"}</pre>
+              {shown.hidden > 0 && <div className="output-truncated">已截断，另有 {shown.hidden} 行未显示</div>}
             </Disclosure>
           </div>
         );
@@ -78,11 +84,13 @@ export const EventLine = memo(function EventLine({
       // completed：命令类默认展开（输入输出成对可见）；提问同样展开——问题与回答要在流里可见
       const parts = [row.detail, row.output].filter((s): s is string => !!s);
       const content = parts.filter((s, i) => i === 0 || s !== parts[0]).join("\n");
+      const shown = capOutput(content);
       const defaultOpen = row.isCommand || row.isQuestion;
       return (
         <Disclosure className="activity-event" defaultOpen={defaultOpen}
-          title={<><IconCheckCircle size={13} /><span>{row.tool} · 已完成</span>{opBadge(row)}{targetLabel(row)}{diffBadge(row)}</>}>
-          <pre>{content}</pre>
+          title={<><IconCheckCircle size={13} /><span>{row.tool} · {statusWord(row.status)}</span>{opBadge(row)}{targetLabel(row)}{diffBadge(row)}</>}>
+          <pre>{shown.text}</pre>
+          {shown.hidden > 0 && <div className="output-truncated">已截断，另有 {shown.hidden} 行未显示</div>}
         </Disclosure>
       );
     }
@@ -126,6 +134,19 @@ export const EventLine = memo(function EventLine({
       return null;
   }
 });
+
+/** 状态词：执行中/已执行/执行失败——状态不许只靠颜色（ZCode 同款六态语义的子集） */
+function statusWord(status: "running" | "completed" | "failed") {
+  return status === "running" ? "执行中" : status === "failed" ? "执行失败" : "已执行";
+}
+
+/** 输出超长就截断并告知（而不是悄悄吞掉）：默认显示前 200 行 */
+const OUTPUT_LINE_CAP = 200;
+function capOutput(text: string): { text: string; hidden: number } {
+  const lines = text.split("\n");
+  if (lines.length <= OUTPUT_LINE_CAP) return { text, hidden: 0 };
+  return { text: lines.slice(0, OUTPUT_LINE_CAP).join("\n"), hidden: lines.length - OUTPUT_LINE_CAP };
+}
 
 /** 文件类工具的目标路径：提到行标题上，"改了/删了哪个文件"不用展开就能看到 */
 function targetLabel(row: { target?: string }) {

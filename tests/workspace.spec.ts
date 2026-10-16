@@ -24,7 +24,7 @@ test("groups projects once, searches, collapses, and restores drafts", async ({ 
   await expect(page.getByRole("textbox", { name: "消息" })).toHaveValue("会话草稿");
   await expect(page.locator(".assistant-markdown h2")).toHaveText("已完成");
   await expect(page.locator(".assistant-markdown table")).toBeVisible();
-  await expect(page.locator(".activity-event").filter({ hasText: "read · 已完成" })).not.toHaveAttribute("open", "");
+  await expect(page.locator(".activity-event").filter({ hasText: "read · 已执行" })).not.toHaveAttribute("open", "");
   await page.screenshot({ path: "test-results/conversation-desktop.png" });
 });
 

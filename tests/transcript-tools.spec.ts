@@ -28,26 +28,40 @@ const emitTool = async (
   await emit(page, { taskId: "new-task", type: "tool_execution_end", toolName: tool, result });
 };
 
-test("deck 的文件工具行点名文件并显示 +/- 行数", async ({ page }) => {
+test("deck 的文件工具行点名文件、显示状态词与 +/- 行数", async ({ page }) => {
   await mockDesktop(page, false);
   await runningTask(page);
 
-  // pi 的 edit：入参是 { path, edits[] }，返回里带 details.diff
-  await emitTool(
-    page,
-    "edit",
-    { path: "src/foo.ts", edits: [{ oldText: "a", newText: "b" }] },
-    {
+  // pi 的 edit：入参是 { path, edits[] }；只发 tool_use 时行必须是"执行中"
+  await emit(page, {
+    taskId: "new-task",
+    type: "tool_execution_start",
+    toolName: "edit",
+    args: { path: "src/foo.ts", edits: [{ oldText: "a", newText: "b" }] },
+  });
+
+  const running = page.locator(".activity-event").filter({ hasText: "edit · 执行中" });
+  await expect(running).toHaveCount(1);
+  await expect(running).toContainText("src/foo.ts");
+  // 运行中的行要有扫光进度条（不靠颜色也要能读出"在跑"）
+  await expect(page.locator(".tool-sweep")).toHaveCount(1);
+
+  await emit(page, {
+    taskId: "new-task",
+    type: "tool_execution_end",
+    toolName: "edit",
+    result: {
       content: [{ text: "已修改" }],
       details: { diff: "@@ -1 +1 @@\n-a\n+b\n", patch: "--- a/src/foo.ts\n+++ b/src/foo.ts\n-a\n+b\n" },
     },
-  );
+  });
 
-  const row = page.locator(".activity-event").filter({ hasText: "edit · 已完成" });
+  const row = page.locator(".activity-event").filter({ hasText: "edit · 已执行" });
   await expect(row).toHaveCount(1);
   await expect(row).toContainText("src/foo.ts");
   await expect(row).toContainText("+1");
   await expect(row).toContainText("−1");
+  await expect(page.locator(".tool-sweep")).toHaveCount(0);
 });
 
 test("折叠后的工具摘要也点名文件、并标出删除", async ({ page }) => {
