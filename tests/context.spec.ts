@@ -28,14 +28,24 @@ test("interrupted recovery requires explicit confirmation and removes the block"
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  const confirm = page.getByRole("button", { name: "确认恢复", exact: true });
-  await page.getByRole("checkbox", { name: "已确认旧执行者结束，并核对工作区改动" }).waitFor({ timeout: 30_000 });
-  await expect(confirm).toBeDisabled();
-  await page.getByRole("checkbox", { name: "已确认旧执行者结束，并核对工作区改动" }).check();
-  await confirm.click();
-  await expect(confirm).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "确认恢复", exact: true })).toHaveCount(0, { timeout: 30_000 });
   expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).__testRecoveryConfirmed))
     .toEqual({ taskId: "a", confirmed: true });
+});
+
+test("recovery conflicts stay visible without blocking task details", async ({ page }) => {
+  await mockDesktop(page, false);
+  await page.addInitScript(() => {
+    const state = window as unknown as Record<string, unknown>;
+    state.__testRecoveryTasks = ["a"];
+    state.__testRecoveryBlocked = true;
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
+  await page.getByRole("button", { name: "执行详情", exact: true }).click();
+  await expect(page.locator(".context-recovery-status")).toContainText("自动恢复已暂停");
+  await expect(page.getByRole("button", { name: "确认恢复", exact: true })).toBeDisabled();
+  await expect(page.locator(".workspace-title")).toHaveText("调整工作台布局");
 });
 
 test("a damaged native binding can be reset without losing public history", async ({ page }) => {
@@ -120,7 +130,8 @@ test("guided cooperation carries current restrictions and bounds phase duration"
   const input = page.getByRole("textbox", { name: "消息", exact: true });
   await input.fill("阶段之间尝试发送");
   await input.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("协作占用");
+  await expect(page.locator(".conversation-status")).toContainText("协作进行中");
+  await expect(page.getByRole("button", { name: "等待协作结束", exact: true })).toBeDisabled();
   await expect(input).toHaveValue("阶段之间尝试发送");
   await page.getByRole("button", { name: "停止协作", exact: true }).click();
   await expect(page.getByRole("button", { name: "停止协作", exact: true })).toHaveCount(0);

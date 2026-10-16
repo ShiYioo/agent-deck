@@ -114,7 +114,9 @@ pub(crate) fn remove_task_metadata(conn: &Connection, task_id: &str) -> Result<(
         "DELETE FROM context_deliveries WHERE task_id = ?1",
         "DELETE FROM recovery_blocks WHERE task_id = ?1",
         "DELETE FROM graph_runs WHERE json_extract(data,'$.source_task_id')=?1 OR EXISTS
-             (SELECT 1 FROM json_each(data,'$.nodes') WHERE json_extract(value,'$.task_id')=?1)",
+             (SELECT 1 FROM json_each(data,'$.nodes') AS node WHERE json_extract(node.value,'$.task_id')=?1
+              OR EXISTS (SELECT 1 FROM json_each(node.value,'$.history') AS stage
+                         WHERE json_extract(stage.value,'$.task_id')=?1))",
         "DELETE FROM runtime_bindings WHERE task_id = ?1",
         "DELETE FROM collaborations WHERE json_extract(data,'$.source_task_id')=?1 OR EXISTS
             (SELECT 1 FROM json_each(data,'$.task_ids') WHERE value=?1)",
@@ -211,6 +213,29 @@ impl Drop for LaunchOutcome {
 }
 
 impl Store {
+    pub(crate) async fn await_workspace_released(
+        &self,
+        cwd: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let key = directory_key(cwd)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let occupied = self
+                .workspace_owners
+                .lock()
+                .map_err(|_| "workspace registry poisoned")?
+                .contains_key(&key);
+            if !occupied {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("旧执行者尚未释放工作目录，未启动接手任务".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     pub(crate) fn claim_workspace(&self, cwd: &str, owner: &str) -> Result<WorkspaceLease, String> {
         let key = directory_key(cwd)?;
         let mut registry = self
@@ -656,6 +681,49 @@ mod tests {
         assert!(f.store.claim_workspace(cwd, "manual").is_ok());
         f.task("b", "codex", "running");
         assert!(f.store.claim_workspace(cwd, "manual").is_err());
+    }
+
+    #[tokio::test]
+    async fn handoff_reserves_conversation_until_launch_and_waits_for_workspace_drop() {
+        let f = Fixture::new();
+        f.task("a", "deck", "done");
+        let cwd = f.dir.to_str().unwrap();
+        let lease = f.store.claim_workspace(cwd, "planner").unwrap();
+        f.task("b", "deck", "running");
+        let reservation = f.store.claim_conversation_mutation("a").unwrap();
+        assert!(f.store.clone_handle().claim_conversation("a").is_err());
+        f.store.finish_task("b", "cancelled", None);
+        crate::await_stopped(&f.store, &["b".into()]).await.unwrap();
+        // Persisted termination is insufficient while the outer executor owns its lease.
+        assert!(
+            f.store
+                .await_workspace_released(cwd, std::time::Duration::ZERO)
+                .await
+                .is_err()
+        );
+        assert!(f.store.claim_conversation("a").is_err());
+        let (released, ()) = tokio::join!(
+            f.store
+                .await_workspace_released(cwd, std::time::Duration::from_secs(1)),
+            async {
+                tokio::task::yield_now().await;
+                drop(lease);
+            }
+        );
+        released.unwrap();
+        let reservation = f
+            .store
+            .accept_conversation_launch("a", reservation)
+            .unwrap();
+        assert!(f.store.claim_branch_launch("a").is_err());
+        assert!(f.store.claim_conversation_mutation("a").is_err());
+        let _worker_lease = f.store.claim_workspace(cwd, "worker").unwrap();
+        f.task("c", "opencode", "running");
+        drop(reservation);
+        // After transfer the newly running worker, rather than the launch guard, excludes starts.
+        assert!(f.store.claim_conversation("a").is_err());
+        f.store.finish_task("c", "done", Some(0));
+        assert!(f.store.claim_conversation("a").is_ok());
     }
 
     #[test]

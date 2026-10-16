@@ -8,7 +8,7 @@ async function runningTask(page: Page) {
   if (await page.getByRole("button", { name: "展开侧栏", exact: true }).isVisible()) {
     await page.getByRole("button", { name: "展开侧栏", exact: true }).click();
   }
-  await page.getByRole("button", { name: "选择 harness" }).click();
+  await page.getByRole("button", { name: "选择运行器" }).click();
   await page.getByRole("option", { name: "OpenCode" }).click();
   await page.getByRole("textbox", { name: "消息", exact: true }).fill("长任务");
   await page.getByRole("textbox", { name: "消息", exact: true }).press("Enter");

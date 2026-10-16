@@ -12,6 +12,8 @@
     "preview": "vite preview",
     "test:ui": "playwright test",
     "test:runtime": "node --test agent/runtime.test.mjs agent/native-harness.test.mjs",
+    "runnerctl": "node scripts/runnerctl.mjs",
+    "test:control": "node --test scripts/runnerctl.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

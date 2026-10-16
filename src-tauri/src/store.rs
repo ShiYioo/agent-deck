@@ -362,6 +362,18 @@ impl Store {
     // Hold an owned reservation across process startup; never hold a MutexGuard across await.
     pub(crate) fn claim_conversation(&self, id: &str) -> Result<ConversationLaunch, String> {
         let guard = self.claim_conversation_mutation(id)?;
+        self.accept_conversation_launch(id, guard)
+    }
+
+    /// Transfer an existing reservation without opening a competing launch window.
+    pub(crate) fn accept_conversation_launch(
+        &self,
+        id: &str,
+        guard: ConversationLaunch,
+    ) -> Result<ConversationLaunch, String> {
+        if guard.id != id || !Arc::ptr_eq(&guard.launches, &self.conversation_launches) {
+            return Err("会话交接预留不匹配".into());
+        }
         let running = self
             .conn
             .lock()

@@ -96,6 +96,13 @@ export type ConversationInfo = {
   recovery_task_ids: string[];
   deliveries: { task_id: string; strategy: string; status: string; source_ids: string }[];
 };
+export type RecoveryCheck = {
+  safe: boolean;
+  active_processes: string[];
+  workspace_changed: boolean;
+  workspace_path: string;
+  summary: string;
+};
 export type ContextPage = {
   items: { task_id: string; harness: string; seq: number; event: Record<string, unknown> }[];
   next_offset: number | null;
@@ -116,6 +123,10 @@ export async function confirmConversationRecovery(taskId: string, confirmed: boo
   if (!inTauri) browserStub("恢复会话");
   return invoke("confirm_conversation_recovery", { taskId, confirmed });
 }
+export async function inspectConversationRecovery(taskId: string): Promise<RecoveryCheck> {
+  if (!inTauri) browserStub("核对恢复环境");
+  return invoke("inspect_conversation_recovery", { taskId });
+}
 export async function resetConversationBinding(taskId: string, harness: string): Promise<void> {
   if (!inTauri) browserStub("重建上下文");
   return invoke("reset_conversation_binding", { taskId, harness });
@@ -125,11 +136,16 @@ export type ContextPolicy = {
   version: number; allowed_harnesses: string[]; redact_secrets: boolean; blocked_terms: string[];
   context_window: number; output_reserve: number; overhead_reserve: number;
 };
-export type GraphNodeSpec = { id: string; harness: string; prompt: string; dependencies: string[]; read_only: boolean; execution?: ExecutionConfig };
+export type GraphNodeSpec = {
+  id: string; harness: string; prompt: string; dependencies: string[]; read_only: boolean; execution?: ExecutionConfig;
+  supervision?: { commander: string; max_rounds: number; execution?: ExecutionConfig } | null;
+};
 export type GraphRun = {
   id: string; source_task_id: string; conversation_id: string; cwd: string; base_commit: string;
   status: string; integrated: boolean; max_parallel: number; timeout_secs: number; error: string | null;
   nodes: { spec: GraphNodeSpec; status: string; task_id: string | null; report: string | null; error: string | null;
+    phase?: string; round?: number;
+    history?: { phase: string; round: number; harness: string; task_id: string; report: string }[];
     patch_path: string | null; patch_hash: string | null; worktree: string | null }[];
 };
 export async function getContextPolicy(taskId: string): Promise<ContextPolicy> {
@@ -144,7 +160,15 @@ export async function listGraphRuns(taskId: string): Promise<GraphRun[]> {
 export async function startGraphRun(taskId: string, nodes: GraphNodeSpec[], maxParallel: number, timeoutSecs: number): Promise<GraphRun> {
   return invoke("start_graph_run", { sourceTaskId: taskId, nodes, maxParallel, timeoutSecs });
 }
+export async function startApprovedPlan(taskId: string, approvalId: string, nodes: GraphNodeSpec[]): Promise<{
+  kind: "task" | "graph"; task_id: string | null; run: GraphRun | null;
+}> {
+  return invoke("start_approved_plan", { taskId, approvalId, nodes });
+}
 export async function cancelGraphRun(id: string): Promise<void> { return invoke("cancel_graph_run", { id }); }
+export async function cancelGraphNode(id: string, nodeId: string): Promise<void> {
+  return invoke("cancel_graph_node", { id, nodeId });
+}
 export async function integrateGraphRun(id: string, confirmed: boolean): Promise<GraphRun> {
   return invoke("integrate_graph_run", { id, confirmed });
 }
@@ -182,7 +206,9 @@ export async function startTask(params: {
   attachments?: string[];
 }): Promise<string> {
   if (!inTauri) browserStub("派任务");
-  const { task_id } = await invoke<{ task_id: string }>("start_task", params);
+  // Rust/Tauri 的 Vec<String> 参数是必填键；无附件也必须传空数组。
+  const { attachments = [], ...rest } = params;
+  const { task_id } = await invoke<{ task_id: string }>("start_task", { ...rest, attachments });
   return task_id;
 }
 
@@ -249,14 +275,20 @@ export async function listTasks(limit = 50): Promise<TaskRow[]> {
 }
 
 export async function getTaskEvents(taskId: string): Promise<AgentEvent[]> {
-  if (!inTauri) return [];
-  const events = await invoke<(PiEvent | AgentEvent)[]>("get_task_events", { taskId });
-  const updates = events.flatMap(normalizeAgentEvents).map((event, key) => ({
+  const events = await getTaskReplay(taskId);
+  const updates = events.map((event, key) => ({
     taskId, item: { event, key },
   }));
   return applyTaskUpdates({
     harness: "", cwd: "", prompt: "", mode: null, events: [], running: false, exitCode: null,
   }, updates).events.map((item) => item.event);
+}
+
+/** Unfolded events retain the overlap with IPC buffered during history loading. */
+export async function getTaskReplay(taskId: string): Promise<AgentEvent[]> {
+  if (!inTauri) return [];
+  const events = await invoke<(PiEvent | AgentEvent)[]>("get_task_events", { taskId });
+  return events.flatMap(normalizeAgentEvents);
 }
 
 export async function getTaskDiff(taskId: string): Promise<string> {

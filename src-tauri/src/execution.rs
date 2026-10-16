@@ -32,6 +32,12 @@ type CatalogCache = Mutex<HashMap<String, (Instant, Vec<ModelCapability>)>>;
 static CATALOGS: OnceLock<CatalogCache> = OnceLock::new();
 static ZCODE_EXECUTION: OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
+pub(crate) fn zcode_busy() -> bool {
+    ZCODE_EXECUTION
+        .get()
+        .is_some_and(|lock| lock.try_lock().is_err())
+}
+
 pub(crate) fn claim_zcode(
     harness: &str,
 ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, String> {
@@ -557,14 +563,25 @@ pub async fn update_delegation_execution(
             .ok_or("会话缺失")?
             .to_string();
         let harness = if let Some(nodes) = run["nodes"].as_array() {
+            let commander = target.ends_with(":commander");
+            let node_id = target.strip_suffix(":commander").unwrap_or(&target);
             let node = nodes
                 .iter()
-                .find(|n| n["spec"]["id"] == target)
+                .find(|n| n["spec"]["id"] == node_id)
                 .ok_or("节点不存在")?;
-            if node["status"] != "pending" {
+            if node["status"] != "pending"
+                && !(node["status"] == "running"
+                    && (commander || node["spec"]["supervision"].is_object()))
+            {
                 return Err("节点已启动，执行快照不可修改".into());
             }
-            node["spec"]["harness"].as_str().ok_or("执行器缺失")?
+            if commander {
+                node["spec"]["supervision"]["commander"]
+                    .as_str()
+                    .ok_or("指挥方缺失")?
+            } else {
+                node["spec"]["harness"].as_str().ok_or("执行器缺失")?
+            }
         } else {
             match target.as_str() {
                 "planning" | "reviewing" => run["mentor"].as_str(),

@@ -135,3 +135,113 @@ test("collaboration output reads without opening any settings panel", async ({ p
   await expect(page.getByText("侧栏已在 860px 以下转为浮层。")).toBeVisible();
   await expect(page.getByText("改动记录 abcdef123456")).toBeVisible();
 });
+
+test("two parallel command chains submit separate supervisors and show live relationships", async ({ page }, testInfo) => {
+  await mockDesktop(page, false);
+  await openDetails(page);
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "多模型并行");
+  await page.getByRole("button", { name: "配置指挥示例", exact: true }).click();
+  await page.getByRole("textbox", { name: "opencode-zcode 任务要求", exact: true }).fill("实现登录接口");
+  await page.getByRole("textbox", { name: "codex-deck 任务要求", exact: true }).fill("验证客户端交互");
+  const preview = page.getByRole("group", { name: "指挥与协作关系图" });
+  await expect(preview.locator(".relationship-lane")).toHaveCount(2);
+  await expect(preview.locator(".relationship-lane").first()).toContainText("opencode");
+  await expect(preview.locator(".relationship-lane").first()).toContainText("zcode");
+  await page.getByRole("button", { name: "启动并行协作", exact: true }).click();
+  const request = await page.evaluate(() => (window as unknown as {
+    __testGraphRequest: { nodes: { harness: string; supervision: { commander: string; max_rounds: number } }[]; maxParallel: number };
+  }).__testGraphRequest);
+  expect(request.maxParallel).toBe(2);
+  expect(request.nodes.map((n) => [n.supervision.commander, n.harness, n.supervision.max_rounds]))
+    .toEqual([["opencode", "zcode", 3], ["codex", "deck", 3]]);
+  const result = page.locator(".graph-run");
+  await result.getByRole("button", { name: "查看关系任务 opencode-zcode", exact: true }).click();
+  await expect(result.getByRole("button", { name: "停止任务链 opencode-zcode", exact: true })).toBeVisible();
+  await result.getByRole("button", { name: "停止任务链 opencode-zcode", exact: true }).click();
+  await expect(result.locator(".relationship-lane").first()).toContainText("已停止");
+  await expect(result.locator(".relationship-lane").nth(1)).toContainText("等待");
+  await page.screenshot({ path: testInfo.outputPath("parallel-command-desktop.png") });
+});
+
+test("relationship graph shows rework and dependencies within a narrow viewport", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockDesktop(page, false);
+  await page.addInitScript(() => {
+    (window as unknown as Record<string, unknown>).__testGraphs = [{
+      id: "command-graph", source_task_id: "a", conversation_id: "a", cwd: "C:\\workspace\\agent-deck",
+      base_commit: "base", status: "running", integrated: false, max_parallel: 2, timeout_secs: 900, error: null,
+      nodes: [
+        { spec: { id: "api", harness: "zcode", prompt: "实现登录接口", dependencies: [], read_only: false,
+            supervision: { commander: "opencode", max_rounds: 3 } },
+          status: "running", phase: "executing", round: 2, task_id: "api-rework", report: null, error: null,
+          history: [{ phase: "reviewing", round: 1, harness: "opencode", task_id: "api-review",
+            report: "补充登录失败用例" }] },
+        { spec: { id: "client", harness: "deck", prompt: "验证客户端交互", dependencies: ["api"], read_only: true,
+            supervision: { commander: "codex", max_rounds: 2 } },
+          status: "pending", phase: "planning", round: 0, task_id: null, report: null, error: null, history: [] },
+      ],
+    }];
+  });
+  await page.goto("/");
+  if (await page.getByRole("button", { name: "展开侧栏", exact: true }).isVisible()) {
+    await page.getByRole("button", { name: "展开侧栏", exact: true }).click();
+  }
+  await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
+  const graph = page.getByRole("group", { name: "指挥与协作关系图" });
+  await expect(graph).toBeVisible();
+  await expect(graph).toContainText("实施 · 2/3 轮");
+  await expect(graph.getByRole("button", { name: "查看依赖 api", exact: true })).toBeVisible();
+  await graph.getByRole("button", { name: "查看依赖 api", exact: true }).click();
+  await page.locator(".node-stage-history summary").click();
+  await expect(page.getByText("补充登录失败用例", { exact: true })).toBeVisible();
+  const bounds = await graph.boundingBox();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+  await graph.screenshot({ path: testInfo.outputPath("command-mobile.png") });
+});
+
+test("externally submitted graphs appear in the open conversation without a reload", async ({ page }) => {
+  await mockDesktop(page, false);
+  await openDetails(page);
+  await expect(page.locator(".graph-run")).toHaveCount(0);
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, unknown>;
+    const run = {
+      id: "external", source_task_id: "a", conversation_id: "a", cwd: "C:\\workspace\\agent-deck",
+      base_commit: "base", status: "running", integrated: false, max_parallel: 1, timeout_secs: 900,
+      nodes: [{ spec: { id: "external-api", harness: "zcode", prompt: "外部运行器提交的任务", dependencies: [], read_only: true,
+        supervision: { commander: "opencode", max_rounds: 2 } }, status: "pending", phase: "planning" }],
+    };
+    w.__testGraphs = [run];
+    (w.__emit as (event: string, payload: unknown) => void)("orchestration-update", run);
+  });
+  await expect(page.locator(".graph-run")).toBeVisible();
+  await expect(page.locator(".relationship-chain")).toContainText("opencode");
+});
+
+test("command chains can outnumber concurrency slots without replacing existing tasks", async ({ page }) => {
+  await mockDesktop(page, false);
+  await openDetails(page);
+  await openSection(page, "上下文与协作设置");
+  await openSection(page, "多模型并行");
+  await page.getByRole("button", { name: "配置指挥示例", exact: true }).click();
+  await page.getByRole("textbox", { name: "opencode-zcode 任务要求", exact: true }).fill("保留已有任务");
+  for (let i = 0; i < 3; i++) {
+    await page.getByRole("button", { name: "添加指挥链", exact: true }).click();
+  }
+  await expect(page.locator(".graph-node-editor")).toHaveCount(5);
+  await expect(page.getByRole("textbox", { name: "opencode-zcode 任务要求", exact: true })).toHaveValue("保留已有任务");
+  const inputs = page.locator(".graph-node-editor textarea");
+  for (let i = 1; i < 5; i++) await inputs.nth(i).fill(`独立任务 ${i}`);
+  await page.getByRole("spinbutton", { name: "并行数量", exact: true }).fill("2");
+  await page.getByRole("button", { name: "启动并行协作", exact: true }).click();
+  const request = await page.evaluate(() => (window as unknown as {
+    __testGraphRequest: { nodes: { id: string; supervision: unknown }[]; maxParallel: number };
+  }).__testGraphRequest);
+  expect(request.nodes).toHaveLength(5);
+  expect(new Set(request.nodes.map((node) => node.id)).size).toBe(5);
+  expect(request.nodes.every((node) => node.supervision)).toBe(true);
+  expect(request.maxParallel).toBe(2);
+  await expect(page.locator(".graph-run .relationship-lane")).toHaveCount(5);
+});

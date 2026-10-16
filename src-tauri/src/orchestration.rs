@@ -21,6 +21,23 @@ pub struct NodeSpec {
     pub read_only: bool,
     #[serde(default)]
     pub execution: crate::execution::ExecutionConfig,
+    #[serde(default)]
+    pub supervision: Option<Supervision>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Supervision {
+    pub commander: String,
+    pub max_rounds: u32,
+    #[serde(default)]
+    pub execution: crate::execution::ExecutionConfig,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StageRecord {
+    pub phase: String,
+    pub round: u32,
+    pub harness: String,
+    pub task_id: String,
+    pub report: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
@@ -33,6 +50,72 @@ pub struct Node {
     pub patch_hash: Option<String>,
     pub report: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub round: u32,
+    #[serde(default)]
+    pub history: Vec<StageRecord>,
+}
+impl Node {
+    fn harness(&self) -> &str {
+        match (&self.spec.supervision, self.phase.as_str()) {
+            (Some(s), "planning" | "reviewing") => &s.commander,
+            _ => &self.spec.harness,
+        }
+    }
+    // A successful process exit is only a stage result; the commander owns acceptance.
+    fn finish_stage(&mut self, report: String) -> bool {
+        if let Some(supervision) = &self.spec.supervision {
+            self.history.push(StageRecord {
+                phase: self.phase.clone(),
+                round: self.round,
+                harness: self.harness().into(),
+                task_id: self.task_id.clone().unwrap_or_default(),
+                report: report.clone(),
+            });
+            match self.phase.as_str() {
+                "planning" => {
+                    self.phase = "executing".into();
+                    self.round = 1;
+                }
+                "executing" => self.phase = "reviewing".into(),
+                "reviewing" if crate::collaboration::review_approved(&report) => {
+                    self.status = "done".into();
+                    self.report = Some(
+                        self.history
+                            .iter()
+                            .map(|s| {
+                                format!(
+                                    "{} / {} / round {}\n{}",
+                                    s.harness, s.phase, s.round, s.report
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    );
+                    return true;
+                }
+                "reviewing" if self.round < supervision.max_rounds => {
+                    self.phase = "executing".into();
+                    self.round += 1;
+                }
+                _ => {
+                    self.status = "needs_attention".into();
+                    self.error = Some("达到执行轮数上限，尚未通过指挥方验收".into());
+                    self.report = Some(report);
+                    return false;
+                }
+            }
+            self.status = "pending".into();
+            self.report = Some(report);
+            false
+        } else {
+            self.status = "done".into();
+            self.report = Some(report);
+            true
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphRun {
@@ -54,7 +137,10 @@ pub struct GraphRun {
     pub policy_version: i64,
 }
 #[derive(Clone, Default)]
-pub struct GraphRegistry(Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>);
+pub struct GraphRegistry(
+    Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    Arc<Mutex<HashSet<(String, String)>>>,
+);
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
@@ -71,13 +157,29 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
 }
 
+pub(crate) fn graph_baseline(cwd: &Path) -> Result<String, String> {
+    let root = git(cwd, &["rev-parse", "--show-toplevel"])?;
+    if crate::coordination::directory_key(root.trim())?
+        != crate::coordination::directory_key(cwd.to_str().ok_or("目录编码无效")?)?
+    {
+        return Err("并行任务需要以 Git 仓库根目录为工作目录".into());
+    }
+    if !git(cwd, &["status", "--porcelain"])?.trim().is_empty() {
+        return Err(
+            "并行任务需要干净的 Git 基线，请先提交或自行保存现有改动；不会自动暂存或丢弃改动"
+                .into(),
+        );
+    }
+    Ok(git(cwd, &["rev-parse", "HEAD"])?.trim().into())
+}
+
 pub fn validate(specs: &[NodeSpec], parallel: usize, timeout: u64) -> Result<Vec<usize>, String> {
     if specs.is_empty()
         || specs.len() > 12
-        || !(1..=3).contains(&parallel)
+        || !(1..=4).contains(&parallel)
         || !(60..=3600).contains(&timeout)
     {
-        return Err("任务图限制：1 到 12 个任务、1 到 3 路并行、60 到 3600 秒总时限".into());
+        return Err("任务图限制：1 到 12 个任务、1 到 4 路并行、60 到 3600 秒总时限".into());
     }
     let mut ids = HashSet::new();
     for s in specs {
@@ -96,6 +198,13 @@ pub fn validate(specs: &[NodeSpec], parallel: usize, timeout: u64) -> Result<Vec
         }
         if s.harness != "deck" {
             Harness::parse(&s.harness)?;
+        }
+        if let Some(supervision) = &s.supervision {
+            crate::collaboration::validate_pair(
+                &supervision.commander,
+                &s.harness,
+                supervision.max_rounds,
+            )?;
         }
     }
     let mut order = Vec::new();
@@ -220,6 +329,35 @@ pub fn cancel_graph_run(
     Ok(())
 }
 
+#[tauri::command]
+pub fn cancel_graph_node(
+    app: AppHandle,
+    store: State<'_, Store>,
+    registry: State<'_, GraphRegistry>,
+    id: String,
+    node_id: String,
+) -> Result<(), String> {
+    let run = load(&store, &id)?;
+    if run.status != "running" {
+        return Err("任务图已结束".into());
+    }
+    let node = run
+        .nodes
+        .iter()
+        .find(|n| n.spec.id == node_id)
+        .ok_or("节点不存在")?;
+    if !matches!(node.status.as_str(), "pending" | "running") {
+        return Err("任务链已结束".into());
+    }
+    registry
+        .1
+        .lock()
+        .map_err(|_| "graph registry poisoned")?
+        .insert((id, node_id));
+    cancel_node(&app, node);
+    Ok(())
+}
+
 pub(crate) fn stop_for_tasks(app: &AppHandle, store: &Store, ids: &[String]) -> Result<(), String> {
     let raws = {
         let conn = store.conn.lock().map_err(|_| "store poisoned")?;
@@ -234,10 +372,10 @@ pub(crate) fn stop_for_tasks(app: &AppHandle, store: &Store, ids: &[String]) -> 
     for raw in raws {
         let run: GraphRun = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
         if ids.contains(&run.source_task_id)
-            || run
-                .nodes
-                .iter()
-                .any(|n| n.task_id.as_ref().is_some_and(|id| ids.contains(id)))
+            || run.nodes.iter().any(|n| {
+                n.task_id.as_ref().is_some_and(|id| ids.contains(id))
+                    || n.history.iter().any(|stage| ids.contains(&stage.task_id))
+            })
         {
             if let Some(flag) = app
                 .state::<GraphRegistry>()
@@ -266,6 +404,29 @@ pub async fn start_graph_run(
     max_parallel: usize,
     timeout_secs: u64,
 ) -> Result<GraphRun, String> {
+    start_graph_run_reserved(
+        app,
+        store,
+        registry,
+        source_task_id,
+        nodes,
+        max_parallel,
+        timeout_secs,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn start_graph_run_reserved(
+    app: AppHandle,
+    store: State<'_, Store>,
+    registry: State<'_, GraphRegistry>,
+    source_task_id: String,
+    nodes: Vec<NodeSpec>,
+    max_parallel: usize,
+    timeout_secs: u64,
+    reservation: Option<crate::store::ConversationLaunch>,
+) -> Result<GraphRun, String> {
     validate(&nodes, max_parallel, timeout_secs)?;
     let selected = store.get_task(&source_task_id)?.ok_or("源任务不存在")?;
     let cid = store.ensure_conversation(&source_task_id)?;
@@ -282,47 +443,59 @@ pub async fn start_graph_run(
     if restricted && nodes.iter().any(|n| !n.read_only) {
         return Err("源会话权限受限，只能派发只读协作者".into());
     }
-    let _reservation = store.claim_conversation(&cid)?;
+    let _reservation = if let Some(guard) = reservation {
+        store.accept_conversation_launch(&cid, guard)?
+    } else {
+        store.claim_conversation(&cid)?
+    };
     crate::execution::initialize(&app);
     for node in &nodes {
         let copy = store.clone_handle();
-        let cid = cid.clone();
-        let node = node.clone();
+        let resolving_cid = cid.clone();
+        let resolving_node = node.clone();
         tokio::task::spawn_blocking(move || {
-            crate::execution::resolve(&copy, Some(&cid), &node.harness, &node.execution)
+            crate::execution::resolve(
+                &copy,
+                Some(&resolving_cid),
+                &resolving_node.harness,
+                &resolving_node.execution,
+            )
         })
         .await
         .map_err(|e| e.to_string())??;
+        if let Some(supervision) = &node.supervision {
+            let copy = store.clone_handle();
+            let cid = cid.clone();
+            let supervision = supervision.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::execution::resolve(
+                    &copy,
+                    Some(&cid),
+                    &supervision.commander,
+                    &supervision.execution,
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+        }
     }
     let policy = store.context_policy(&source_task_id)?;
     for node in &nodes {
-        policy.authorize(&node.harness)?;
-        if node.harness != "deck"
-            && crate::discovery::locate(Harness::parse(&node.harness)?).is_none()
+        for harness in std::iter::once(node.harness.as_str())
+            .chain(node.supervision.as_ref().map(|s| s.commander.as_str()))
         {
-            return Err(format!("未安装 {}", node.harness));
+            policy.authorize(harness)?;
+            if harness != "deck" && crate::discovery::locate(Harness::parse(harness)?).is_none() {
+                return Err(format!("未安装 {harness}"));
+            }
         }
     }
     let id = format!("graph-{}", crate::pi_session_task_id());
     let lease = store.claim_workspace(&source.cwd, &id)?;
     let cwd = PathBuf::from(&source.cwd);
-    let baseline = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let root = git(&cwd, &["rev-parse", "--show-toplevel"])?;
-        if crate::coordination::directory_key(root.trim())?
-            != crate::coordination::directory_key(cwd.to_str().ok_or("目录编码无效")?)?
-        {
-            return Err("并行任务需要以 Git 仓库根目录为工作目录".into());
-        }
-        if !git(&cwd, &["status", "--porcelain"])?.trim().is_empty() {
-            return Err(
-                "并行任务需要干净的 Git 基线，请先提交或自行保存现有改动；不会自动暂存或丢弃改动"
-                    .into(),
-            );
-        }
-        Ok(git(&cwd, &["rev-parse", "HEAD"])?.trim().into())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let baseline = tokio::task::spawn_blocking(move || graph_baseline(&cwd))
+        .await
+        .map_err(|e| e.to_string())??;
     let mut turns = store.session_tasks(&source_task_id)?;
     turns.sort_by(crate::conversation::turn_order);
     let context_source_task_id = turns.last().ok_or("会话轮次缺失")?.id.clone();
@@ -342,6 +515,14 @@ pub async fn start_graph_run(
         nodes: nodes
             .into_iter()
             .map(|spec| Node {
+                phase: if spec.supervision.is_some() {
+                    "planning"
+                } else {
+                    "executing"
+                }
+                .into(),
+                round: 0,
+                history: Vec::new(),
                 spec,
                 status: "pending".into(),
                 task_id: None,
@@ -379,6 +560,9 @@ pub async fn start_graph_run(
         let _ = save(&app, &store, &run);
         if let Ok(mut active) = registry.0.lock() {
             active.remove(&run.id);
+        }
+        if let Ok(mut cancelled) = registry.1.lock() {
+            cancelled.retain(|(id, _)| id != &run.id);
         }
     });
     Ok(initial)
@@ -489,6 +673,24 @@ async fn drive(
         dispatch_allowed(store, run, cancelled, deadline)?;
         let timed_out = tokio::time::Instant::now() >= deadline;
         let stopping = cancelled.load(Ordering::SeqCst) || timed_out;
+        let mut changed = false;
+        let cancelled_nodes = app
+            .state::<GraphRegistry>()
+            .1
+            .lock()
+            .map_err(|_| "graph registry poisoned")?
+            .clone();
+        for node in &mut run.nodes {
+            if cancelled_nodes.contains(&(run.id.clone(), node.spec.id.clone())) {
+                if node.status == "running" {
+                    cancel_node(app, node);
+                }
+                if node.status == "pending" {
+                    node.status = "cancelled".into();
+                    changed = true;
+                }
+            }
+        }
         if stopping {
             for node in &mut run.nodes {
                 if node.status == "running" {
@@ -503,7 +705,6 @@ async fn drive(
                 return Err("取消尚未收尾；运行任务继续阻止其工作树，需人工确认恢复".into());
             }
         }
-        let mut changed = false;
         for i in 0..run.nodes.len() {
             if run.nodes[i].status != "running" {
                 continue;
@@ -515,11 +716,16 @@ async fn drive(
             }
             changed = true;
             run.nodes[i].status = row.status;
-            if run.nodes[i].status == "done" && !stopping {
+            let node_stopping = stopping
+                || cancelled_nodes.contains(&(run.id.clone(), run.nodes[i].spec.id.clone()));
+            if run.nodes[i].status == "done" && !node_stopping {
                 let report = crate::handoff::assistant_text(&store.get_events(&id, 0, i64::MAX)?);
                 if report.trim().is_empty() {
                     run.nodes[i].status = "failed".into();
                     run.nodes[i].error = Some("执行者未返回有效报告，成果未获验收".into());
+                    continue;
+                }
+                if !run.nodes[i].finish_stage(report) {
                     continue;
                 }
                 let node = run.nodes[i].clone();
@@ -532,14 +738,13 @@ async fn drive(
                     Ok((path, hash)) => {
                         run.nodes[i].patch_path = Some(path);
                         run.nodes[i].patch_hash = Some(hash);
-                        run.nodes[i].report = Some(report);
                     }
                     Err(error) => {
                         run.nodes[i].status = "failed".into();
                         run.nodes[i].error = Some(error);
                     }
                 }
-            } else if stopping {
+            } else if node_stopping {
                 run.nodes[i].status = "cancelled".into();
             }
         }
@@ -551,7 +756,10 @@ async fn drive(
             if dependencies.iter().any(|d| {
                 run.nodes.iter().any(|n| {
                     &n.spec.id == d
-                        && matches!(n.status.as_str(), "failed" | "blocked" | "cancelled")
+                        && matches!(
+                            n.status.as_str(),
+                            "failed" | "blocked" | "cancelled" | "needs_attention" | "interrupted"
+                        )
                 })
             }) {
                 run.nodes[i].status = "blocked".into();
@@ -568,23 +776,48 @@ async fn drive(
             {
                 continue;
             }
+            if run.nodes[i].harness() == "zcode" && crate::execution::zcode_busy() {
+                continue;
+            }
             if !dispatch_allowed(store, run, cancelled, deadline)? {
                 break;
             }
-            let snapshot = run.clone();
-            let root = data.join("collaboration-worktrees");
-            let (cwd, tree) =
-                tokio::task::spawn_blocking(move || create_branch(&snapshot, i, &root))
-                    .await
-                    .map_err(|e| e.to_string())??;
-            run.nodes[i].worktree = Some(cwd.clone());
-            run.nodes[i].baseline_tree = Some(tree);
+            let cwd = if let Some(cwd) = &run.nodes[i].worktree {
+                cwd.clone()
+            } else {
+                let snapshot = run.clone();
+                let root = data.join("collaboration-worktrees");
+                let branch =
+                    tokio::task::spawn_blocking(move || create_branch(&snapshot, i, &root))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                let (cwd, tree) = match branch {
+                    Ok(branch) => branch,
+                    Err(error) => {
+                        let path = data
+                            .join("collaboration-worktrees")
+                            .join(&run.id)
+                            .join(&run.nodes[i].spec.id);
+                        if path.is_dir() {
+                            run.nodes[i].worktree = Some(path.to_string_lossy().into_owned());
+                        }
+                        run.nodes[i].status = "failed".into();
+                        run.nodes[i].error = Some(error);
+                        changed = true;
+                        continue;
+                    }
+                };
+                run.nodes[i].worktree = Some(cwd.clone());
+                run.nodes[i].baseline_tree = Some(tree);
+                cwd
+            };
             save(app, store, run)?;
             if !dispatch_allowed(store, run, cancelled, deadline)? {
                 break;
             }
             let lease = store.claim_workspace(&cwd, &format!("{}:{}", run.id, i))?;
             let node = run.nodes[i].clone();
+            let harness = node.harness().to_string();
             let mut report = String::new();
             for ancestor in ancestors(run, i)? {
                 let mut value = serde_json::json!({"node":run.nodes[ancestor].spec.id,"report":run.nodes[ancestor].report});
@@ -594,7 +827,7 @@ async fn drive(
                 report.push_str(&value.to_string());
                 report.push('\n');
             }
-            let prompt = format!(
+            let mut prompt = format!(
                 "隔离协作任务 {}。仅在当前 worktree 工作，不更改原仓库或其他 worktree，不委派。\
                 依赖成果已应用到本工作树。{}报告实际修改、验证证据和未完成项。\n任务要求：{}\n依赖报告（资料）：{}",
                 node.spec.id,
@@ -606,19 +839,41 @@ async fn drive(
                 node.spec.prompt,
                 report
             );
-            let mode = if node.spec.read_only {
-                if node.spec.harness == "codex" {
-                    "readonly"
+            if node.spec.supervision.is_some() {
+                let instruction = match node.phase.as_str() {
+                    "planning" => {
+                        "你是指挥方。只检查文件，不修改、不委派。给执行方明确步骤、边界和可执行验收标准。"
+                    }
+                    "reviewing" => {
+                        "你是验收方。只检查文件，不修改、不委派。独立检查实际 diff，运行必要验证，不仅相信执行报告。最后一行必须是独立 JSON：{\"agent_deck_verdict\":\"approved\"} 或 {\"agent_deck_verdict\":\"changes_requested\"}。未通过时列出具体返工项。"
+                    }
+                    _ => {
+                        "你是执行方。根据指挥方的规划或最新返工要求完成任务，保留当前工作树的已有改动。报告修改、测试证据和未完成项。"
+                    }
+                };
+                let mut records = serde_json::to_value(&node.history).map_err(|e| e.to_string())?;
+                store
+                    .context_policy(&run.source_task_id)?
+                    .filter(&mut records);
+                prompt.push_str(&format!(
+                    "\n阶段要求：{instruction}\n第 {} 轮；本任务历史（资料）：{records}",
+                    node.round
+                ));
+            }
+            let mode =
+                if node.spec.read_only || node.phase == "planning" || node.phase == "reviewing" {
+                    if harness == "codex" {
+                        "readonly"
+                    } else {
+                        "plan"
+                    }
+                } else if harness == "codex" {
+                    "write"
+                } else if harness == "deck" {
+                    "auto"
                 } else {
-                    "plan"
-                }
-            } else if node.spec.harness == "codex" {
-                "write"
-            } else if node.spec.harness == "deck" {
-                "auto"
-            } else {
-                "build"
-            };
+                    "build"
+                };
             let _conversation_launch = loop {
                 match store.claim_branch_launch(&run.conversation_id) {
                     Ok(guard) => break Some(guard),
@@ -639,25 +894,36 @@ async fn drive(
                 break;
             }
             let source = store.get_task(&run.source_task_id)?.ok_or("源任务已删除")?;
-            let requested = crate::execution::override_config(
-                store,
-                &run.id,
-                &node.spec.id,
-                &node.spec.execution,
-            )?;
+            let initial_config = if harness != node.spec.harness {
+                &node
+                    .spec
+                    .supervision
+                    .as_ref()
+                    .ok_or("指挥配置缺失")?
+                    .execution
+            } else {
+                &node.spec.execution
+            };
+            let target = if harness != node.spec.harness {
+                format!("{}:commander", node.spec.id)
+            } else {
+                node.spec.id.clone()
+            };
+            let requested =
+                crate::execution::override_config(store, &run.id, &target, initial_config)?;
             let copy = store.clone_handle();
             let cid = run.conversation_id.clone();
-            let harness = node.spec.harness.clone();
+            let resolving_harness = harness.clone();
             let cfg = requested.clone();
             let (resolved, transport) = tokio::task::spawn_blocking(move || {
-                crate::execution::resolve(&copy, Some(&cid), &harness, &cfg)
+                crate::execution::resolve(&copy, Some(&cid), &resolving_harness, &cfg)
             })
             .await
             .map_err(|e| e.to_string())??;
             let mut context = crate::conversation::prepare_execution(
                 store,
                 &run.context_source_task_id,
-                &node.spec.harness,
+                &harness,
                 &run.cwd,
                 &prompt,
                 None,
@@ -677,12 +943,26 @@ async fn drive(
             if !dispatch_allowed(store, run, cancelled, deadline)? {
                 break;
             }
+            if app
+                .state::<GraphRegistry>()
+                .1
+                .lock()
+                .map_err(|_| "graph registry poisoned")?
+                .contains(&(run.id.clone(), node.spec.id.clone()))
+            {
+                run.nodes[i].status = "cancelled".into();
+                changed = true;
+                continue;
+            }
+            if harness == "zcode" && crate::execution::zcode_busy() {
+                continue;
+            }
             let task = crate::start_task_impl(
                 app.clone(),
                 app.state::<TaskRegistry>(),
                 app.state::<Store>(),
                 app.state::<pi_session::PiRegistry>(),
-                node.spec.harness.clone(),
+                harness.clone(),
                 cwd,
                 context.prompt.clone(),
                 Some(mode.into()),
@@ -698,12 +978,26 @@ async fn drive(
                 resolved.effort.clone(),
                 None,
                 Some((requested, resolved.clone(), transport)),
+                None,
             )
-            .await?;
+            .await;
+            let task = match task {
+                Ok(task) => task,
+                Err(error) => {
+                    run.nodes[i].status = "failed".into();
+                    run.nodes[i].error = Some(error);
+                    changed = true;
+                    continue;
+                }
+            };
             context.retain_archive();
             run.nodes[i].task_id = Some(task.task_id.clone());
             run.nodes[i].status = "running".into();
-            run.nodes[i].spec.execution = resolved;
+            if harness == node.spec.harness {
+                run.nodes[i].spec.execution = resolved;
+            } else if let Some(s) = &mut run.nodes[i].spec.supervision {
+                s.execution = resolved;
+            }
             // Branches share the public conversation, not native resume handles.
             store.set_task_conversation(&task.task_id, &run.conversation_id)?;
             store
@@ -971,6 +1265,7 @@ mod tests {
             prompt: "test".into(),
             read_only: true,
             execution: Default::default(),
+            supervision: None,
         }
     }
     #[test]
@@ -983,7 +1278,96 @@ mod tests {
         assert!(validate(&[spec("a", &["missing"])], 2, 900).is_err());
         assert!(validate(&[spec("a", &[]), spec("a", &[])], 2, 900).is_err());
         assert!(validate(&[spec("../escape", &[])], 2, 900).is_err());
-        assert!(validate(&[spec("a", &[])], 4, 900).is_err());
+        assert!(validate(&[spec("a", &[])], 5, 900).is_err());
+    }
+
+    fn supervised(id: &str, commander: &str, worker: &str) -> Node {
+        Node {
+            spec: NodeSpec {
+                harness: worker.into(),
+                supervision: Some(Supervision {
+                    commander: commander.into(),
+                    max_rounds: 2,
+                    execution: Default::default(),
+                }),
+                ..spec(id, &[])
+            },
+            status: "running".into(),
+            phase: "planning".into(),
+            round: 0,
+            task_id: Some(format!("{id}-plan")),
+            worktree: None,
+            baseline_tree: None,
+            patch_path: None,
+            patch_hash: None,
+            report: None,
+            error: None,
+            history: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn all_twelve_directions_and_four_parallel_lanes_validate() {
+        for commander in ["codex", "opencode", "zcode", "deck"] {
+            for worker in ["codex", "opencode", "zcode", "deck"] {
+                let node = supervised("chain", commander, worker);
+                assert_eq!(validate(&[node.spec], 4, 900).is_ok(), commander != worker);
+            }
+        }
+    }
+
+    #[test]
+    fn independent_command_chains_review_retry_and_exhaust_without_accepting_worker_claims() {
+        let mut a = supervised("a", "opencode", "zcode");
+        let mut b = supervised("b", "codex", "deck");
+        assert_eq!(a.harness(), "opencode");
+        assert!(!a.finish_stage("Plan A: run tests".into()));
+        assert_eq!(
+            (a.phase.as_str(), a.harness(), a.round),
+            ("executing", "zcode", 1)
+        );
+        assert!(!b.finish_stage("Plan B".into()));
+        assert!(!a.finish_stage("{\"agent_deck_verdict\":\"approved\"}".into()));
+        assert_eq!(a.phase, "reviewing");
+        assert!(!a.finish_stage(
+            "Fix failing tests\n{\"agent_deck_verdict\":\"changes_requested\"}".into()
+        ));
+        assert_eq!((a.phase.as_str(), a.round), ("executing", 2));
+        assert_eq!((b.phase.as_str(), b.round), ("executing", 1));
+        assert!(!b.finish_stage("Implemented and tested B".into()));
+        assert!(
+            b.finish_stage("Verified actual diff\n{\"agent_deck_verdict\":\"approved\"}".into())
+        );
+        assert_eq!(b.status, "done");
+        assert!(
+            b.report
+                .as_ref()
+                .unwrap()
+                .contains("Implemented and tested B")
+        );
+        assert!(!a.finish_stage("Still broken".into()));
+        assert!(!a.finish_stage("Cannot verify".into()));
+        assert_eq!(a.status, "needs_attention");
+        assert!(a.patch_path.is_none());
+        assert_eq!(b.status, "done");
+        assert_eq!(a.history.len(), 5);
+    }
+
+    #[test]
+    fn chain_checkpoints_roundtrip_and_old_nodes_keep_defaults() {
+        let mut node = supervised("chain", "codex", "deck");
+        node.finish_stage("Plan".into());
+        let restored: Node = serde_json::from_str(&serde_json::to_string(&node).unwrap()).unwrap();
+        assert_eq!(restored.phase, "executing");
+        assert_eq!(restored.history[0].harness, "codex");
+        let mut value = serde_json::to_value(&node).unwrap();
+        for key in ["phase", "round", "history"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        value["spec"].as_object_mut().unwrap().remove("supervision");
+        let legacy: Node = serde_json::from_value(value).unwrap();
+        assert!(legacy.history.is_empty());
+        assert!(legacy.spec.supervision.is_none());
     }
 
     struct Repository {
@@ -1028,6 +1412,9 @@ mod tests {
                 nodes: specs
                     .into_iter()
                     .map(|spec| Node {
+                        phase: "executing".into(),
+                        round: 0,
+                        history: Vec::new(),
                         spec,
                         status: "done".into(),
                         task_id: None,
@@ -1148,6 +1535,44 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(f.root.join("new.txt")).unwrap(),
             "new\n"
+        );
+    }
+    #[test]
+    fn accepted_rework_keeps_one_worktree_and_passes_only_final_changes_to_dependents() {
+        let f = Repository::new();
+        let mut run = f.run(vec![writable("api", &[]), spec("verify", &["api"])]);
+        run.nodes[0] = Node {
+            spec: NodeSpec {
+                read_only: false,
+                ..supervised("api", "opencode", "zcode").spec
+            },
+            ..supervised("api", "opencode", "zcode")
+        };
+        let cwd = f.branch(&mut run, 0);
+        assert!(!run.nodes[0].finish_stage("Plan: implement and verify".into()));
+        std::fs::write(cwd.join("a.txt"), "attempt one\n").unwrap();
+        assert!(!run.nodes[0].finish_stage("Initial implementation".into()));
+        assert!(!run.nodes[0].finish_stage("Missing error handling".into()));
+        assert_eq!(run.nodes[0].status, "pending");
+        assert!(run.nodes[0].patch_path.is_none());
+        std::fs::write(cwd.join("a.txt"), "accepted implementation\n").unwrap();
+        assert!(!run.nodes[0].finish_stage("Error handling added".into()));
+        assert!(run.nodes[0].finish_stage("{\"agent_deck_verdict\":\"approved\"}".into()));
+        f.artifact(&mut run, 0);
+        let dependent = f.branch(&mut run, 1);
+        assert_eq!(
+            std::fs::read_to_string(dependent.join("a.txt")).unwrap(),
+            "accepted implementation\n"
+        );
+        f.artifact(&mut run, 1);
+        assert_eq!(
+            std::fs::read_to_string(f.root.join("a.txt")).unwrap(),
+            "base\n"
+        );
+        integrate(&run, &f.data).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.root.join("a.txt")).unwrap(),
+            "accepted implementation\n"
         );
     }
     #[test]

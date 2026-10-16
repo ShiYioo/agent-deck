@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, LoaderCircle, RefreshCw, RotateCcw, Save, Search } from "lucide-react";
 import {
-  confirmConversationRecovery, getConversationInfo, resetConversationBinding, searchConversationContext, updateConversationState,
-  type ContextPage, type ConversationInfo,
+  confirmConversationRecovery, getConversationInfo, inspectConversationRecovery, resetConversationBinding, searchConversationContext, updateConversationState,
+  type ContextPage, type ConversationInfo, type RecoveryCheck,
 } from "../api";
 import { Disclosure } from "./Disclosure";
 import CollaborationBoard from "./CollaborationBoard";
@@ -18,6 +18,8 @@ export default function ConversationContext({ taskId, onRecovered }: {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [recoveryCheck, setRecoveryCheck] = useState<RecoveryCheck | null>(null);
+  const autoRecovery = useRef<string | null>(null);
   const epoch = useRef(0);
   const queryEpoch = useRef(0);
   const dirty = !!info && (goal !== info.state.goal || notes !== info.state.notes);
@@ -34,8 +36,35 @@ export default function ConversationContext({ taskId, onRecovered }: {
     getConversationInfo(taskId).then((value) => {
       if (current !== epoch.current) return;
       setInfo(value);
+       setRecoveryCheck(null);
       setGoal(value.state.goal);
       setNotes(value.state.notes);
+      // 应用重启后旧执行者已不在当前进程中：先自动核对并释放恢复锁。
+      // 只有后端仍拒绝时才保留手动确认入口，避免用户每次都被复选框拦住。
+      if (value.recovery_task_ids.length && autoRecovery.current !== taskId) {
+        autoRecovery.current = taskId;
+        return Promise.all(value.recovery_task_ids.map((id) => inspectConversationRecovery(id)))
+          .then((checks) => {
+            const blocked = checks.find((check) => !check.safe);
+            if (blocked) {
+              setRecoveryCheck(blocked);
+              throw new Error(blocked.summary);
+            }
+            return Promise.all(value.recovery_task_ids.map((id) => confirmConversationRecovery(id, true)));
+          })
+          .then(() => getConversationInfo(taskId))
+          .then((next) => {
+            if (current !== epoch.current) return;
+            setInfo(next);
+            setConfirmed(false);
+            onRecovered();
+          })
+          .catch((reason) => {
+            autoRecovery.current = null;
+            if (current === epoch.current && reason instanceof Error && reason.message) setError(reason.message);
+          });
+      }
+      return undefined;
     }).catch((reason) => {
       if (current === epoch.current) setError(String(reason));
     }).finally(() => { if (current === epoch.current) setBusy(null); });
@@ -72,8 +101,13 @@ export default function ConversationContext({ taskId, onRecovered }: {
       {busy ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}{busy ? "加载中" : "重试"}
     </button>}
     {info && <>
-      {/* 恢复确认是动作，留在折叠项之外，保证中断/失败时始终可见 */}
+      {/* 自动核对失败时才显示手动确认，避免异常中断后永久卡死输入区。 */}
       {!!info.recovery_task_ids.length && <div className="context-recovery">
+        {recoveryCheck && <div className="context-recovery-status" role="status">
+          <strong>自动恢复已暂停</strong><span>{recoveryCheck.summary}</span>
+          <small>工作区：{recoveryCheck.workspace_path}</small>
+        </div>}
+        {!recoveryCheck && busy === "load" && <div className="context-recovery-status" role="status">正在核对遗留进程和工作区…</div>}
         <label><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
           已确认旧执行者结束，并核对工作区改动</label>
         <button className="context-command" disabled={!confirmed || !!busy} onClick={() => void run("recovery", async (current) => {

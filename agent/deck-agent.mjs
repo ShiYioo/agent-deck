@@ -828,16 +828,17 @@ const PROPOSE_COLLABORATION_TOOL = {
   label: "规划多模型协作",
   description:
     "当任务确实值得拆给多个模型时，提出一份协作计划交用户确认：谁做什么、依赖关系、并发与总时限。" +
-    "确认后由 Agent Deck 在隔离工作树中执行并汇总成果，运行状态见任务视图。" +
-    "不要为了多模型而多模型：一次委派能解决的就用 delegate_to_zcode / delegate_to_codex，" +
-    "只有需要多路并行产出后再对比或汇总时才用这个。",
+    "确认后由 Agent Deck 结束等待审批的规划轮次并交接：单个普通节点在当前目录执行，" +
+    "多节点或指挥链在隔离工作树中执行并汇总成果，运行状态见任务视图。" +
+    "节点可指定 supervision，由指挥方规划、独立验收并驱动返工；多个指挥执行链可以并行，" +
+    "通过 dependencies 共享验收后的成果。单条指挥链也可使用。",
   parameters: {
     type: "object",
     properties: {
       why: { type: "string", description: "一句话说明为什么值得拆成多路（用户据此决定是否同意）" },
       nodes: {
         type: "array",
-        minItems: 2,
+        minItems: 1,
         maxItems: 12,
         items: {
           type: "object",
@@ -851,11 +852,27 @@ const PROPOSE_COLLABORATION_TOOL = {
               description: "必须先完成的节点 id；留空表示可立即开始",
             },
             read_only: { type: "boolean", description: "默认 true：只产出结论，不改文件" },
+            execution: {
+              type: "object",
+              description: "指定执行模型；用户要求免费或特定模型时必须填写确认过的完整模型 ID",
+              properties: {
+                model: { type: "string", description: "运行器的完整模型 ID" },
+                effort: { type: "string", description: "原生思考强度，可省略" },
+              },
+            },
+            supervision: {
+              type: "object",
+              properties: {
+                commander: { type: "string", enum: PLAN_HARNESSES, description: "规划和验收方，必须与 harness 不同" },
+                max_rounds: { type: "integer", minimum: 1, maximum: 3 },
+              },
+              required: ["commander", "max_rounds"],
+            },
           },
           required: ["id", "harness", "prompt"],
         },
       },
-      parallel: { type: "number", description: "最多同时执行几个，1-3，默认 2" },
+      parallel: { type: "number", description: "最多同时执行几条任务链，1-4，默认 2" },
       minutes: { type: "number", description: "协作总时限（分钟），1-60，默认 15" },
     },
     required: ["why", "nodes"],
@@ -863,9 +880,9 @@ const PROPOSE_COLLABORATION_TOOL = {
   execute: async (toolCallId, args, signal) => {
     const id = toolCallId || randomUUID();
     const raw = Array.isArray(args?.nodes) ? args.nodes : [];
-    if (raw.length < 2) {
+    if (raw.length < 1 || raw.length > 12) {
       return {
-        content: [{ type: "text", text: "协作计划至少需要两个节点；单路任务请用 delegate_to_zcode / delegate_to_codex。" }],
+        content: [{ type: "text", text: "协作计划需要 1 到 12 个节点。" }],
         isError: true,
       };
     }
@@ -881,15 +898,29 @@ const PROPOSE_COLLABORATION_TOOL = {
           .map(String)
           .filter((d) => d !== nodeId && declared.has(d)),
         read_only: n?.read_only !== false,
+         execution: n?.execution ? {
+           model: typeof n.execution.model === "string" ? n.execution.model : null,
+           effort: typeof n.execution.effort === "string" ? n.execution.effort : null,
+         } : undefined,
+         supervision: n?.supervision ? {
+           commander: String(n.supervision.commander ?? ""),
+           max_rounds: Number(n.supervision.max_rounds),
+         } : null,
       };
     });
     if (nodes.some((n) => !n.id || !n.prompt.trim())) {
       return { content: [{ type: "text", text: "每个节点都需要非空 id 与 prompt。" }], isError: true };
     }
+    if (nodes.some((n) => n.supervision && (
+      !PLAN_HARNESSES.includes(n.supervision.commander) || n.supervision.commander === n.harness ||
+      !Number.isInteger(n.supervision.max_rounds) || n.supervision.max_rounds < 1 || n.supervision.max_rounds > 3
+    ))) {
+      return { content: [{ type: "text", text: "指挥方必须是不同于执行方的有效运行器，执行轮数必须为 1 到 3。" }], isError: true };
+    }
     const plan = {
       why: String(args?.why ?? ""),
       nodes,
-      parallel: Math.min(3, Math.max(1, Number(args?.parallel) || 2)),
+      parallel: Math.min(4, Math.max(1, Math.floor(Number(args?.parallel) || 2))),
       minutes: Math.min(60, Math.max(1, Number(args?.minutes) || 15)),
     };
     const answer = await new Promise((resolve) => {
@@ -919,7 +950,7 @@ const PROPOSE_COLLABORATION_TOOL = {
       content: [
         {
           type: "text",
-          text: `${note}。编排已在隔离工作树中启动：${shape}；最多 ${plan.parallel} 路并行、${plan.minutes} 分钟。各节点产出与集成入口见任务视图的「多模型并行」。`,
+          text: `${note}。计划节点：${shape}。确认回复不代表任务已启动，请以任务视图中的实际运行状态为准。`,
         },
       ],
     };

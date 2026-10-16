@@ -10,6 +10,32 @@ export type TaskUpdate = {
   todos?: LiveTask["todos"];
 };
 
+/** History and IPC overlap while a running task is restored. Keep each event once. */
+export function restoreTask(
+  task: LiveTask, replay: LogItem[], buffered: TaskUpdate[],
+): LiveTask {
+  const fingerprint = (event: AgentEvent) => {
+    const { sourceHarness: _h, sourceTaskId: _t, ts: _ts, ...content } = event as AgentEvent & { ts?: number };
+    return JSON.stringify(content);
+  };
+  const history = replay.map(({ event }) => fingerprint(event));
+  const received = buffered.flatMap((update) => update.item ? [fingerprint(update.item.event)] : []);
+  let overlap = Math.min(history.length, received.length);
+  while (overlap > 0 && !received.slice(0, overlap).every((value, i) => value === history[history.length - overlap + i])) overlap--;
+  const tail = buffered.map((update) => {
+    if (update.item && overlap > 0) {
+      overlap--;
+      const { item: _item, ...state } = update;
+      return state;
+    }
+    return update;
+  });
+  return applyTaskUpdates(task, [
+    ...replay.map((item) => ({ taskId: item.event.sourceTaskId ?? "", item })),
+    ...tail,
+  ]);
+}
+
 /** SDK updates contain snapshots, not deltas. Replace only the active stream. */
 export function applyTaskUpdates(task: LiveTask, updates: TaskUpdate[]): LiveTask {
   const events = [...task.events];

@@ -1,5 +1,6 @@
 mod collaboration;
 mod context_policy;
+mod control;
 mod conversation;
 mod coordination;
 mod diff_watch;
@@ -9,6 +10,7 @@ mod executors;
 mod handoff;
 mod orchestration;
 mod pi_session;
+mod plan_launch;
 mod runner;
 mod store;
 mod worktree;
@@ -308,6 +310,7 @@ async fn start_task(
         effort,
         None,
         None,
+        None,
     )
     .await
 }
@@ -338,6 +341,7 @@ pub(crate) async fn start_task_impl(
         execution::ExecutionConfig,
         String,
     )>,
+    reservation: Option<store::ConversationLaunch>,
 ) -> Result<TaskStartInfo, String> {
     if prompt.trim().is_empty() {
         return Err("请输入任务描述".into());
@@ -352,24 +356,30 @@ pub(crate) async fn start_task_impl(
         .as_deref()
         .map(|id| store.ensure_conversation(id))
         .transpose()?;
-    let _launch = if let Some(id) = conversation_id.as_deref() {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match store.claim_conversation(id) {
-                Ok(guard) => break Some(guard),
-                Err(_)
-                    if workflow_owner.is_some()
-                        && store.conversation_mutating(id)?
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let _launch =
+        if let Some(guard) = reservation {
+            Some(store.accept_conversation_launch(
+                conversation_id.as_deref().ok_or("交接缺少会话")?,
+                guard,
+            )?)
+        } else if let Some(id) = conversation_id.as_deref() {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match store.claim_conversation(id) {
+                    Ok(guard) => break Some(guard),
+                    Err(_)
+                        if workflow_owner.is_some()
+                            && store.conversation_mutating(id)?
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     let initial_execution = execution::ExecutionConfig { model, effort };
     let initial_requested = if let (Some(owner), Some(target)) = (
         workflow_owner.as_deref(),
@@ -941,6 +951,57 @@ fn confirm_conversation_recovery(
         return Err("请先确认旧执行者已结束并核对工作区".into());
     }
     store.confirm_recovery(&task_id)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RecoveryCheck {
+    safe: bool,
+    active_processes: Vec<String>,
+    workspace_changed: bool,
+    workspace_path: String,
+    summary: String,
+}
+
+#[tauri::command]
+fn inspect_conversation_recovery(
+    store: State<'_, Store>,
+    registry: State<'_, TaskRegistry>,
+    task_id: String,
+) -> Result<RecoveryCheck, String> {
+    let task = store.get_task(&task_id)?.ok_or("任务不存在")?;
+    let active_processes = registry
+        .0
+        .lock()
+        .map_err(|_| "task registry poisoned")?
+        .get(&task_id)
+        .map(|running| vec![running.label.clone()])
+        .unwrap_or_default();
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&task.cwd)
+        .output();
+    let workspace_changed = output
+        .as_ref()
+        .map(|value| value.status.success() && !value.stdout.is_empty())
+        .unwrap_or(false);
+    let safe = active_processes.is_empty() && !workspace_changed && output.is_ok();
+    let summary = if !active_processes.is_empty() {
+        format!("仍有受管执行进程运行：{}", active_processes.join("、"))
+    } else if workspace_changed {
+        "工作区存在未提交改动，已暂停自动恢复以避免覆盖成果".into()
+    } else if output.is_err() {
+        "无法读取工作区状态，请手动核对后恢复".into()
+    } else {
+        "已确认旧执行进程结束，工作区没有未提交改动".into()
+    };
+    Ok(RecoveryCheck {
+        safe,
+        active_processes,
+        workspace_changed,
+        workspace_path: task.cwd,
+        summary,
+    })
 }
 
 #[tauri::command]
@@ -2845,6 +2906,12 @@ pub fn run() {
                 worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
             let store_handle = store.clone_handle();
             app.manage(store);
+            let control_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = control::serve(control_app, dir).await {
+                    eprintln!("Local control service: {error}");
+                }
+            });
             // Git maintenance must not delay window creation.
             if let Some(root) = cleanup_root {
                 tauri::async_runtime::spawn_blocking(move || {
@@ -2859,6 +2926,7 @@ pub fn run() {
         .manage(TaskRegistry::default())
         .manage(collaboration::CollaborationRegistry::default())
         .manage(orchestration::GraphRegistry::default())
+        .manage(plan_launch::PlanLaunchRegistry::default())
         .manage(pi_session::PiRegistry::default())
         .manage(diff_watch::DiffWatchRegistry::default())
         .invoke_handler(tauri::generate_handler![
@@ -2867,6 +2935,8 @@ pub fn run() {
             context_policy::update_context_policy,
             orchestration::start_graph_run,
             orchestration::list_graph_runs,
+            plan_launch::start_approved_plan,
+            orchestration::cancel_graph_node,
             orchestration::cancel_graph_run,
             orchestration::integrate_graph_run,
             orchestration::discard_graph_run,
@@ -2886,6 +2956,7 @@ pub fn run() {
             search_conversation_context,
             update_conversation_state,
             confirm_conversation_recovery,
+            inspect_conversation_recovery,
             reset_conversation_binding,
             get_task_diff,
             run_login,

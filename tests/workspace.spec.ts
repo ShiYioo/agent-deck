@@ -103,7 +103,7 @@ test("background windows pause activity while the event queue continues to drain
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await expect(page.locator("html")).toHaveAttribute("data-motion", "paused");
-  await expect(page.locator(".typing-dots span").first()).toHaveCSS("animation-play-state", "paused");
+  await expect(page.locator(".activity-spinner").first()).toHaveCSS("animation-play-state", "paused");
   await page.evaluate(() => (window as unknown as { __emit: (event: string, payload: unknown) => void }).__emit("task-event", {
     taskId: "new-task", event: { type: "assistant_message", text: "background-message" },
   }));
@@ -120,23 +120,23 @@ test("reduced motion disables movement and responds to preference changes", asyn
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await expect(page.locator("html")).toHaveAttribute("data-motion", "reduced");
-  await page.getByRole("button", { name: "选择 harness", exact: true }).click();
+  await page.getByRole("button", { name: "选择运行器", exact: true }).click();
   await expect(page.locator(".dropdown-menu")).toHaveCSS("opacity", "1");
   await expect(page.locator(".dropdown-menu")).toHaveCSS("transform", "none");
   await page.keyboard.press("Escape");
   await expect(page.locator(".dropdown-menu")).toHaveCount(0);
   await page.getByRole("textbox", { name: "消息" }).fill("运行状态");
   await page.getByRole("textbox", { name: "消息" }).press("Enter");
-  await expect(page.locator(".typing-dots span").first()).toHaveCSS("animation-name", "none");
+  await expect(page.locator(".activity-spinner").first()).toHaveCSS("animation-name", "none");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await expect(page.locator("html")).toHaveAttribute("data-motion", "full");
-  await expect(page.locator(".typing-dots span").first()).toHaveCSS("animation-name", "typing-dot");
+  await expect(page.locator(".activity-spinner").first()).toHaveCSS("animation-name", "activity-rotate");
 });
 
 test("rapid menu and sidebar changes leave no stale overlays or active animations", async ({ page }) => {
   await mockDesktop(page);
   await page.goto("/");
-  const trigger = page.getByRole("button", { name: "选择 harness", exact: true });
+  const trigger = page.getByRole("button", { name: "选择运行器", exact: true });
   for (let i = 0; i < 8; i++) {
     await trigger.click();
     await page.keyboard.press("Escape");
@@ -215,10 +215,10 @@ test("mentions and keyboard menus keep the selected agent and model", async ({ p
   await expect(input).toHaveValue("@codex:");
   await input.press("Enter");
   await expect(input).toHaveValue("@codex:gpt-test ");
-  await page.getByRole("button", { name: "选择 harness", exact: true }).press("ArrowDown");
+  await page.getByRole("button", { name: "选择运行器", exact: true }).press("ArrowDown");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("button", { name: "选择 harness", exact: true })).toContainText("Codex");
+  await expect(page.getByRole("button", { name: "选择运行器", exact: true })).toContainText("Codex");
   await page.getByRole("button", { name: "模型", exact: true }).click();
   await expect(page.getByRole("listbox", { name: "模型", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
@@ -271,6 +271,8 @@ test("successful send clears only its draft, running messages queue, and stop re
   await input.fill("执行任务");
   await input.press("Enter");
   await expect(input).toHaveValue("");
+  expect((await page.evaluate(() => (window as unknown as { __testRequests: Record<string, unknown>[] }).__testRequests))[0].attachments)
+    .toEqual([]);
   await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
   await input.fill("补充消息");
   await page.getByRole("button", { name: "加入队列", exact: true }).click();

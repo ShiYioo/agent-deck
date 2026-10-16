@@ -125,7 +125,29 @@ export async function mockDesktop(page: Page, failSend = true) {
           return w.__testContextPolicy = { ...(args.policy as Record<string, unknown>), version: Number(args.expectedVersion) + 1 };
         }
         if (cmd === "list_graph_runs") return structuredClone(w.__testGraphs ?? []);
-        if (cmd === "start_graph_run") {
+        if (cmd === "start_approved_plan") {
+          w.__testApprovedPlanRequest = args;
+          if (w.__testApprovedPlanError) throw new Error(String(w.__testApprovedPlanError));
+          const source = tasks.find((task) => task.id === args.taskId)!;
+          const emit = w.__emit as (event: string, payload: unknown) => void;
+          emit("task-exit", { taskId: source.id, code: null, status: "cancelled" });
+          const nodes = args.nodes as Record<string, unknown>[];
+          if (nodes.length === 1 && !nodes[0].supervision) {
+            const node = nodes[0];
+            const worker = { ...row("planned-worker", 0, String(node.prompt), String(node.harness)),
+              status: "running", cwd: source.cwd, conversation_id: source.conversation_id ?? source.id,
+              model: (node.execution as { model?: string })?.model ?? null };
+            tasks.unshift(worker);
+            if (w.__testApprovedPlanEarlyEvent) {
+              emit("task-event", { taskId: worker.id, event: w.__testApprovedPlanEarlyEvent });
+            }
+            return { kind: "task", task_id: worker.id, run: null };
+          }
+          args.sourceTaskId = source.id;
+          args.maxParallel = 2;
+          args.timeoutSecs = 900;
+        }
+        if (cmd === "start_graph_run" || cmd === "start_approved_plan") {
           if (w.__testGraphError) throw new Error(String(w.__testGraphError));
           w.__testGraphRequest = args;
           const run = {
@@ -137,12 +159,21 @@ export async function mockDesktop(page: Page, failSend = true) {
             })),
           };
           w.__testGraphs = [run];
-          return structuredClone(run);
+          return cmd === "start_approved_plan"
+            ? { kind: "graph", task_id: null, run: structuredClone(run) } : structuredClone(run);
         }
         if (cmd === "cancel_graph_run") {
           const runs = w.__testGraphs as Record<string, unknown>[];
           const run = runs.find((r) => r.id === args.id)!;
           run.status = "cancelled";
+          return;
+        }
+        if (cmd === "cancel_graph_node") {
+          const run = (w.__testGraphs as Record<string, unknown>[]).find((r) => r.id === args.id)!;
+          const node = (run.nodes as Record<string, unknown>[]).find((n) =>
+            (n.spec as Record<string, unknown>).id === args.nodeId)!;
+          node.status = "cancelled";
+          w.__testCancelNodeRequest = args;
           return;
         }
         if (cmd === "integrate_graph_run") {
@@ -238,6 +269,11 @@ export async function mockDesktop(page: Page, failSend = true) {
           w.__testRecoveryConfirmed = args;
           return;
         }
+        if (cmd === "inspect_conversation_recovery") {
+          const blocked = !!w.__testRecoveryBlocked;
+          return { safe: !blocked, active_processes: blocked ? ["zcode"] : [], workspace_changed: false,
+            workspace_path: projects[0].dir, summary: blocked ? "仍有受管执行进程运行：zcode" : "已确认旧执行进程结束，工作区没有未提交改动" };
+        }
         if (cmd === "search_conversation_context") {
           const rows = (w.__testContextRows ?? []) as { task_id: string; harness: string; seq: number; event: Record<string, unknown> }[];
           const matched = rows.filter((row) => JSON.stringify(row.event).includes(String(args.query)));
@@ -247,6 +283,11 @@ export async function mockDesktop(page: Page, failSend = true) {
         }
         if (cmd === "get_task_diff") return "diff --git a/src/App.tsx b/src/App.tsx\n--- a/src/App.tsx\n+++ b/src/App.tsx\n@@ -1 +1 @@\n-const layout = \"previous\";\n+const layout = \"workspace\";\n";
         if (cmd === "discover_models") return ["gpt-test", "provider/a-very-long-model-name-for-layout-checks"];
+        if (cmd === "get_task_events" && (w.__testTaskEvents as Record<string, unknown[]> | undefined)?.[String(args.taskId)]) {
+          const snapshot = structuredClone((w.__testTaskEvents as Record<string, unknown[]>)[String(args.taskId)]);
+          (w.__testBeforeTaskReplay as (() => void) | undefined)?.();
+          return snapshot;
+        }
         if (cmd === "get_task_events") return [
           { type: "user_message", text: "请调整工作台布局，并验证小屏幕下的表现。" },
           { type: "thinking", text: "检查布局和输入区。" },
@@ -257,6 +298,9 @@ export async function mockDesktop(page: Page, failSend = true) {
         ];
         if (cmd === "start_task") {
           if (failSend) throw new Error("模拟启动失败");
+          if (!Object.prototype.hasOwnProperty.call(args, "attachments")) {
+            throw new Error("invalid args `attachments` for command `start_task`");
+          }
           let conversationId: string | null = null;
           if (args.conversationId) {
             const source = tasks.find((task) => task.id === args.conversationId);

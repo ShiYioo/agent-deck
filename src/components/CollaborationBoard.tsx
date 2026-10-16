@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Play, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { GitFork, Play, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
   getContextPolicy, getSetting, listGraphRuns, resetConversationBinding, setSetting, startGraphRun, updateContextPolicy,
   type ContextPolicy, type GraphNodeSpec, type GraphRun,
 } from "../api";
 import { inheritedExecution } from "../api";
 import { ExecutionPicker } from "./ExecutionPicker";
+import { RelationshipGraph } from "./RelationshipGraph";
 
 const harnesses = ["codex", "opencode", "zcode", "deck"];
 const defaults: ContextPolicy = {
@@ -152,8 +153,20 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
     </details>
     <details className="context-disclosure" onToggle={(e) => setOpened(e.currentTarget.open)}>
       <summary>多模型并行</summary>
-      <div className="orchestration-hint">把任务拆给多个模型同时执行，各自产出后汇总。</div>
       {opened && <>
+        <RelationshipGraph nodes={nodes.map((spec) => ({ spec, status: "pending" }))} />
+        <button type="button" className="context-command" disabled={locked}
+           title="载入示例：OpenCode 指挥 Zcode，Codex 指挥 Deck；可继续添加任务链" aria-label="配置指挥示例"
+          onClick={() => {
+            if (nodes.some((n) => n.prompt.trim()) && !window.confirm("替换当前任务图草稿？")) return;
+            setNodes([
+              { id: "opencode-zcode", harness: "zcode", prompt: "", dependencies: [], read_only: true,
+                supervision: { commander: "opencode", max_rounds: 3 } },
+              { id: "codex-deck", harness: "deck", prompt: "", dependencies: [], read_only: true,
+                supervision: { commander: "codex", max_rounds: 3 } },
+            ]);
+            setParallel(2);
+           }}><GitFork size={14} />指挥示例</button>
         <form className="graph-editor" onSubmit={(event) => {
           event.preventDefault();
           const current = epoch.current;
@@ -164,15 +177,31 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
         }}>
           {nodes.map((node, index) => <div className="graph-node-editor" key={node.id}>
             <div className="graph-node-heading"><code>{node.id}</code>
-               <select aria-label={`${node.id} harness`} value={node.harness} disabled={locked} onChange={(e) => updateNode(index, { harness: e.target.value, execution: inheritedExecution() })}>
+               <select aria-label={`${node.id} harness`} value={node.harness} disabled={locked} onChange={(e) => updateNode(index, {
+                 harness: e.target.value, execution: inheritedExecution(),
+                 supervision: node.supervision?.commander === e.target.value ? null : node.supervision,
+               })}>
                  {harnesses.map((h) => <option key={h}>{h}</option>)}
               </select>
+               <select aria-label={`${node.id} 指挥方`} value={node.supervision?.commander ?? ""} disabled={locked}
+                 onChange={(e) => updateNode(index, { supervision: e.target.value ? {
+                   commander: e.target.value, max_rounds: node.supervision?.max_rounds ?? 3,
+                 } : null })}>
+                 <option value="">独立协作</option>
+                 {harnesses.filter((h) => h !== node.harness).map((h) => <option key={h} value={h}>{h} 指挥与验收</option>)}
+               </select>
+               {node.supervision && <label>轮数<input aria-label={`${node.id} 最大轮数`} type="number" min={1} max={3}
+                 disabled={locked} value={node.supervision.max_rounds}
+                 onChange={(e) => updateNode(index, { supervision: { ...node.supervision!, max_rounds: Number(e.target.value) } })} /></label>}
               <label><input type="checkbox" checked={node.read_only} disabled={locked} onChange={(e) => updateNode(index, { read_only: e.target.checked })} />只读</label>
               <button type="button" className="icon-button" title={`移除 ${node.id}`} aria-label={`移除 ${node.id}`} disabled={locked || nodes.length === 1}
                 onClick={() => setNodes((p) => p.filter((n) => n.id !== node.id).map((n) => ({ ...n, dependencies: n.dependencies.filter((d) => d !== node.id) })))}><Trash2 size={14} /></button>
             </div>
             <ExecutionPicker harness={node.harness} value={node.execution ?? inheritedExecution()} taskId={taskId}
               label={`${node.id} `} disabled={locked} onChange={(execution) => updateNode(index, { execution })} />
+            {node.supervision && <ExecutionPicker harness={node.supervision.commander}
+              value={node.supervision.execution ?? inheritedExecution()} taskId={taskId} label={`${node.id} 指挥 `}
+              disabled={locked} onChange={(execution) => updateNode(index, { supervision: { ...node.supervision!, execution } })} />}
             <textarea aria-label={`${node.id} 任务要求`} required maxLength={16000} rows={2} disabled={locked} value={node.prompt}
               onChange={(e) => updateNode(index, { prompt: e.target.value })} />
             {nodes.length > 1 && <fieldset disabled={locked}><legend>依赖</legend><div className="graph-options">
@@ -181,9 +210,15 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
             </div></fieldset>}
           </div>)}
           <div className="graph-toolbar">
+            <button type="button" className="context-command" aria-label="添加指挥链" title="添加指挥链"
+              disabled={locked || nodes.length >= 12}
+              onClick={() => setNodes((p) => [...p, {
+                id: `task-${nextId.current++}`, harness: "codex", prompt: "", dependencies: [], read_only: true,
+                supervision: { commander: "opencode", max_rounds: 3 },
+              }])}><GitFork size={16} />添加指挥链</button>
             <button type="button" className="icon-button" aria-label="添加协作任务" title="添加协作任务" disabled={locked || nodes.length >= 12}
               onClick={() => setNodes((p) => [...p, { id: `task-${nextId.current++}`, harness: "codex", prompt: "", dependencies: [], read_only: true }])}><Plus size={16} /></button>
-            <label>并行<input aria-label="并行数量" type="number" min={1} max={3} value={parallel} disabled={locked} onChange={(e) => setParallel(Number(e.target.value))} /></label>
+            <label>并发上限<input aria-label="并行数量" type="number" min={1} max={4} value={parallel} disabled={locked} onChange={(e) => setParallel(Number(e.target.value))} /></label>
             <label>分钟<input aria-label="协作总时限" type="number" min={1} max={60} value={minutes} disabled={locked} onChange={(e) => setMinutes(Number(e.target.value))} /></label>
             <button type="submit" className="icon-button" aria-label="启动并行协作" title="启动并行协作" disabled={locked}><Play size={16} /></button>
           </div>

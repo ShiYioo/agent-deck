@@ -1,5 +1,5 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelLeft, SquarePen, ArrowDown, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff, PenLine } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PanelLeft, SquarePen, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff, PenLine } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
@@ -19,6 +19,7 @@ import {
   getSetting,
   getTaskDiff,
   getTaskEvents,
+  getTaskReplay,
   getTurnArtifacts,
   undoTaskFile,
   openArtifact,
@@ -34,12 +35,14 @@ import {
   setSetting,
   startTask,
   startCollaboration,
+  startApprovedPlan,
   getExecutionDefaults,
   setExecutionDefaults,
   inheritedExecution,
 } from "./api";
-import type { Collaboration, ExecutionConfig, PhaseExecution } from "./api";
-import { buildConversation, foldToolRows } from "./conversation";
+import type { Collaboration, ExecutionConfig, PhaseExecution, GraphRun } from "./api";
+import { ConversationTimeline } from "./components/ConversationTimeline";
+import { ConversationStatus, type ConversationPhase } from "./components/ConversationStatus";
 import { ContextUsageBadge } from "./components/ContextUsageBadge";
 import { detectExecutorMention } from "./executorMention";
 import { ExecutionPicker, effortLabel, readableModel } from "./components/ExecutionPicker";
@@ -47,9 +50,10 @@ import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
 import QuestionCard, { type QuestionField } from "./components/QuestionCard";
 import CollaborationResults from "./components/CollaborationResults";
+import { RelationshipGraph } from "./components/RelationshipGraph";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
-import { applyTaskUpdates, type LogItem, type TaskUpdate } from "./taskState";
+import { applyTaskUpdates, restoreTask, type LogItem, type TaskUpdate } from "./taskState";
 import { groupSessions, normalizeMode, sessionKey, transferMode } from "./sessions";
 import { Sidebar, projectName, directoryKey } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
@@ -60,9 +64,7 @@ import { NavigationRail } from "./components/NavigationRail";
 import { Dropdown } from "./components/Dropdown";
 import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
 import { useFrameQueue } from "./hooks/useFrameQueue";
-import { useAutoScroll } from "./hooks/useAutoScroll";
 import { Disclosure } from "./components/Disclosure";
-import { ToolIcon } from "./components/ToolIcon";
 import { TurnArtifactsPanel } from "./components/TurnArtifacts";
 import {
   IconBack,
@@ -74,7 +76,6 @@ import {
 
 const emptyEvents: LogItem[] = [];
 const ConversationContext = lazy(() => import("./components/ConversationContext"));
-const EventLine = lazy(() => import("./components/EventLine").then((module) => ({ default: module.EventLine })));
 const DiffModal = lazy(() => import("./components/DiffModal").then((module) => ({ default: module.DiffModal })));
 const SettingsPage = lazy(() => import("./components/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const CreateProjectModal = lazy(() => import("./components/CreateProjectModal").then((module) => ({ default: module.CreateProjectModal })));
@@ -198,6 +199,8 @@ export default function App() {
   // 协作成果的刷新信号：编辑器启动新编排、或编排状态变化时递增，
   // 让协作成果卡立刻取到新数据（同 RuntimeStatus 的 refreshKey 约定）。
   const [graphRefresh, setGraphRefresh] = useState(0);
+  const [graphActivity, setGraphActivity] = useState<{ taskId: string; runs: GraphRun[] } | null>(null);
+  const updateGraphActivity = useCallback((taskId: string, runs: GraphRun[]) => setGraphActivity({ taskId, runs }), []);
   // 队列「编辑」：撤回完整输入意图到 composer（带版本号驱动注入）
   const [queuedWithdraw, setQueuedWithdraw] = useState<{ text: string; version: number } | null>(null);
   const bumpGraphs = useCallback(() => setGraphRefresh((n) => n + 1), []);
@@ -590,6 +593,10 @@ export default function App() {
         ]);
         refreshHistory();
       }),
+      listen("orchestration-update", () => {
+        bumpGraphs();
+        refreshHistory();
+      }),
       // 原生适配器（opencode）提问：模型提问渲染为可作答卡片
       listen<{ taskId: string; id: string; title?: string; fields?: unknown[]; metadata?: unknown }>("task-form", (event) => {
         const { taskId } = event.payload;
@@ -618,7 +625,7 @@ export default function App() {
     return () => {
       unlisteners.forEach((p) => p.then((un) => un()).catch(() => {}));
     };
-  }, [refreshHistory, enqueueUpdate, flushUpdates, clearApproval, flushQueued, notify]);
+  }, [refreshHistory, enqueueUpdate, flushUpdates, clearApproval, flushQueued, notify, bumpGraphs]);
 
   const selectedConversation = useMemo(() => selected
     ? groupSessions(sidebarTasks).find((session) => session.turns.some((turn) => turn.id === selected))
@@ -627,6 +634,17 @@ export default function App() {
   const handleSend = useCallback(
     async (rawText: string) => {
       setActionError(null);
+      const waiting = selected ? approvals[selected]?.[0] : undefined;
+      if (waiting && "__question" in waiting.args) {
+        try {
+          await invokeTaskCommand(waiting.taskId, "approve", waiting.id, rawText.trim());
+          clearApproval(waiting.taskId, waiting.id);
+          return true;
+        } catch (error) {
+          setActionError(String(error));
+          return false;
+        }
+      }
 
       // /compact [说明]：手动压缩上下文。它不是发给模型的消息，
       // 而是给正在运行的会话下一条压缩指令（需要活着的运行时进程）。
@@ -710,7 +728,15 @@ export default function App() {
       }
 
       const row = selected ? history.find((t) => t.id === selected) : undefined;
+      if (selected && reconfiguringTasks.current.has(selected)) {
+        setActionError("正在交接执行者，请等待交接完成后发送");
+        return false;
+      }
       const runningTask = selected ? liveRef.current[selected] : undefined;
+      if (selected && !runningTask && eventRequests.current.has(selected)) {
+        setActionError("正在恢复会话状态，请稍后发送");
+        return false;
+      }
       const useHarness = atTarget ?? harness;
       const targetConfig = preferencesRef.current[`${executionScope ?? "default"}:${useHarness}`] ?? inheritedExecution();
       const routeModel = atTarget ? atModel ?? targetConfig.model : model.trim() || targetConfig.model;
@@ -829,6 +855,8 @@ export default function App() {
       dispatchTask,
       historyEvents,
       selectedConversation,
+      approvals,
+      clearApproval,
     ],
   );
 
@@ -841,9 +869,38 @@ export default function App() {
     eventRequests.current.add(taskId);
     setLoadingEvents((previous) => new Set(previous).add(taskId));
     try {
-      const events = await getTaskEvents(taskId);
+      await listenersReady.current;
+      const [events, rows] = await Promise.all([
+        getTaskReplay(taskId), listTasks(Number.MAX_SAFE_INTEGER),
+      ]);
       if (deletedTasks.current.has(taskId)) return;
-      setHistoryEvents((prev) => ({ ...prev, [taskId]: events }));
+      flushUpdates();
+      setHistory(rows.filter((row) => !deletedTasks.current.has(row.id)));
+      const row = rows.find((item) => item.id === taskId);
+      const buffered = pendingUpdates.current.get(taskId) ?? [];
+      if (row && (row.status === "running" || buffered.length > 0)) {
+        const restored = restoreTask({
+          harness: row.harness, cwd: row.cwd, prompt: row.prompt,
+          mode: row.mode, model: row.model,
+          effort: row.execution_config?.resolved.effort,
+          executionConfig: row.execution_config,
+          permission: row.harness === "deck" ? row.mode : "auto",
+          projectId: row.project_id, conversationId: row.conversation_id,
+          sessionId: row.session_id ?? undefined,
+          events: [], running: row.status === "running", status: row.status,
+          exitCode: row.exit_code,
+        }, events.map((event) => ({
+          event: { ...event, sourceTaskId: event.sourceTaskId ?? taskId }, key: nextKey(),
+        })), buffered);
+        pendingUpdates.current.delete(taskId);
+        setLive((prev) => prev[taskId] ? prev : ({ ...prev, [taskId]: restored }));
+      } else {
+        const folded = applyTaskUpdates({
+          harness: row?.harness ?? "", cwd: row?.cwd ?? "", prompt: row?.prompt ?? "",
+          mode: row?.mode ?? null, events: [], running: false, exitCode: row?.exit_code ?? null,
+        }, events.map((event) => ({ taskId, item: { event, key: nextKey() } })));
+        setHistoryEvents((prev) => ({ ...prev, [taskId]: folded.events.map((item) => item.event) }));
+      }
     } catch (e) {
       setActionError(`加载对话失败：${String(e)}`);
     } finally {
@@ -854,7 +911,7 @@ export default function App() {
         return next;
       });
     }
-  }, []);
+  }, [flushUpdates, setLive]);
 
   // ↑↓ 历史召回源：最近任务的提示词 + 该轮附件（最新在前、去重、上限 100）
   const historyPrompts = useMemo(() => {
@@ -927,6 +984,17 @@ export default function App() {
    const selectedCanResume = !!selectedSession && !selectedRunning;
   const selectedHarness = selectedRow?.harness ?? selectedLive?.harness ?? harness;
   const selectedStatus = selectedLive?.status ?? selectedRow?.status;
+  const pendingApproval = selected ? approvals[selected]?.[0] : undefined;
+  const activeGraphs = graphActivity?.taskId === selected ? graphActivity.runs.filter((run) => run.status === "running") : [];
+  const guidedActive = collaborations.some((run) => run.status === "running" &&
+    (run.source_task_id === selected || (!!run.conversation_id && run.conversation_id === selectedRow?.conversation_id)));
+  const collaborating = activeGraphs.length > 0 || guidedActive;
+  const conversationPhase: ConversationPhase = selected && loadingEvents.has(selected) ? "restoring" :
+    pendingApproval && selectedRunning ? "waiting" :
+    selectedLive?.compacting ? "compacting" : selectedRunning ? "running" : collaborating ? "collaborating" :
+    selectedStatus === "failed" ? "failed" : selectedStatus === "cancelled" ? "cancelled" : "done";
+  const activityLabel = selectedLive?.todos?.find((todo) => todo.status === "in_progress")?.content ??
+    `${selectedHarness} 正在处理任务`;
   // 轮次产出：任务结束后拉取改动文件与生成工件
   const [turnArtifacts, setTurnArtifacts] = useState<{
     taskId: string;
@@ -1277,7 +1345,16 @@ export default function App() {
             className="new-chat-heading"
           >
             <h1>开始新的任务</h1>
+            <p className="new-chat-description">描述目标，选择运行器，在同一段对话中推进工作。</p>
             {cwd && <span className="new-chat-project">{projects.find((p) => directoryKey(p.dir) === directoryKey(cwd))?.name ?? projectName(cwd)}</span>}
+            <div className="new-chat-starters" aria-label="任务起点">
+              {[
+                ["了解项目", "先梳理当前项目的结构、入口和运行方式，告诉我从哪里开始。"],
+                ["解决问题", "帮我定位并修复这个问题：\n\n预期行为：\n实际行为："],
+                ["安排协作", "@deck 先分析当前任务，提出运行器分工、验收标准和协作计划，等我确认后启动。"],
+              ].map(([label, text]) => <button key={label} onClick={() =>
+                setQueuedWithdraw({ text, version: (queuedWithdraw?.version ?? 0) + 1 })}>{label}</button>)}
+            </div>
           </MotionLayer>
         ) : (
           // ── 任务详情视图 ──
@@ -1285,6 +1362,12 @@ export default function App() {
             key={`session-${conversationKey}`}
             className="task-view flex min-h-0 flex-1 flex-col"
           >
+            <ConversationStatus phase={conversationPhase} harness={selectedHarness}
+              detail={conversationPhase === "running" ? activityLabel :
+                conversationPhase === "waiting" ? "请处理下方请求，任务随后继续" :
+                collaborating ? "进展、关系图与成果见对话下方" : undefined}
+              queued={selectedLive?.queued?.length ?? 0} detailsOpen={detailsOpen}
+              onDetails={() => setDetailsOpen((value) => !value)} />
             <div className="task-controls" hidden={!detailsOpen && selectedStatus !== "failed" && !collaborations.some((item) => item.source_task_id === selected && item.status === "running")}>
             <div className="task-metadata">
               <button
@@ -1529,6 +1612,11 @@ export default function App() {
             {collaborations.filter((item) => item.source_task_id === selected
               || (item.conversation_id && item.conversation_id === (selectedRow?.conversation_id ?? selectedConversation?.turns[0]?.id))).map((item) => (
               <div key={item.id} className="mx-6 mt-2 flex flex-wrap items-center gap-2 text-xs">
+                <div className="w-full"><RelationshipGraph nodes={[{
+                  spec: { id: item.id, harness: item.worker, prompt: `${item.mentor} 指挥 ${item.worker}`, dependencies: [], read_only: item.read_only ?? false,
+                    supervision: { commander: item.mentor, max_rounds: item.max_rounds } },
+                  status: item.status, phase: item.phase, round: item.round,
+                }]} onSelect={item.current_task_id ? () => viewTask(item.current_task_id!) : undefined} /></div>
                 <span>{item.mentor} 指导 {item.worker}{item.read_only ? " · 只读" : ""} · {({
                   planning: "规划", executing: "实施", reviewing: "验收",
                 } as Record<string, string>)[item.phase] ?? item.phase} · 第 {item.round}/{item.max_rounds} 轮 · {({
@@ -1550,7 +1638,7 @@ export default function App() {
 
             {/* 审批卡片：工具授权；ask_user_question 渲染为选项式提问（抄 ZCode AskUserQuestion） */}
             {approval && selectedRunning && (
-              <div className="anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
+              <div className="approval-surface anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
                 {(approvals[approval.taskId]?.length ?? 0) > 1 && (
                   <div className="mb-2 rounded-md bg-amber-100/80 px-2 py-1 text-[11px] text-amber-800">
                     还有 {(approvals[approval.taskId]?.length ?? 0) - 1} 个待处理请求（按顺序应答）
@@ -1558,14 +1646,58 @@ export default function App() {
                 )}
                 {"__plan" in approval.args ? (
                   <CollaborationPlanCard
+                    key={approval.id}
                     taskId={approval.taskId}
                     plan={approval.args.__plan as CollaborationPlan}
-                    onSettled={(summary) => {
-                      bumpGraphs();
-                      invokePiCommand(approval.taskId, "approve", approval.id, summary)
-                        .then(() => clearApproval(approval.taskId, approval.id))
-                        .catch((e) => setActionError(String(e)));
+                    onConfirm={async (nodes) => {
+                      const taskId = approval.taskId;
+                      reconfiguringTasks.current.add(taskId);
+                      try {
+                        const result = await startApprovedPlan(taskId, approval.id, nodes);
+                        clearApproval(taskId, approval.id);
+                        refreshHistory();
+                        bumpGraphs();
+                        if (result.task_id) {
+                          const workerId = result.task_id;
+                          const node = nodes[0];
+                          const rows = await listTasks(Number.MAX_SAFE_INTEGER).catch(() => []);
+                          const worker = rows.find((row) => row.id === workerId);
+                          if (rows.length) setHistory(rows.filter((row) => !deletedTasks.current.has(row.id)));
+                          // The backend starts this worker; attach its live buffer before viewing.
+                          // setLive also drains events received while the handoff was in flight.
+                          setLive((prev) => prev[workerId] ? prev : ({
+                            ...prev,
+                            [workerId]: {
+                              harness: node.harness,
+                              cwd: worker?.cwd ?? selectedRow?.cwd ?? cwd,
+                              prompt: node.prompt,
+                              mode: worker?.mode ?? null,
+                              model: worker?.model ?? node.execution?.model,
+                              effort: worker?.execution_config?.resolved.effort ?? node.execution?.effort,
+                              executionConfig: worker?.execution_config,
+                              permission: "auto",
+                              projectId: worker?.project_id ?? selectedRow?.project_id,
+                              conversationId: worker?.conversation_id,
+                              sessionId: worker?.session_id ?? undefined,
+                              events: [],
+                              running: (worker?.status ?? "running") === "running",
+                              status: worker?.status ?? "running",
+                              exitCode: worker?.exit_code ?? null,
+                            },
+                          }));
+                          setHarness(node.harness);
+                          setModel(worker?.model ?? node.execution?.model ?? "");
+                          setEffort(worker?.execution_config?.resolved.effort ?? node.execution?.effort ?? "");
+                          setMode(worker?.mode ?? "default");
+                          setPermission("auto");
+                          if (worker) setCwd(worker.cwd);
+                          await viewTask(workerId);
+                        }
+                      } finally {
+                        reconfiguringTasks.current.delete(taskId);
+                      }
                     }}
+                    onError={setActionError}
                     onCancel={() =>
                       invokePiCommand(approval.taskId, "reject", approval.id)
                         .then(() => clearApproval(approval.taskId, approval.id))
@@ -1680,16 +1812,14 @@ export default function App() {
               </div>
             )}
 
-            {/* 协作产出卡：与审批卡同在操作区、不随对话滚走。
-                产出属于任务本身，因此不再埋在「上下文与协作设置」里。 */}
-            {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} />}
-
-            {/* 运行指示只在"运行中且无 blocker"时出现（ZCode 同款真值表）：
-                有待答的提问/审批，或正在压缩上下文时，用户已经有明确的事可做/系统在做别的事，
-                再转三点动画就是噪音；blocker 消失后只要还在跑，指示立刻恢复。 */}
-            <LogPanel key={conversationKey} events={selectedEvents} running={selectedRunning}
+            {/* 消息、协作成果和文件共用滚动区；等待回应或压缩时隐藏重复的执行指示。 */}
+            <ConversationTimeline key={conversationKey} events={selectedEvents} running={selectedRunning}
               blocked={!!approval || !!selectedLive?.compacting}
-              loading={!!selected && loadingEvents.has(selected)} footer={artifactsFooter} />
+              activity={activityLabel}
+              loading={!!selected && loadingEvents.has(selected)} footer={<>
+                {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} onViewTask={viewTask} onRuns={updateGraphActivity} />}
+                {artifactsFooter}
+              </>} />
           </MotionLayer>
         )}
 
@@ -1821,6 +1951,11 @@ export default function App() {
             }}
             onSend={handleSend}
             running={selectedRunning}
+            activeHarness={selectedHarness}
+            blockedReason={!selectedRunning && collaborating ? "协作正在使用工作区；请等待结束，或在成果区停止协作" : undefined}
+            responseMode={approval && "__question" in approval.args ? "answer" :
+              approval && "__form" in approval.args ? "form" :
+              approval ? "approval" : undefined}
             contextUsage={selectedLive?.contextUsage}
             historyPrompts={historyPrompts}
             injectedDraft={queuedWithdraw}
@@ -1859,9 +1994,6 @@ export default function App() {
   );
 }
 
-/** 日志 DOM 渲染上限：更早的条目留在库里（回放/导出不受限），界面只挂尾部 */
-const MAX_RENDER = 500;
-
 /** 事件 → 可复制纯文本（消息/工具/错误摘要） */
 function eventsToText(events: { event: AgentEvent }[]): string {
   return events
@@ -1884,127 +2016,6 @@ function eventsToText(events: { event: AgentEvent }[]): string {
     .filter(Boolean)
     .join("\n");
 }
-
-/** Bounded message DOM with user-controlled, frame-coalesced scroll following. */
-const LogPanel = memo(function LogPanel({
-  events,
-  running,
-  blocked,
-  loading,
-  footer,
-}: {
-  events: { event: AgentEvent; key: number }[];
-  running: boolean;
-  /** 有 blocker（提问/审批待答、压缩进行中）时不显示运行指示 */
-  blocked: boolean;
-  loading: boolean;
-  footer?: React.ReactNode;
-}) {
-  const { viewportRef, contentRef, follow, hasOverflow, onScroll, scrollToBottom } = useAutoScroll(events.length);
-
-  const overflow = events.length - MAX_RENDER;
-  const visible = overflow > 0 ? events.slice(overflow) : events;
-  // 事件流 → 语义行 → 视图折叠：归约在 useMemo 内一次完成
-  const display = useMemo(() => foldToolRows(buildConversation(visible)), [visible]);
-  void overflow;
-
-  return (
-    <div className="relative min-h-0 flex-1 flex flex-col">
-      {overflow > 0 && <div className="log-overflow-note">前 {overflow} 条已折叠（完整记录在数据库中）</div>}
-      <div
-        ref={viewportRef}
-        onScroll={onScroll}
-        tabIndex={0}
-        aria-label="会话内容"
-         className="log-scroll min-h-0 flex-1 overflow-y-auto"
-      >
-      <div ref={contentRef} className="log-content">
-      {events.length === 0 && (
-        <div className="py-10 text-center text-stone-400">
-          {loading ? (
-            <span role="status">正在加载对话…</span>
-          ) : running ? (
-            blocked ? null : <LoadingIndicator />
-          ) : (
-            "（暂无日志）"
-          )}
-        </div>
-      )}
-      <Suspense fallback={<div className="content-loading" role="status">正在加载对话…</div>}>
-      {display.map((group) => {
-        if (group.kind === "single") {
-          return <EventLine key={group.row.key} row={group.row} />;
-        }
-        const summary = group.uses
-          .map(({ tool, n, targets, sample }) => {
-            const isSearch = tool === "grep" || tool === "find";
-            if (targets !== null) {
-              if (isSearch) return `${tool} ×${n}（搜索 ${targets} 处）`;
-              const more = targets > sample.length ? ` 等 ${targets} 个文件` : "";
-              return `${tool} ×${n}（${sample.join("、")}${more}）`;
-            }
-            return `${tool} ×${n}`;
-          })
-          .join(" · ");
-        return (
-          <Disclosure
-            key={group.rows[0].key}
-            className="activity-event"
-            title={
-              <>
-                <ToolIcon tool="tool" />
-                <span>
-                  工具操作 ×{group.rows.length}：{summary}
-                </span>
-                {group.deletes > 0 && <span className="text-red-600">删除 {group.deletes}</span>}
-                {group.failed && <span className="text-red-600">含失败</span>}
-              </>
-            }
-          >
-            {group.thoughts.map((row) => <EventLine key={row.key} row={row} />)}
-            {group.rows.map((row) => <EventLine key={row.key} row={row} />)}
-          </Disclosure>
-        );
-      })}
-      </Suspense>
-      {/* 有内容时也要看得出"还在跑"：指示挂在转写末尾，随内容一起滚动 */}
-      {events.length > 0 && running && !blocked && <LoadingIndicator />}
-      {footer}
-      </div>
-      </div>
-      {/* 离底阅读窗：底部 96px 全透明 + 顶部 24px 渐变，流式新内容从渐变下钻出 */}
-      {!follow && <div className="detach-fade" aria-hidden="true" />}
-      <AnimatePresence>
-      {!follow && hasOverflow && (
-        <MotionLayer className="scroll-latest" preset="menu">
-        <button
-           onClick={scrollToBottom}
-           title="回到最新"
-           aria-label="回到最新"
-          className="icon-button"
-        >
-           <ArrowDown size={16} />
-        </button>
-        </MotionLayer>
-      )}
-      </AnimatePresence>
-    </div>
-  );
-});
-
-/** 转写末尾的运行指示：只放动画，不写"正在思考"之类的文案（ZCode 的 loading 同款约定）；
- *  无障碍名用通用的"加载中"——状态不许只靠颜色或动画。 */
-const LoadingIndicator = memo(function LoadingIndicator() {
-  return (
-    <div className="transcript-loading" role="status" aria-label="加载中">
-      <span className="typing-dots inline-flex items-center" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </span>
-    </div>
-  );
-});
 
 let eventKey = 0;
 const nextKey = () => eventKey++;

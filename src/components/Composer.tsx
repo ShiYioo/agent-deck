@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Play, Square, Plus, ShieldAlert, ShieldCheck, Paperclip, FileText, X } from "lucide-react";
+import { ArrowUp, Square, ShieldAlert, ShieldCheck, Paperclip, FileText, X, CornerDownLeft } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { MotionLayer } from "../motion/MotionProvider";
 import { useTextareaAutosize } from "../hooks/useTextareaAutosize";
@@ -45,6 +45,9 @@ export const Composer = memo(function Composer({
   draftKey,
   onStop,
   catalogVersion,
+  activeHarness,
+  responseMode,
+  blockedReason,
 }: {
   cwd: string;
   onCwdChange: (v: string) => void;
@@ -69,6 +72,9 @@ export const Composer = memo(function Composer({
   draftKey: string;
   onStop: () => void;
   catalogVersion: boolean;
+  activeHarness?: string;
+  responseMode?: "answer" | "form" | "approval";
+  blockedReason?: string;
   /** 任务运行中：发送将入队而非直接派发 */
   running?: boolean;
   /** 运行中上下文用量（ZCode 交互层设计）：deck 运行时随回复实时更新 */
@@ -332,7 +338,7 @@ export const Composer = memo(function Composer({
   };
 
   const send = async () => {
-    if (!text.trim() || sending) return;
+    if (!text.trim() || sending || blockedReason || (switching && !answering)) return;
     const key = draftKey;
     const submitted = text;
     setSending(true);
@@ -348,6 +354,16 @@ export const Composer = memo(function Composer({
   };
 
   const accent = HARNESS_ACCENT[harness] ?? "var(--text-3)";
+  const routedHarness = /^@(deck|zcode|codex|opencode)(?::[^\s]+)?(?:\s|$)/i.exec(text)?.[1].toLowerCase() ?? harness;
+  const switching = !!running && routedHarness !== (activeHarness ?? harness);
+  const answering = responseMode === "answer";
+  const sendLabel = blockedReason ? "等待协作结束" : answering ? "发送回答" : switching ? "等待当前任务结束后接力" : running ? "加入队列" : "发送";
+  const sendHint = blockedReason ?? (answering ? "这条消息会直接回答当前问题" :
+    responseMode === "form" ? "请在问题卡中作答；补充消息会排队" :
+    responseMode === "approval" ? "请先处理上方请求；补充消息会排队" :
+    switching ? `当前由 ${activeHarness} 执行，结束或停止后可交给 ${routedHarness}` :
+    running ? "补充消息会排队，本轮结束后继续" :
+    `发送给 ${routedHarness} · Enter 发送，Shift + Enter 换行`);
 
   // 动态发现真实模型列表（codex 读 desktop 状态文件、opencode 调 CLI）；
   // 失败或为空则回退静态目录
@@ -435,8 +451,8 @@ export const Composer = memo(function Composer({
             }
           }}
         >
-          <Plus size={20} />
-          <span className="sr-only">{activeProject?.name ?? projectName(cwd)}</span>
+          <IconFolder size={14} />
+          <span>{activeProject?.name ?? (cwd ? projectName(cwd) : "选择项目")}</span>
         </button>
         <button
           onClick={pickAttachments}
@@ -680,7 +696,7 @@ export const Composer = memo(function Composer({
             { value: "codex", label: "Codex · GPT" },
             { value: "opencode", label: "OpenCode" },
           ]}
-          title="选择 harness"
+           title="选择运行器"
           displayLabel={harness === "deck" ? "AgentDeck" : harness === "codex" ? "Codex" : harness === "zcode" ? "ZCode" : "OpenCode"}
         />
         </div>
@@ -724,13 +740,6 @@ export const Composer = memo(function Composer({
           /></div>
         )}
 
-        {running && (
-          <span className="typing-dots mr-1 flex items-center" aria-label="运行中">
-            <span />
-            <span />
-            <span />
-          </span>
-        )}
         {running && contextUsage && (
           <span
             className="mr-1 rounded-full bg-stone-100 px-2 py-0.5 text-[10px] text-stone-500"
@@ -744,13 +753,17 @@ export const Composer = memo(function Composer({
 
         <button
            onClick={() => running && !text.trim() ? onStop() : void send()}
-           disabled={sending || (!running && !text.trim())}
+            disabled={sending || !!blockedReason || (!!text.trim() && switching && !answering) || (!running && !text.trim())}
            className="send-button"
-           title={running && !text.trim() ? "停止" : running ? "加入队列" : "发送"}
-           aria-label={running && !text.trim() ? "停止" : running ? "加入队列" : "发送"}
+            title={running && !text.trim() ? "停止" : sendLabel}
+            aria-label={running && !text.trim() ? "停止" : sendLabel}
          >
-           {running && !text.trim() ? <Square size={12} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
+            {running && !text.trim() ? <Square size={12} fill="currentColor" /> : <ArrowUp size={17} />}
         </button>
+      </div>
+      <div className="composer-behavior" aria-live="polite">
+        <CornerDownLeft size={12} aria-hidden="true" /><span>{sendHint}</span>
+        {sending && <span>正在发送…</span>}
       </div>
 
     </div>

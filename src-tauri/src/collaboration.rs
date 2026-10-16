@@ -331,6 +331,7 @@ async fn stage(
         config.effort,
         Some(run.phase.clone()),
         None,
+        None,
     )
     .await?;
     run.current_task_id = Some(task.task_id.clone());

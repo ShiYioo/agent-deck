@@ -79,7 +79,7 @@ test("read-only mode survives both harness selection and mention routing", async
   await expect.poll(async () => (await requests(page)).length).toBe(1);
   expect((await requests(page))[0].mode).toBe("readonly");
   await finish(page, "new-task", "只读检查完成。");
-  await page.getByRole("button", { name: "选择 harness", exact: true }).click();
+  await page.getByRole("button", { name: "选择运行器", exact: true }).click();
   await page.getByRole("option", { name: "ZCode · GLM", exact: true }).click();
   await expect(page.getByRole("button", { name: "权限模式", exact: true })).toContainText("只读规划");
 });
@@ -89,7 +89,7 @@ test("a running conversation refuses another harness and preserves its unsent re
   await send(page, "开始实施");
   await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
   await send(page, "@codex 接手实施");
-  await expect(page.getByRole("alert")).toContainText("当前会话已有执行者");
+  await expect(page.getByRole("button", { name: "等待当前任务结束后接力", exact: true })).toBeDisabled();
   expect((await requests(page)).length).toBe(1);
   await expect(page.getByRole("textbox", { name: "消息", exact: true })).toHaveValue("@codex 接手实施");
 });

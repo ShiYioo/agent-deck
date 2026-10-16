@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { GitMerge, RefreshCw, Square, Trash2 } from "lucide-react";
 import {
-  cancelGraphRun, discardGraphRun, integrateGraphRun, listGraphRuns, type GraphRun,
+  cancelGraphNode, cancelGraphRun, discardGraphRun, integrateGraphRun, listGraphRuns, type GraphRun,
 } from "../api";
 import { inheritedExecution } from "../api";
 import { DelegationExecution } from "./DelegationExecution";
 import { effortLabel } from "./ExecutionPicker";
+import { RelationshipGraph, phaseLabels } from "./RelationshipGraph";
 
 /**
- * 多模型协作的产出卡：放在对话与输入区之间，用户问完一句话就能在这里看到结果。
+ * 多模型协作的产出卡：与消息、文件产出共用对话滚动区。
  *
  * 此前这部分渲染在「上下文与协作设置 → 多模型并行」里，要展开三层才看得到 ——
  * 产出被放在了设置区，这是位置错了，不是文案问题。所以：
@@ -35,6 +36,9 @@ function taskLine(prompt: string) {
 
 /** 只信任结构完整的节点：后端可能返回历史或残缺记录，界面不该因此整块崩掉。 */
 const nodesOf = (run: GraphRun) => (run.nodes ?? []).filter((node) => Boolean(node?.spec));
+const activeExecution = (node: GraphRun["nodes"][number]) =>
+  node.spec.supervision && ["planning", "reviewing"].includes(node.phase ?? "")
+    ? node.spec.supervision.execution : node.spec.execution;
 
 function headline(run: GraphRun, nodes: GraphRun["nodes"]) {
   const total = nodes.length;
@@ -42,6 +46,11 @@ function headline(run: GraphRun, nodes: GraphRun["nodes"]) {
   // run.status 是 done 也可能有节点失败，绝不能因此谎报「都完成了」
   const failed = nodes.filter((node) => ["failed", "blocked", "interrupted", "needs_attention"].includes(node.status)).length;
   const writes = nodes.some((node) => !node.spec.read_only);
+  if (nodes.some((node) => node.spec.supervision)) {
+    if (run.status === "running") return `并行指挥与协作 · ${finished}/${total} 条任务链已完成`;
+    if (run.status === "done") return `${total} 条任务链已完成${writes && !run.integrated ? " · 等待采纳改动" : ""}`;
+    return `${finished}/${total} 条任务链已完成 · ${STATUS_LABEL[run.status] ?? run.status}`;
+  }
   if (run.status === "running") {
     return failed
       ? `正在并行工作 · ${finished}/${total} 已完成，${failed} 个出问题`
@@ -57,11 +66,15 @@ function headline(run: GraphRun, nodes: GraphRun["nodes"]) {
   return `${total} 个模型 · ${STATUS_LABEL[run.status] ?? run.status}`;
 }
 
-export default function CollaborationResults({ taskId, refreshKey = 0 }: { taskId: string; refreshKey?: number }) {
+export default function CollaborationResults({ taskId, refreshKey = 0, onViewTask, onRuns }: {
+  taskId: string; refreshKey?: number; onViewTask?: (taskId: string) => void;
+  onRuns?: (taskId: string, runs: GraphRun[]) => void;
+}) {
   const [runs, setRuns] = useState<GraphRun[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const epoch = useRef(0);
+  const details = useRef(new Map<string, HTMLDetailsElement>());
 
   useEffect(() => {
     ++epoch.current;
@@ -73,16 +86,17 @@ export default function CollaborationResults({ taskId, refreshKey = 0 }: { taskI
         const rows = await listGraphRuns(taskId);
         if (disposed || current !== epoch.current) return;
         setRuns(rows ?? []);
+        onRuns?.(taskId, rows ?? []);
         setError(null);
         if (rows?.some((run) => run.status === "running")) timer = setTimeout(refresh, 1000);
       } catch {
-        // 任务可能尚未落库 —— 这不该在界面上变成一个错误条
-        if (!disposed && current === epoch.current) setRuns([]);
+        // 短暂断连不能抹去已知的运行状态；继续同步，避免永久停在旧状态。
+        if (!disposed && current === epoch.current) timer = setTimeout(refresh, 3000);
       }
     };
     void refresh();
     return () => { disposed = true; clearTimeout(timer); };
-  }, [taskId, refreshKey]);
+  }, [taskId, refreshKey, onRuns]);
 
   const action = async (fn: () => Promise<void>) => {
     if (busy) return;
@@ -94,11 +108,15 @@ export default function CollaborationResults({ taskId, refreshKey = 0 }: { taskI
   };
 
   // 动作之后一律回读服务端状态：只改本地副本会让「丢弃/采纳/停止」看起来没生效
-  const reload = async () => { setRuns((await listGraphRuns(taskId)) ?? []); };
+  const reload = async () => {
+    const rows = (await listGraphRuns(taskId)) ?? [];
+    setRuns(rows);
+    onRuns?.(taskId, rows);
+  };
 
   if (!runs.length) return null;
 
-  return <div className="anim-pop mx-6 mt-2 space-y-2 rounded-xl border border-stone-200 bg-white p-3">
+  return <div className="collaboration-results anim-pop mt-2 space-y-2">
     {runs.map((run) => {
       const nodes = nodesOf(run);
       const writes = nodes.some((node) => !node.spec.read_only);
@@ -124,9 +142,16 @@ export default function CollaborationResults({ taskId, refreshKey = 0 }: { taskI
             onClick={() => void action(reload)}><RefreshCw size={14} /></button>
         </div>
         {run.error && <div className="context-error">{run.error}</div>}
+        <RelationshipGraph nodes={nodes} onSelect={(id) => {
+          const detail = details.current.get(`${run.id}:${id}`);
+          if (detail) { detail.open = true; detail.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+        }} />
         <ul className="m-0 list-none p-0">
           {nodes.map((node) => <li key={node.spec.id}>
-            <details className="graph-node-result">
+            <details className="graph-node-result" ref={(element) => {
+              const key = `${run.id}:${node.spec.id}`;
+              if (element) details.current.set(key, element); else details.current.delete(key);
+            }}>
               <summary>
                 <span className="node-task">{taskLine(node.spec.prompt)}</span>
                 <span className="node-source">{node.spec.harness}</span>
@@ -134,11 +159,27 @@ export default function CollaborationResults({ taskId, refreshKey = 0 }: { taskI
               </summary>
               <div className="node-detail">
                 <div className="node-prompt">{node.spec.prompt}</div>
-                {run.status === "running" && node.status === "pending" && <DelegationExecution runId={run.id} target={node.spec.id}
+                {run.status === "running" && ["pending", "running"].includes(node.status) &&
+                  <button className="context-command" disabled={busy} aria-label={`停止任务链 ${node.spec.id}`}
+                    onClick={() => void action(async () => { await cancelGraphNode(run.id, node.spec.id); await reload(); })}>
+                    <Square size={12} />停止此任务链
+                  </button>}
+                {node.spec.supervision && <div className="node-stage-history">
+                  {(node.history ?? []).map((stage) => <details key={stage.task_id}>
+                    <summary>{stage.harness} · {phaseLabels[stage.phase] ?? stage.phase} · 第 {stage.round} 轮</summary>
+                    <pre>{stage.report}</pre>
+                    {onViewTask && <button className="context-command" onClick={() => onViewTask(stage.task_id)}>查看阶段记录</button>}
+                  </details>)}
+                  {node.task_id && onViewTask && <button className="context-command" onClick={() => onViewTask(node.task_id!)}>查看当前阶段</button>}
+                </div>}
+                {run.status === "running" && (node.status === "pending" || (node.status === "running" && node.spec.supervision)) && <DelegationExecution runId={run.id} target={node.spec.id}
                   harness={node.spec.harness} initial={node.spec.execution ?? inheritedExecution()} taskId={taskId} />}
+                {run.status === "running" && node.spec.supervision && <DelegationExecution runId={run.id}
+                  target={`${node.spec.id}:commander`} harness={node.spec.supervision.commander}
+                  initial={node.spec.supervision.execution ?? inheritedExecution()} taskId={taskId} />}
                 {node.task_id && <div className="execution-current">
-                  <span title={node.spec.execution?.model ?? ""}>{node.spec.execution?.model || "默认模型"}</span>
-                  <span>{effortLabel(node.spec.execution?.effort || "默认")}</span>
+                  <span title={activeExecution(node)?.model ?? ""}>{activeExecution(node)?.model || "默认模型"}</span>
+                  <span>{effortLabel(activeExecution(node)?.effort || "默认")}</span>
                 </div>}
                 {node.error && <div className="context-error">{node.error}</div>}
                 {node.report

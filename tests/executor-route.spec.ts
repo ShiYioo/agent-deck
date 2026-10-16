@@ -3,7 +3,7 @@ import { mockDesktop } from "./helpers";
 
 /** 切到 OpenCode 会话（执行器指名拦截的“当前执行器”）。 */
 async function useOpenCode(page: Page) {
-  await page.getByRole("button", { name: "选择 harness" }).click();
+  await page.getByRole("button", { name: "选择运行器" }).click();
   await page.getByRole("option", { name: "OpenCode" }).click();
 }
 

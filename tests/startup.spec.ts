@@ -9,7 +9,7 @@ test("first screen skips unused catalogs and repeated agent selection shares dis
   // 默认 harness 是 zcode：首屏发现 zcode 模型目录（有目录的 harness 才发现）
   expect((await calls()).filter((command) => command === "discover_models")).toHaveLength(1);
   expect((await calls()).filter((command) => command === "list_model_profiles")).toHaveLength(0);
-  const trigger = page.getByRole("button", { name: "选择 harness", exact: true });
+  const trigger = page.getByRole("button", { name: "选择运行器", exact: true });
   await trigger.click();
   await page.getByRole("option", { name: "Codex · GPT", exact: true }).click();
   await expect.poll(async () => (await calls()).filter((command) => command === "discover_models").length).toBe(2);
@@ -39,7 +39,7 @@ test("loading conversations have feedback and repeated clicks do not duplicate r
   });
   const chat = page.getByRole("button", { name: "调整工作台布局", exact: true });
   await chat.click();
-  await expect(page.getByText("正在加载对话…", { exact: true })).toBeVisible();
+  await expect(page.getByText("正在恢复对话…", { exact: true })).toBeVisible();
   await chat.click();
   await page.evaluate(() => (window as unknown as { __resolveEvents: () => void }).__resolveEvents());
   await expect(page.locator(".assistant-markdown h2")).toHaveText("已完成");

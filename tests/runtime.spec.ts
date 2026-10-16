@@ -169,10 +169,10 @@ test("changing the harness preserves the conversation without reusing the other 
   await mockDesktop(page, false);
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
-  await page.getByRole("button", { name: "选择 harness", exact: true }).press("ArrowDown");
+  await page.getByRole("button", { name: "选择运行器", exact: true }).press("ArrowDown");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("button", { name: "选择 harness", exact: true })).toContainText("Codex");
+  await expect(page.getByRole("button", { name: "选择运行器", exact: true })).toContainText("Codex");
   await send(page, "使用选中的新运行器");
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as { __testRequests: unknown[] }).__testRequests.length)).toBe(1);
@@ -207,8 +207,8 @@ test("an agent-proposed collaboration plan starts the shared graph run only afte
   // 计划以自然语言呈现，用户只需判断「要不要这么做」，不必自己搭 DAG
   await expect(page.getByText("建议这样拆给多个模型")).toBeVisible();
   await expect(page.getByText("实现与测试互相独立，可并行后再对比")).toBeVisible();
-  await expect(page.getByText("把侧栏改成浮层")).toBeVisible();
-  await expect(page.getByText("补 860px 断点回归测试")).toBeVisible();
+  await expect(page.getByRole("list").getByText("把侧栏改成浮层")).toBeVisible();
+  await expect(page.getByRole("list").getByText("补 860px 断点回归测试")).toBeVisible();
   await expect(page.getByText("等 impl 先完成")).toBeVisible();
   await expect(page.getByText(/最多 2 路并行，总时限 15 分钟，共 2 个节点/)).toBeVisible();
   expect(await page.evaluate(() =>
@@ -226,10 +226,16 @@ test("an agent-proposed collaboration plan starts the shared graph run only afte
   ]);
   expect(request.maxParallel).toBe(2);
   expect(request.timeoutSecs).toBe(900);
-  // agent 阻塞在审批通道上，必须收到回执才会继续
+  // 原子审批接力由后端释放规划者，再启动任务图。
   expect(await page.evaluate(() =>
-    (window as unknown as { __testCalls: string[] }).__testCalls)).toContain("pi_command");
+    (window as unknown as { __testCalls: string[] }).__testCalls)).toContain("start_approved_plan");
   await expect(page.getByRole("button", { name: "确认并启动", exact: true })).toHaveCount(0);
+  await expect(page.locator(".conversation-status")).toContainText("协作进行中");
+  const input = page.getByRole("textbox", { name: "消息", exact: true });
+  await input.fill("协作结束后再检查结果");
+  await input.press("Enter");
+  await expect(input).toHaveValue("协作结束后再检查结果");
+  await expect(page.getByRole("button", { name: "等待协作结束", exact: true })).toBeDisabled();
 });
 
 test("cancelling an agent-proposed plan releases the agent without starting a run", async ({ page }) => {
