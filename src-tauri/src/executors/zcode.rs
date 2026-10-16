@@ -6,7 +6,35 @@
 
 use serde_json::Value;
 
-use super::{AgentEvent, error_kind, event_kind, field_str, is_error};
+use super::{AgentEvent, diff_counts, error_kind, event_kind, field_str, is_error};
+
+/// ZCode 的工具事件有两种形态：扁平 `tool_name`/`name`，以及嵌套 `tool: { name, input }`。
+/// 名字解析不出来只能显示字面量 "tool"——既看不到用了什么工具，也看不到动了哪个文件。
+fn zcode_tool(obj: &Value, inner: &Value) -> (String, Option<Value>) {
+    let nested = obj
+        .get("tool")
+        .filter(|v| v.is_object())
+        .or_else(|| inner.get("tool").filter(|v| v.is_object()));
+    let name = field_str(obj, &["tool_name", "name"])
+        .or_else(|| field_str(inner, &["tool_name", "name"]))
+        .or_else(|| nested.and_then(|t| field_str(t, &["name", "tool_name"])))
+        .or_else(|| obj.get("tool").and_then(Value::as_str))
+        .or_else(|| inner.get("tool").and_then(Value::as_str))
+        // 最后才退到调用 ID（至少唯一）；ID 只是兜底标签，不是配对键
+        .or_else(|| field_str(obj, TOOL_ID_KEYS))
+        .unwrap_or("tool")
+        .to_string();
+    let args = ["input", "parameters", "arguments", "args"]
+        .iter()
+        .find_map(|k| obj.get(*k).filter(|v| v.is_object()).cloned())
+        .or_else(|| {
+            ["input", "parameters", "arguments", "args"]
+                .iter()
+                .find_map(|k| inner.get(*k).filter(|v| v.is_object()).cloned())
+        })
+        .or_else(|| nested.and_then(|t| t.get("input")).filter(|v| v.is_object()).cloned());
+    (name, args)
+}
 
 const TOOL_ID_KEYS: &[&str] = &["tool_use_id", "tool_call_id", "call_id", "id"];
 
@@ -64,13 +92,11 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             }
         }
         "tool_use" | "tool_call" => {
-            let tool = field_str(obj, &["tool_name", "name", "tool"])
-                .or_else(|| field_str(inner, &["tool_name", "name", "tool"]))
-                .unwrap_or("tool");
+            let (tool, args) = zcode_tool(obj, inner);
             events.push(AgentEvent::ToolUse {
-                tool: tool.to_string(),
+                tool,
                 detail: summarize_args(obj),
-                args: None,
+                args,
             });
         }
         "tool_result" | "tool_call_result" | "task_output" => {
@@ -78,8 +104,19 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
             let detail = field_str(obj, &["output", "result", "content", "text"])
                 .unwrap_or_default()
                 .to_string();
-            let tool = field_str(obj, TOOL_ID_KEYS).unwrap_or("tool").to_string();
-            events.push(AgentEvent::ToolResult { tool, ok, detail });
+            // 结果行用工具名（前端按名配对）：旧代码取的是 call id，永远配不上 tool_use
+            let (tool, _) = zcode_tool(obj, inner);
+            let patch = field_str(obj, &["diff", "patch"])
+                .or_else(|| field_str(inner, &["diff", "patch"]))
+                .unwrap_or_default();
+            let (added, removed) = diff_counts(patch);
+            events.push(AgentEvent::ToolResult {
+                tool,
+                ok,
+                detail,
+                added,
+                removed,
+            });
         }
         // opencode --format json 的增量消息：message.part / message.part.updated
         k if k.contains("message.part") => {
@@ -188,21 +225,25 @@ where
                         }
                     }
                     "tool_use" | "tool_call" => {
-                        let tool =
-                            field_str(block, &["tool_name", "name", "tool"]).unwrap_or("tool");
+                        let (tool, args) = zcode_tool(block, block);
                         events.push(AgentEvent::ToolUse {
-                            tool: tool.to_string(),
+                            tool,
                             detail: summarize_args(block),
-                            args: None,
+                            args,
                         });
                     }
                     "tool_result" | "tool_call_result" => {
+                        let (tool, _) = zcode_tool(block, block);
+                        let patch = field_str(block, &["diff", "patch"]).unwrap_or_default();
+                        let (added, removed) = diff_counts(patch);
                         events.push(AgentEvent::ToolResult {
-                            tool: field_str(block, TOOL_ID_KEYS).unwrap_or("tool").to_string(),
+                            tool,
                             ok: !is_error(block),
                             detail: field_str(block, &["output", "result", "content"])
                                 .unwrap_or_default()
                                 .to_string(),
+                            added,
+                            removed,
                         });
                     }
                     _ => {}
@@ -427,5 +468,20 @@ mod tests {
             e,
             AgentEvent::Status { text, compacting: Some(false) } if text == "上下文压缩失败"
         )));
+    }
+
+    #[test]
+    fn nested_tool_name_and_args_are_resolved() {
+        // 嵌套形态 tool:{name,input}：名字与入参都要解析出来（否则行里是字面量 "tool"）
+        let use_events =
+            events(r#"{"kind":"tool_use","tool":{"name":"edit","input":{"path":"src/a.ts"}}}"#);
+        assert!(matches!(
+            &use_events[..],
+            [AgentEvent::ToolUse { tool, args: Some(a), .. }]
+                if tool == "edit" && a["path"] == "src/a.ts"
+        ));
+        // 结果行用工具名（前端按名配对）——旧代码取 call id，永远配不上 tool_use
+        let done = events(r#"{"kind":"tool_result","tool":"edit","id":"t1","output":"ok"}"#);
+        assert!(matches!(&done[..], [AgentEvent::ToolResult { tool, .. }] if tool == "edit"));
     }
 }

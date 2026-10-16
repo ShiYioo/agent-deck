@@ -11,7 +11,7 @@
 
 use serde_json::Value;
 
-use super::{AgentEvent, error_kind};
+use super::{AgentEvent, diff_counts, error_kind};
 
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -170,6 +170,8 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                                     tool: "question".into(),
                                     ok: true,
                                     detail: question_answer_detail(output),
+                                    added: None,
+                                    removed: None,
                                 });
                             } else {
                                 // completed 自带 input（CLI 平铺形态只有一条完成事件）时
@@ -186,10 +188,25 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                                         args: Some(done_input.clone()),
                                     });
                                 }
+                                // 编辑类工具的 diff 在 state.metadata.diff（opencode SDK 语义）；
+                                // 取出来算 +/- 行数，output 为空时把 diff 本身当正文
+                                let patch = state
+                                    .pointer("/metadata/diff")
+                                    .or_else(|| state.pointer("/metadata/filediff/diff"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                let (added, removed) = diff_counts(patch);
+                                let detail = if output.trim().is_empty() && !patch.is_empty() {
+                                    truncate(patch, 2000)
+                                } else {
+                                    truncate(output, 400)
+                                };
                                 events.push(AgentEvent::ToolResult {
                                     tool,
                                     ok: true,
-                                    detail: truncate(output, 400),
+                                    detail,
+                                    added,
+                                    removed,
                                 });
                             }
                         }
@@ -202,6 +219,8 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                                 tool,
                                 ok: false,
                                 detail: truncate(err, 300),
+                                added: None,
+                                removed: None,
                             });
                         }
                         _ => {}
@@ -415,7 +434,7 @@ mod tests {
         );
         assert!(matches!(
             &server_done[..],
-            [AgentEvent::ToolResult { tool, ok: true, detail }]
+            [AgentEvent::ToolResult { tool, ok: true, detail, .. }]
                 if tool == "read" && detail == "line1"
         ));
 
@@ -461,7 +480,7 @@ mod tests {
         );
         assert!(matches!(
             &done[..],
-            [AgentEvent::ToolResult { tool, ok: true, detail }]
+            [AgentEvent::ToolResult { tool, ok: true, detail, .. }]
                 if tool == "question" && detail == "你喜欢猫还是狗？：狗"
         ));
 
@@ -471,7 +490,7 @@ mod tests {
         );
         assert!(matches!(
             &no_input[..],
-            [AgentEvent::ToolResult { tool, ok: true, detail: rd }]
+            [AgentEvent::ToolResult { tool, ok: true, detail: rd, .. }]
                 if tool == "question" && rd == "你喜欢猫还是狗？：猫"
         ));
 
@@ -580,5 +599,21 @@ mod tests {
                 line: "plain".into()
             }]
         );
+    }
+
+    #[test]
+    fn edit_metadata_diff_becomes_added_removed() {
+        // 编辑类工具的 diff 在 state.metadata.diff：路径 + 行数都要能出来
+        let parsed = events(
+            r#"{"type":"message.part.updated","part":{"type":"tool","tool":"edit","callID":"c1","state":{"status":"completed","input":{"filePath":"src/a.ts"},"output":"","metadata":{"diff":"@@ -1,2 +1,3 @@\n context\n-old\n+new\n+more\n"}}}}"#,
+        );
+        assert!(matches!(
+            &parsed[..],
+            [AgentEvent::ToolUse { args: Some(a), .. }, AgentEvent::ToolResult {
+                added: Some(2),
+                removed: Some(1),
+                ..
+            }] if a["filePath"] == "src/a.ts"
+        ));
     }
 }

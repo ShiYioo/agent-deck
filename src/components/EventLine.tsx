@@ -10,7 +10,7 @@ import {
   IconXCircle,
   IconInfo,
 } from "./icons";
-import type { ConversationRow } from "../conversation";
+import { isDeleteTool, type ConversationRow } from "../conversation";
 
 /** 语义行渲染：行由 conversation.ts 归约产生，本组件只做投影。 */
 export const EventLine = memo(function EventLine({
@@ -58,7 +58,7 @@ export const EventLine = memo(function EventLine({
         // 进行中：工具名 + 入参投影（命令默认展开保持可见）
         return (
           <Disclosure className="activity-event" defaultOpen={row.isCommand}
-            title={<><ToolIcon tool={row.tool} /><span>{row.tool}</span></>}>
+            title={<><ToolIcon tool={row.tool} /><span>{row.tool}</span>{opBadge(row)}{targetLabel(row)}</>}>
             <pre>{row.detail ?? ""}</pre>
           </Disclosure>
         );
@@ -69,7 +69,7 @@ export const EventLine = memo(function EventLine({
         return (
           <div role="alert" className="event-error">
             <Disclosure className="activity-event" defaultOpen
-              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{row.tool} 失败</span></>}>
+              title={<><IconXCircle size={13} /><span className="text-red-600 font-medium">{row.tool} 失败</span>{targetLabel(row)}</>}>
               <pre className="text-red-600">{content || "（无错误详情）"}</pre>
             </Disclosure>
           </div>
@@ -81,7 +81,7 @@ export const EventLine = memo(function EventLine({
       const defaultOpen = row.isCommand || row.isQuestion;
       return (
         <Disclosure className="activity-event" defaultOpen={defaultOpen}
-          title={<><IconCheckCircle size={13} /><span>{row.tool} · 已完成</span></>}>
+          title={<><IconCheckCircle size={13} /><span>{row.tool} · 已完成</span>{opBadge(row)}{targetLabel(row)}{diffBadge(row)}</>}>
           <pre>{content}</pre>
         </Disclosure>
       );
@@ -126,6 +126,43 @@ export const EventLine = memo(function EventLine({
       return null;
   }
 });
+
+/** 文件类工具的目标路径：提到行标题上，"改了/删了哪个文件"不用展开就能看到 */
+function targetLabel(row: { target?: string }) {
+  if (!row.target) return null;
+  return (
+    <span className="min-w-0 truncate font-mono text-[11px] text-stone-400" title={row.target}>
+      {row.target}
+    </span>
+  );
+}
+
+/** 操作语义徽标：删除/新增要一眼可见。
+ *  四种运行器同源：deck 的 delete_file、codex 的 changes[].kind、CLI 工具名的 delete/remove。 */
+function opBadge(row: { tool: string; args?: Record<string, unknown> }) {
+  const changes = row.args?.changes;
+  const kind = Array.isArray(changes) ? (changes[0] as { kind?: string } | undefined)?.kind : undefined;
+  const label = isDeleteTool(row.tool, row.args)
+    ? "删除"
+    : kind === "add" || kind === "create" || row.tool.toLowerCase() === "write"
+      ? "新增"
+      : undefined;
+  if (!label) return null;
+  return (
+    <span className={`shrink-0 ${label === "删除" ? "text-red-600" : "text-emerald-600"}`}>{label}</span>
+  );
+}
+
+/** 改动行数徽标：工具自带 diff 时显示 +N −M（pi 的 edit 返回里就带 diff） */
+function diffBadge(row: { added?: number; removed?: number }) {
+  if (!row.added && !row.removed) return null;
+  return (
+    <span className="shrink-0 font-mono text-[11px]">
+      {row.added ? <span className="text-emerald-600">+{row.added}</span> : null}
+      {row.removed ? <span className="ml-1 text-red-600">−{row.removed}</span> : null}
+    </span>
+  );
+}
 
 function MessageActions({ text }: { text: string }) {
   const [feedback, setFeedback] = useState<"idle" | "copied" | "failed">("idle");

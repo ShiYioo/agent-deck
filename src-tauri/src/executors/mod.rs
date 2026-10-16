@@ -235,6 +235,11 @@ pub enum AgentEvent {
         tool: String,
         ok: bool,
         detail: String,
+        /// 本次改动的新增/删除行数（工具返回自带 diff 时才有）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        added: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        removed: Option<u64>,
     },
     Status {
         text: String,
@@ -271,6 +276,31 @@ pub(crate) fn event_kind(value: &Value) -> Option<&str> {
 pub(crate) fn field_str<'a>(obj: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|k| obj.get(*k).and_then(Value::as_str))
+}
+
+/// 统一的 diff 文本 → (新增, 删除) 行数，跳过 `+++`/`---` 文件头。
+/// 各 harness 的 diff 来源不同（opencode 的 metadata.diff、codex 的 changes[].diff、
+/// zcode 的 patch、deck/pi 的 details.patch），收敛到同一个字段，前端只认 added/removed。
+pub(crate) fn diff_counts(patch: &str) -> (Option<u64>, Option<u64>) {
+    if patch.trim().is_empty() {
+        return (None, None);
+    }
+    let (mut added, mut removed) = (0u64, 0u64);
+    for line in patch.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    if added == 0 && removed == 0 {
+        (None, None)
+    } else {
+        (Some(added), Some(removed))
+    }
 }
 
 pub(crate) fn is_error(obj: &Value) -> bool {

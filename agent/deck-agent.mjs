@@ -101,6 +101,7 @@ function buildUniversalPrompt(cwd, memories = []) {
     "3) 小步修改 + 即时验证：每次改动后运行编译/测试/脚本自证；验证不过就修，不许留红。",
     "4) 诚实汇报：失败如实报告并附错误原文；绝不伪造成功。",
     "5) 善用自持能力：查资料用 webfetch；额度紧张时用 list_models/switch_model 自主管理模型。",
+    "6) 删除文件用 delete_file（不用 shell 的 rm/del）：这样删除了哪个文件在对话里可见。",
   ].join("\n");
 
   const output = [
@@ -303,6 +304,7 @@ function buildTools(mode, cwd) {
     TODO_TOOL,
     ASK_USER_TOOL,
     LIST_MODELS_TOOL,
+    DELETE_FILE_TOOL,
   ];
   // 权限门：approved 模式下全部工具（含委派）执行前经 UI 审批
   return mode === "approved" ? tools.map(wrapWithGate) : tools;
@@ -524,6 +526,37 @@ function extractFinalText(raw) {
 // ── 自持能力：网络抓取 / todo 进度 / 模型池自省（向 ZCode/OpenCode 看齐） ──
 
 let sessionTodos = []; // 会话内 todo 状态（switch_model/重建会话不跨保留）
+
+/** 删除文件：pi 只有 read/write/edit/bash，删除只能靠 shell 的 rm——于是"删了什么"
+ *  在转录里没有一等信号。补一个删除工具（对齐 ZCode 把文件操作当一等公民的做法），
+ *  路径与结果都会在对话行上可见。 */
+const DELETE_FILE_TOOL = {
+  name: "delete_file",
+  description:
+    "删除工作区里的一个文件。删除文件请优先用这个工具，而不是 shell 的 rm/del——它会在对话里明确显示删除了哪个文件。只删文件，不删目录、不支持通配符。",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "要删除的文件路径（相对工作目录或绝对路径）" },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+  execute: async (_id, args) => {
+    const raw = String(args?.path ?? "").trim();
+    if (!raw) return { content: [{ type: "text", text: "path 不能为空" }], isError: true };
+    const target = path.resolve(currentCwd ?? process.cwd(), raw);
+    try {
+      if ((await fs.promises.stat(target)).isDirectory()) {
+        return { content: [{ type: "text", text: `拒绝删除目录：${raw}（本工具只删文件）` }], isError: true };
+      }
+      await fs.promises.unlink(target);
+      return { content: [{ type: "text", text: `已删除 ${raw}` }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: `删除失败：${error?.message ?? error}` }], isError: true };
+    }
+  },
+};
 
 const WEBFETCH_TOOL = {
   name: "webfetch",

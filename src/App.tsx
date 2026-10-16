@@ -906,8 +906,22 @@ export default function App() {
   }, [selected, fetchTurnArtifacts]);
 
   useEffect(() => {
-    // 完成或失败的任务展示产出；运行中清掉旧面板
-    if (!selected || selectedRunning || !["done", "failed"].includes(selectedStatus ?? "")) {
+    if (!selected) {
+      setTurnArtifacts(null);
+      artifactsTaskRef.current = null;
+      return;
+    }
+    // 运行中：定时刷新本轮产出——文件的删除/修改一发生就能看到（不必等任务结束）
+    if (selectedRunning) {
+      void fetchTurnArtifacts(selected);
+      const timer = setInterval(() => {
+        artifactsTaskRef.current = null;
+        void fetchTurnArtifacts(selected);
+      }, 4000);
+      return () => clearInterval(timer);
+    }
+    // 结束：非成功/失败态清掉面板
+    if (!["done", "failed"].includes(selectedStatus ?? "")) {
       setTurnArtifacts(null);
       artifactsTaskRef.current = null;
       return;
@@ -1827,10 +1841,12 @@ const LogPanel = memo(function LogPanel({
           return <EventLine key={group.row.key} row={group.row} />;
         }
         const summary = group.uses
-          .map(({ tool, n, targets }) => {
+          .map(({ tool, n, targets, sample }) => {
             const isSearch = tool === "grep" || tool === "find";
             if (targets !== null) {
-              return isSearch ? `${tool} ×${n}（搜索 ${targets} 处）` : `${tool} ×${n}（${targets} 个文件）`;
+              if (isSearch) return `${tool} ×${n}（搜索 ${targets} 处）`;
+              const more = targets > sample.length ? ` 等 ${targets} 个文件` : "";
+              return `${tool} ×${n}（${sample.join("、")}${more}）`;
             }
             return `${tool} ×${n}`;
           })
@@ -1845,6 +1861,7 @@ const LogPanel = memo(function LogPanel({
                 <span>
                   工具操作 ×{group.rows.length}：{summary}
                 </span>
+                {group.deletes > 0 && <span className="text-red-600">删除 {group.deletes}</span>}
                 {group.failed && <span className="text-red-600">含失败</span>}
               </>
             }

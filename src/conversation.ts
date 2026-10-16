@@ -23,6 +23,11 @@ export type ConversationRow =
       args?: Record<string, unknown>;
       isCommand: boolean;
       isQuestion: boolean;
+      /** 文件类工具的目标路径：提到行标题上（"改了/删了哪个文件"一眼可见） */
+      target?: string;
+      /** 本轮改动的 +/- 行数（工具自带 diff 时才有） */
+      added?: number;
+      removed?: number;
     }
   | { kind: "status"; key: number; text: string; retryKey?: string | null; compacting?: boolean }
   | {
@@ -42,6 +47,23 @@ type ToolRow = Extract<ConversationRow, { kind: "tool" }>;
 
 function isCommandTool(tool: string): boolean {
   return COMMAND_TOOL.test(tool);
+}
+
+/** 删除语义：工具名或 changes[].kind —— 四种运行器统一（deck 的 delete_file、
+ *  codex 的 changes[].kind=delete、CLI 工具名的 rm/remove/unlink）。 */
+export function isDeleteTool(tool: string, args?: Record<string, unknown>): boolean {
+  const changes = args?.changes;
+  const kind = Array.isArray(changes) ? (changes[0] as { kind?: string } | undefined)?.kind : undefined;
+  return kind === "delete" || kind === "remove" || /delete|remove|unlink/.test(tool.toLowerCase());
+}
+
+/** 文件类工具的目标路径（pi 用 path、opencode 用 filePath、其它用 file_path） */
+function fileTarget(args: Record<string, unknown> | undefined): string | undefined {
+  const record = args ?? {};
+  for (const key of ["path", "file_path", "filePath", "file"]) {
+    if (typeof record[key] === "string") return record[key] as string;
+  }
+  return undefined;
 }
 
 /** 事件流 → 行。入参保持 {event, key} 形状（live 流与 DB 回放同构）。 */
@@ -76,6 +98,7 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
         const row: ToolRow = {
           kind: "tool", key, tool: ev.tool, status: "running",
           detail: ev.detail || undefined, args, isCommand, isQuestion,
+          target: isCommand ? undefined : fileTarget(args),
         };
         rows.push(row);
         openByTool.set(ev.tool, rows.length - 1);
@@ -87,6 +110,8 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
           const row = rows[openIndex] as ToolRow;
           row.status = ev.ok ? "completed" : "failed";
           row.output = ev.detail;
+          row.added = ev.added;
+          row.removed = ev.removed;
           openByTool.delete(ev.tool);
         } else {
           // 无前置 tool_use（CLI 平铺/回放缺事件）：合成完整行
@@ -94,6 +119,8 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
             kind: "tool", key, tool: ev.tool,
             status: ev.ok ? "completed" : "failed",
             output: ev.detail,
+            added: ev.added,
+            removed: ev.removed,
             isCommand: isCommandTool(ev.tool),
             isQuestion: false,
           });
@@ -172,8 +199,10 @@ export type ToolSegment = {
   kind: "segment";
   rows: ToolRow[];
   thoughts: ConversationRow[];
-  uses: { tool: string; n: number; targets: number | null }[];
+  uses: { tool: string; n: number; targets: number | null; sample: string[] }[];
   failed: boolean;
+  /** 片段内包含删除操作的行数（折叠后也要能看出"删过文件"） */
+  deletes: number;
 };
 export type DisplayRow =
   | { kind: "single"; row: ConversationRow }
@@ -209,8 +238,10 @@ export function foldToolRows(rows: ConversationRow[]): DisplayRow[] {
     const uses = new Map<string, number>();
     const files = new Map<string, Set<string>>();
     let failed = false;
+    let deletes = 0;
     for (const row of tools) {
       uses.set(row.tool, (uses.get(row.tool) ?? 0) + 1);
+      if (isDeleteTool(row.tool, row.args)) deletes += 1;
       const target = rowTargets(row);
       if (target) {
         const set = files.get(row.tool) ?? new Set<string>();
@@ -224,9 +255,11 @@ export function foldToolRows(rows: ConversationRow[]): DisplayRow[] {
         kind: "segment", rows: tools, thoughts: tail,
         uses: [...uses.entries()].map(([tool, n]) => {
           const targets = files.get(tool);
-          return { tool, n, targets: targets ? targets.size : null };
+          // 摘要里点名文件（最多 2 个）——"改了/删了哪些文件"不该只有个数字
+          return { tool, n, targets: targets ? targets.size : null, sample: targets ? [...targets].slice(0, 2) : [] };
         }),
         failed,
+        deletes,
       });
     } else {
       for (const row of seg) out.push({ kind: "single", row });

@@ -5,7 +5,7 @@ export type AgentEvent = (
   | { type: "assistant_message"; text: string; streamId?: string; streaming?: boolean }
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
   | { type: "tool_use"; tool: string; detail: string; args?: Record<string, unknown> }
-  | { type: "tool_result"; tool: string; ok: boolean; detail: string }
+  | { type: "tool_result"; tool: string; ok: boolean; detail: string; added?: number; removed?: number }
   | { type: "status"; text: string; retryKey?: string | null; compacting?: boolean }
   | {
       type: "complete";
@@ -117,13 +117,27 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
     };
   }
   if (t === "tool_execution_end") {
-    const out = ev.result as { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
-    const text =
-      out?.content
-        ?.map((c) => c.text ?? "")
-        .join("\n")
-         ?? "";
-    return { type: "tool_result", tool: String(ev.toolName ?? "tool"), ok: !ev.isError && !out?.isError, detail: text };
+    const out = ev.result as
+      | { content?: Array<{ text?: string }>; isError?: boolean; details?: unknown }
+      | undefined;
+    const text = out?.content?.map((c) => c.text ?? "").join("\n") ?? "";
+    // pi 的工具 details 自带 diff（edit 的 EditToolDetails{diff,patch}）——带上它，
+    // 行上才能显示 +/- 行数、展开能看 diff。以前这里只取 content 文本，diff 被丢掉。
+    const details = (out?.details ?? (ev as { details?: unknown }).details) as
+      | { diff?: string; patch?: string }
+      | undefined;
+    const diff = typeof details?.diff === "string" ? details.diff : "";
+    const patch = typeof details?.patch === "string" ? details.patch : "";
+    const counts = diffCounts(patch || diff);
+    const body = diff ? (text.trim() ? `${text}\n\n${diff}` : diff) : text;
+    return {
+      type: "tool_result",
+      tool: String(ev.toolName ?? "tool"),
+      ok: !ev.isError && !out?.isError,
+      detail: body.slice(0, 20_000),
+      added: counts.added,
+      removed: counts.removed,
+    };
   }
   if (t === "message_end" || t === "message_update") {
     const message = ev.message as
@@ -278,6 +292,20 @@ function compactLines(lines: Array<string | undefined>): string {
     .join("\\n");
 }
 
+/** 统一 patch / 显示 diff 的 +/- 行数（跳过 `+++`/`---` 文件头） */
+function diffCounts(patch: string): { added?: number; removed?: number } {
+  if (!patch) return {};
+  let added = 0;
+  let removed = 0;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) added += 1;
+    else if (line.startsWith("-")) removed += 1;
+  }
+  if (added === 0 && removed === 0) return {};
+  return { added, removed };
+}
+
 /** 逐工具入参摘要：模型工具调用在对话流里一眼可读（ZCode 同款语义） */
 export function summarizeToolInput(toolName: string, input: unknown): string {
   const record = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
@@ -308,8 +336,15 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
     fieldLine(record, "offset"),
     fieldLine(record, "limit"),
   ]);
-  if (t === "write") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "offset"), fieldLine(record, "limit")]);
-  if (t === "edit") return compactLines([fieldLine(record, "file_path"), fieldLine(record, "replace_all")]);
+  // 写/改：pi 的入参是 { path, content } / { path, edits[] }——只认 file_path 会让行里啥都没有
+  if (t === "write") return compactLines([
+    fieldLine(record, "path") ?? fieldLine(record, "file_path"),
+    typeof record.content === "string" ? `content: ${record.content.split("\n").length} 行` : undefined,
+  ]);
+  if (t === "edit") return compactLines([
+    fieldLine(record, "path") ?? fieldLine(record, "file_path"),
+    Array.isArray(record.edits) ? `edits: ${record.edits.length}` : fieldLine(record, "replace_all"),
+  ]);
   if (t === "grep") return compactLines([fieldLine(record, "pattern"), fieldLine(record, "path"), fieldLine(record, "glob")]);
   if (t === "find" || t === "glob") return compactLines([fieldLine(record, "pattern"), fieldLine(record, "path")]);
   if (t === "webfetch" || t === "webfetchtool") return compactLines([fieldLine(record, "url"), fieldLine(record, "prompt")]);

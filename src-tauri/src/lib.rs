@@ -1497,6 +1497,29 @@ fn turn_git_ok(dir: &std::path::Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// `git diff --numstat` 输出 → path → (added, removed)；二进制文件计为 "-"（None）
+fn parse_numstat(
+    out: &str,
+) -> std::collections::BTreeMap<String, (Option<u64>, Option<u64>)> {
+    let mut map = std::collections::BTreeMap::new();
+    for line in out.lines() {
+        let mut parts = line.split('\t');
+        let (Some(added), Some(removed), Some(path)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        map.insert(
+            path.to_string(),
+            (
+                if added == "-" { None } else { added.parse().ok() },
+                if removed == "-" { None } else { removed.parse().ok() },
+            ),
+        );
+    }
+    map
+}
+
 /// status --porcelain 行 → (xy, path)；处理 R 重命名的 "new -> old" 与引号
 
 #[tauri::command]
@@ -1627,6 +1650,14 @@ fn classify_turn_changes(
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
             .unwrap_or(false)
     };
+    // 真实 +/- 行数：git numstat（非 git 目录只有"新增文件行数"可信，修改留空）
+    let numstat = if git_inside {
+        turn_git_ok(dir, &["diff", "--numstat", "HEAD"])
+            .map(|out| parse_numstat(&out))
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeMap::new()
+    };
 
     let mut files = Vec::new();
     for (rel, (mtime, size)) in &current {
@@ -1643,13 +1674,18 @@ fn classify_turn_changes(
         }
         let bytes = std::fs::read(dir.join(rel)).unwrap_or_default();
         let binary = bytes.contains(&0);
+        let is_new = !manifest_entries.contains_key(rel);
         let (added, removed) = if binary {
             (None, None)
+        } else if is_new {
+            // 新增文件：全部行数即新增
+            (Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1), Some(0))
+        } else if let Some((a, r)) = numstat.get(rel) {
+            // 修改文件：用 git numstat 的真实 +/-，不再拿文件总行数冒充
+            (*a, *r)
         } else {
-            (
-                Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1),
-                Some(0),
-            )
+            // 非 git 目录的修改：没有可信的 diff 统计，宁缺毋滥
+            (None, None)
         };
         let diff = if git_inside {
             turn_git_ok(dir, &["diff", "HEAD", "--unified=3", "--", rel])

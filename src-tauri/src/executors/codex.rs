@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use super::{AgentEvent, error_kind, field_str, is_error};
+use super::{AgentEvent, diff_counts, error_kind, field_str, is_error};
 
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -44,6 +44,8 @@ fn process_value(events: &mut Vec<AgentEvent>, obj: &Value) {
                 tool,
                 ok: obj["ok"] == true,
                 detail: obj["result"].to_string(),
+                added: None,
+                removed: None,
             });
         }
         "thread.started" | "session.started" => {
@@ -159,18 +161,62 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                 tool: "shell".into(),
                 ok: exit_code.map(|c| c == 0).unwrap_or(!is_error(item)),
                 detail,
+                added: None,
+                removed: None,
             });
         }
         "file_change" => {
-            let detail = item
+            // 文件变更：把「路径 + 新增/修改/删除」解析成一等信号（此前只把 changes
+            // 压成 JSON 字符串、且不发结果行 —— 于是行里看不到文件、状态永远"进行中"）。
+            let changes = item
                 .get("changes")
-                .map(|c| c.to_string())
-                .or_else(|| field_str(item, &["path"]).map(str::to_string))
+                .and_then(Value::as_array)
+                .cloned()
                 .unwrap_or_default();
+            let op_label = |kind: Option<&str>| match kind {
+                Some("add") | Some("create") => "新增",
+                Some("delete") | Some("remove") => "删除",
+                _ => "修改",
+            };
+            let summary = changes
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} {}",
+                        op_label(field_str(c, &["kind", "op", "type"])),
+                        field_str(c, &["path"]).unwrap_or("")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("、");
+            let summary = if summary.is_empty() {
+                field_str(item, &["path"]).unwrap_or_default().to_string()
+            } else {
+                summary
+            };
+            let patch = changes
+                .iter()
+                .find_map(|c| field_str(c, &["diff", "patch"]))
+                .unwrap_or_default();
+            let (added, removed) = diff_counts(patch);
+            let args = serde_json::json!({
+                "path": changes
+                    .first()
+                    .and_then(|c| field_str(c, &["path"]))
+                    .unwrap_or_default(),
+                "changes": changes,
+            });
             events.push(AgentEvent::ToolUse {
-                tool: "files".into(),
-                detail,
-                args: None,
+                tool: "apply_patch".into(),
+                detail: summary.clone(),
+                args: Some(args),
+            });
+            events.push(AgentEvent::ToolResult {
+                tool: "apply_patch".into(),
+                ok: true,
+                detail: summary,
+                added,
+                removed,
             });
         }
         "web_search" => {
@@ -217,6 +263,8 @@ fn process_item(events: &mut Vec<AgentEvent>, item: Option<&Value>) {
                     tool: format!("mcp:{server}/{tool}"),
                     ok: status != "error",
                     detail: output.chars().take(400).collect(),
+                    added: None,
+                    removed: None,
                 });
             }
         }
@@ -448,5 +496,27 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn file_change_names_files_ops_and_closes_the_row() {
+        // 文件变更必须给出「操作 + 路径」，并且要有配对的 result（否则行永远停在"进行中"）
+        let cmd = events(
+            r#"{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"src/a.ts","kind":"update","diff":"@@ -1 +1 @@\n-a\n+b\n"},{"path":"src/gone.ts","kind":"delete"}]}}"#,
+        );
+        assert!(matches!(
+            &cmd[..],
+            [AgentEvent::ToolUse { tool, detail, args: Some(a) }, AgentEvent::ToolResult {
+                tool: result_tool,
+                ok: true,
+                added: Some(1),
+                removed: Some(1),
+                ..
+            }] if tool == "apply_patch"
+                && detail == "修改 src/a.ts、删除 src/gone.ts"
+                && result_tool == "apply_patch"
+                && a["path"] == "src/a.ts"
+                && a["changes"][1]["kind"] == "delete"
+        ));
     }
 }
