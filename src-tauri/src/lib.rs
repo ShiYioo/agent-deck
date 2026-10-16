@@ -1520,11 +1520,9 @@ fn parse_numstat(
     map
 }
 
-/// status --porcelain 行 → (xy, path)；处理 R 重命名的 "new -> old" 与引号
-
-#[tauri::command]
-/// 目录快照（浅层 manifest）：rel -> [mtime_ms, size]，跳过依赖/隐藏/worktrees
-fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value {
+/// 目录快照（浅层 manifest）：rel -> [mtime_ms, size]，跳过依赖/隐藏/worktrees。
+/// pub(crate)：Store 在轮次结束（finish_task）时调用它冻结"结果快照"。
+pub(crate) fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value {
     let skip = |name: &str| {
         matches!(
             name,
@@ -1583,6 +1581,7 @@ fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value {
 fn classify_turn_changes(
     dir: &std::path::Path,
     manifest: &serde_json::Value,
+    frozen: Option<&serde_json::Value>,
 ) -> Vec<TurnFileChange> {
     let empty = serde_json::Map::new();
     let manifest_entries = manifest
@@ -1590,6 +1589,21 @@ fn classify_turn_changes(
         .and_then(|v| v.as_object())
         .unwrap_or(&empty);
     let mut current: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    if let Some(entries) = frozen
+        .and_then(|f| f.get("entries"))
+        .and_then(|v| v.as_object())
+    {
+        // 冻结快照：本轮结束时的目录状态——之后别的会话再增/改/删都不计入本轮
+        for (rel, entry) in entries {
+            current.insert(
+                rel.clone(),
+                (
+                    entry.get(0).and_then(|v| v.as_u64()).unwrap_or(0),
+                    entry.get(1).and_then(|v| v.as_u64()).unwrap_or(0),
+                ),
+            );
+        }
+    } else {
     let skip = |name: &str| {
         matches!(
             name,
@@ -1639,6 +1653,7 @@ fn classify_turn_changes(
             current.insert(rel, (mtime, meta.len()));
         }
     }
+    } // 无冻结快照（运行中）：扫当前目录
 
     let git_inside = {
         use std::process::Stdio;
@@ -1739,10 +1754,17 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         .baseline
         .as_deref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    // 轮次结束时冻结的结果快照：有它就按"基线 vs 快照"判定——会话之间彻底隔离；
+    // 运行中没有快照，才回落"基线 vs 当前目录"（本轮进行中的进度）
+    let frozen: Option<serde_json::Value> = row
+        .result_manifest
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .filter(|m| m.get("entries").map(|v| v.is_object()).unwrap_or(false));
     if let Some(manifest) =
         manifest.filter(|m| m.get("entries").map(|v| v.is_object()).unwrap_or(false))
     {
-        let files = classify_turn_changes(dir_path, &manifest);
+        let files = classify_turn_changes(dir_path, &manifest, frozen.as_ref());
         let mut artifacts = Vec::new();
         for f in &files {
             if let Some(kind) = artifact_kind(&f.path) {

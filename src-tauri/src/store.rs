@@ -71,6 +71,8 @@ pub struct TaskRow {
     pub attachments: Option<String>,
     /// 轮次基线 manifest（任务开始时目录快照 JSON；产出面板按它判定本轮改动）
     pub baseline: Option<String>,
+    /// 轮次结束时冻结的目录快照：产出 = 基线 vs 它，之后别的会话改动不再计入本轮
+    pub result_manifest: Option<String>,
     /// running | done | failed | cancelled
     pub status: String,
     pub exit_code: Option<i64>,
@@ -97,6 +99,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         exit_code: row.get(14)?,
         created_at: row.get(15)?,
         finished_at: row.get(16)?,
+        result_manifest: row.get(19)?,
         conversation_seq: row.get(17)?,
         execution_config: row
             .get::<_, Option<String>>(18)?
@@ -253,6 +256,7 @@ impl Store {
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN conversation_seq INTEGER", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN execution_config TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN baseline TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN result_manifest TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN attachments TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT", []);
         let _ = conn.execute("ALTER TABLE model_profiles ADD COLUMN model TEXT", []);
@@ -393,6 +397,17 @@ impl Store {
     }
 
     /// 落档附件路径列表（JSON 数组）。
+    /// 轮次结束冻结：目录快照（manifest），产出面板按"基线 vs 它"判定本轮改动。
+    pub fn set_task_result_manifest(&self, task_id: &str, manifest: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        conn.execute(
+            "UPDATE tasks SET result_manifest = ?2 WHERE id = ?1",
+            params![task_id, manifest],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
     /// 轮次基线：任务开始时的目录快照（manifest），产出面板按它判定本轮改动。
     pub fn set_task_baseline(&self, task_id: &str, baseline: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
@@ -427,6 +442,21 @@ impl Store {
 
     /// 结束任务：status = done | failed | cancelled。
     pub fn finish_task(&self, task_id: &str, status: &str, exit_code: Option<i64>) {
+        // 轮次结束冻结目录快照：之后别的会话再改/删文件，也不会被算进本轮的产出
+        //（产出 = 基线 vs 这个快照；运行中/未开始的任务不冻结）
+        if status != "running" {
+            if let Ok(Some(row)) = self.get_task(task_id) {
+                if row.baseline.is_some() {
+                    let path = std::path::PathBuf::from(row.worktree_dir.unwrap_or(row.cwd));
+                    if path.is_dir() {
+                        let _ = self.set_task_result_manifest(
+                            task_id,
+                            &crate::snapshot_dir_manifest(&path).to_string(),
+                        );
+                    }
+                }
+            }
+        }
         let Ok(conn) = self.conn.lock() else { return };
         let _ = conn.execute(
             "UPDATE tasks SET status = ?2, exit_code = ?3, finished_at = ?4 WHERE id = ?1",
@@ -504,7 +534,7 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
-                        created_at, finished_at, conversation_seq, execution_config
+                        created_at, finished_at, conversation_seq, execution_config, result_manifest
                  FROM tasks ORDER BY created_at DESC LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
@@ -521,7 +551,7 @@ impl Store {
         let mut stmt = conn
             .prepare(
                 "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
-                        created_at, finished_at, conversation_seq, execution_config
+                        created_at, finished_at, conversation_seq, execution_config, result_manifest
                  FROM tasks WHERE id = ?1",
             )
             .map_err(|e| e.to_string())?;
@@ -657,7 +687,7 @@ impl Store {
             "harness=?2 AND session_id=?1"
         };
         let sql = format!("SELECT id,harness,cwd,prompt,mode,model,project_id,base_branch,worktree_dir,
-            session_id,conversation_id,attachments,baseline,status,exit_code,created_at,finished_at,conversation_seq,execution_config
+            session_id,conversation_id,attachments,baseline,status,exit_code,created_at,finished_at,conversation_seq,execution_config,result_manifest
             FROM tasks WHERE {filter} ORDER BY created_at DESC,id DESC");
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = if let Some(id) = cid {
