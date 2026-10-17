@@ -1,25 +1,16 @@
-import { useState } from "react";
-import {
-  FileDiff,
-  FileImage,
-  FileArchive,
-  FileSpreadsheet,
-  FileText,
-  FolderOpen,
-  Undo2,
-  LoaderCircle,
-  Package,
-} from "lucide-react";
-import type { TurnArtifacts as TurnArtifactsData, TurnFileChange } from "../api";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, FileDiff, FileImage, FileArchive, FileSpreadsheet, FileText, FolderOpen, Undo2, LoaderCircle, Package } from "lucide-react";
+import { getTaskFilePatch, type TurnArtifacts as TurnArtifactsData, type TurnFileChange } from "../api";
+import { HarnessIcon } from "./HarnessIcon";
 
-const ARTIFACT_ICON = {
-  image: FileImage,
-  archive: FileArchive,
-  sheet: FileSpreadsheet,
-  doc: FileText,
-  pdf: FileText,
-  other: Package,
-} as const;
+const FileLines = lazy(() => import("./FileLines").then((module) => ({ default: module.FileLines })));
+const ARTIFACT_ICON = { image: FileImage, archive: FileArchive, sheet: FileSpreadsheet, doc: FileText, pdf: FileText, other: Package } as const;
+const PAGE = 60;
+
+export function generatedFile(path: string): boolean {
+  return /(?:^|\/)(?:dist|build|target|coverage|out|\.next|\.nuxt|__pycache__)(?:\/|$)/i.test(path.replace(/\\/g, "/"))
+    || /(?:\.min\.(?:js|css)|\.map)$/i.test(path);
+}
 
 function fmtSize(n: number): string {
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
@@ -27,145 +18,137 @@ function fmtSize(n: number): string {
   return `${n} B`;
 }
 
-function baseName(p: string): string {
-  return p.split(/[\\/]/).pop() ?? p;
-}
-
-function FileRow({
-  file,
-  onViewDiff,
-  onUndo,
-}: {
-  file: TurnFileChange;
-  onViewDiff: (f: TurnFileChange) => void;
-  onUndo: (f: TurnFileChange) => void;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  const undo = () => {
-    if (!confirming) {
-      setConfirming(true);
-      setTimeout(() => setConfirming(false), 3000);
-      return;
-    }
-    setConfirming(false);
-    onUndo(file);
-  };
-  const statusLabel =
-    file.status === "added" ? "新增" : file.status === "deleted" ? "删除" : "修改";
-  const reviewable = file.status !== "deleted";
-  return (
-    <div className="flex items-center gap-2 py-1 text-xs">
-      <span className="min-w-0 flex-1 truncate font-mono text-stone-700" title={file.path}>
-        {baseName(file.path)}
-      </span>
-      <span className="shrink-0 text-stone-400">{statusLabel}</span>
-      {file.added !== null && file.added > 0 && (
-        <span className="shrink-0 font-mono text-diff-added">+{file.added}</span>
-      )}
-      {file.removed !== null && file.removed > 0 && (
-        <span className="shrink-0 font-mono text-diff-removed">-{file.removed}</span>
-      )}
-      {reviewable && (
-        <button
-          onClick={() => onViewDiff(file)}
-          className="flex shrink-0 items-center gap-1 rounded border border-stone-200 px-1.5 py-0.5 text-stone-600 hover:bg-stone-100"
-          title={`审查 ${baseName(file.path)} 的改动`}
-        >
-          <FileDiff size={12} />
-          审查
-        </button>
-      )}
-      {file.status !== "deleted" && (
-        <button
-          onClick={undo}
-          className={`flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 transition-colors ${
-            confirming
-              ? "border-red-300 bg-red-50 text-red-600"
-              : "border-stone-200 text-stone-500 hover:bg-stone-100"
-          }`}
-          title={confirming ? "再次点击确认撤销（不可恢复）" : "撤销该文件的修改"}
-        >
-          <Undo2 size={12} />
-          {confirming ? "确认？" : "撤销"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-export function TurnArtifactsPanel({
-  data,
-  loading,
-  onViewDiff,
-  onUndo,
-  onOpen,
-}: {
+type Props = {
+  taskId: string;
+  harness?: string;
+  model?: string | null;
+  running?: boolean;
   data: TurnArtifactsData | null;
   loading: boolean;
-  onViewDiff: (f: TurnFileChange) => void;
-  onUndo: (f: TurnFileChange) => void;
+  onViewDiff: (file: TurnFileChange) => void;
+  onUndo: (file: TurnFileChange) => Promise<string>;
   onOpen: (path: string, reveal: boolean) => void;
-}) {
-  if (loading && !data) {
-    return (
-      <div className="turn-artifacts flex items-center gap-2 text-xs text-stone-400">
-        <LoaderCircle size={13} className="animate-spin" />
-        正在收集本轮产出…
-      </div>
-    );
-  }
-  if (!data || (data.files.length === 0 && data.artifacts.length === 0)) return null;
+};
 
-  return (
-    <div className="turn-artifacts space-y-2 rounded-xl border border-stone-200 bg-stone-50/60 p-3 text-xs">
-      <div className="flex items-center justify-between">
-        <span className="font-semibold text-stone-500">
-          {data.files.length > 0
-            ? `${data.files.length} 个文件已更改`
-            : `本轮产出 · ${data.artifacts.length} 个工件`}
+function FileRow({ file, taskId, harness, model, running, onViewDiff, onUndo, onOpen }: Omit<Props, "data" | "loading"> & { file: TurnFileChange }) {
+  const [expanded, setExpanded] = useState(false);
+  const [patch, setPatch] = useState<{ text: string; truncated: boolean }>();
+  const [readError, setReadError] = useState("");
+  const [retry, setRetry] = useState(0);
+  const [confirming, setConfirming] = useState(false);
+  const [undoing, setUndoing] = useState(false);
+  const [undoError, setUndoError] = useState("");
+  const [backup, setBackup] = useState("");
+  useEffect(() => {
+    if (!expanded) return;
+    let disposed = false;
+    setPatch(undefined); setReadError("");
+    getTaskFilePatch(taskId, file.path).then((value) => {
+      if (!disposed) setPatch(value);
+    }).catch((error) => { if (!disposed) setReadError(String(error)); });
+    return () => { disposed = true; };
+  }, [expanded, taskId, file.path, retry]);
+  useEffect(() => {
+    if (!confirming) return;
+    const timer = setTimeout(() => setConfirming(false), 8000);
+    return () => clearTimeout(timer);
+  }, [confirming]);
+  const undo = async () => {
+    if (!confirming) { setConfirming(true); return; }
+    setConfirming(false); setUndoing(true); setUndoError("");
+    try { setBackup(await onUndo(file)); setRetry((value) => value + 1); }
+    catch (error) { setUndoError(String(error)); }
+    finally { setUndoing(false); }
+  };
+  const status = { added: "新增", deleted: "删除", modified: "修改" }[file.status];
+  return <div className="turn-change-file">
+    <div className="turn-change-row">
+      <button className="turn-change-toggle" aria-expanded={expanded} aria-label={`审查 ${file.path}`} onClick={() => setExpanded(!expanded)}>
+        <FileDiff size={14} /><span className="turn-change-path" title={file.path}>{file.path}</span>
+        <span className="turn-change-status">{status}</span>
+        <span className="turn-change-counts">
+          {file.added !== null && <span className="text-diff-added">+{file.added}</span>}
+          {file.removed !== null && <span className="text-diff-removed">−{file.removed}</span>}
+          {file.added === null && file.removed === null && <span>—</span>}
         </span>
-        <button
-          onClick={() => onOpen(data.base_dir, true)}
-          className="flex items-center gap-1 rounded border border-stone-200 px-1.5 py-0.5 text-stone-500 hover:bg-stone-100"
-          title="在文件夹中显示"
-        >
-          <FolderOpen size={12} />
-          打开目录
-        </button>
-      </div>
-
-      {data.files.length > 0 && (
-        <div className="space-y-0.5">
-          {data.files.map((f) => (
-            <FileRow key={f.path} file={f} onViewDiff={onViewDiff} onUndo={onUndo} />
-          ))}
-        </div>
-      )}
-
-      {data.artifacts.length > 0 && (
-        <div className="flex flex-wrap gap-2 pt-1">
-          {data.artifacts.map((a) => {
-            const Icon = ARTIFACT_ICON[a.kind] ?? Package;
-            const label = baseName(a.path);
-            return (
-              <button
-                key={a.path}
-                onClick={() => onOpen(a.path, false)}
-                className="flex w-44 items-center gap-2 rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-left hover:border-stone-400"
-                title={`${a.path}\n${a.kind} · ${fmtSize(a.size)}\n点击打开`}
-              >
-                <Icon size={16} className="shrink-0 text-stone-500" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-mono text-[11px] text-stone-700">{label}</span>
-                  <span className="block text-[10px] text-stone-400">
-                    {a.kind === "image" ? "图片" : a.kind === "archive" ? "压缩包" : a.kind === "sheet" ? "表格" : a.kind === "doc" ? "文档" : a.kind === "pdf" ? "PDF" : "文件"} · {fmtSize(a.size)}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+      </button>
+      <button className="turn-change-open" aria-label={file.path} title={`打开 ${file.path}`}
+        onClick={() => file.status === "deleted" ? onViewDiff(file) : onOpen(file.path, false)}><FolderOpen size={14} /></button>
     </div>
-  );
+    {expanded && <div className="turn-change-review">
+      <div className="turn-change-context">
+        {harness && <span><HarnessIcon harness={harness} size={13} />{harness} · 配置模型：{model || "默认模型"}</span>}
+        <span>工作区与 Git 基线比较 · 非逐行作者归属</span>
+      </div>
+      {readError ? <div className="turn-change-error" role="alert">{readError}<button onClick={() => setRetry((value) => value + 1)}>重试</button></div>
+        : !patch ? <div className="turn-change-loading" role="status"><LoaderCircle size={14} className="animate-spin" />正在加载改动…</div>
+        : patch.text ? <Suspense fallback={<div role="status">正在加载审阅视图…</div>}>
+          <FileLines text={patch.text} diff label={`${file.path} 的改动`} />
+        </Suspense> : <p className="file-preview-notice">{file.binary ? "二进制文件，请打开文件预览。" : "当前没有可显示的 Git 文本差异；文件可能已再次修改或还原。"}</p>}
+      {patch?.truncated && <p className="file-preview-notice">补丁预览达到大小上限，可打开完整文件继续查看。</p>}
+      <div className="turn-change-actions">
+        <button onClick={() => setRetry((value) => value + 1)}>刷新差异</button>
+        {file.status !== "deleted" && <button onClick={() => onOpen(file.path, false)}>打开文件</button>}
+        <button onClick={() => onViewDiff(file)}>在文件工作区审查</button>
+        <button disabled={running || undoing || !!backup} title={running ? "执行结束后才能安全撤销" : "核验成果版本后恢复起始基线"}
+          onClick={() => void undo()}>{undoing ? <LoaderCircle size={13} className="animate-spin" /> : <Undo2 size={13} />}{confirming ? "确认撤销此文件" : "撤销"}</button>
+        {confirming && <button onClick={() => setConfirming(false)}>取消</button>}
+      </div>
+      {undoError && <div className="turn-change-error" role="alert">{undoError}<button onClick={() => onViewDiff(file)}>查看当前差异</button></div>}
+      {backup && <p className="turn-change-note" role="status">已撤销，原内容已备份。<button onClick={() => onOpen(backup, true)}>查看恢复备份</button></p>}
+    </div>}
+  </div>;
+}
+
+export function TurnArtifactsPanel(props: Props) {
+  const { data, loading, onOpen } = props;
+  const [collapsed, setCollapsed] = useState(false);
+  const [generatedOpen, setGeneratedOpen] = useState(false);
+  const [limit, setLimit] = useState(PAGE);
+  const [generatedLimit, setGeneratedLimit] = useState(PAGE);
+  const files = data?.files;
+  const groups = useMemo(() => {
+    const regular: TurnFileChange[] = [], generated: TurnFileChange[] = [];
+    let added = 0, removed = 0, unknown = 0;
+    for (const file of files ?? []) {
+      (generatedFile(file.path) ? generated : regular).push(file);
+      added += file.added ?? 0; removed += file.removed ?? 0;
+      if (file.added === null || file.removed === null) unknown++;
+    }
+    return { regular, generated, added, removed, unknown };
+  }, [files]);
+  if (loading && !data) return <div className="turn-artifacts turn-change-loading" role="status"><LoaderCircle size={13} className="animate-spin" />正在收集本轮产出…</div>;
+  if (!data || (!data.files.length && !data.artifacts.length)) return null;
+  const render = (file: TurnFileChange) => <FileRow key={file.path} {...props} file={file} />;
+  return <section className="turn-artifacts artifact-panel turn-changes" aria-label="本轮变更">
+    <div className="artifact-heading">
+      <button className="turn-change-heading" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)}>
+        {collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+        <span>{data.files.length ? `更改了 ${data.files.length} 个文件` : `本轮产出 · ${data.artifacts.length} 个工件`}</span>
+        {!!data.files.length && <span className="turn-change-counts"><span className="text-diff-added">+{groups.added}</span><span className="text-diff-removed">−{groups.removed}</span></span>}
+      </button>
+      <button className="turn-change-directory" onClick={() => onOpen(data.base_dir, true)} title="在文件夹中显示"><FolderOpen size={13} />打开目录</button>
+    </div>
+    {!collapsed && <>
+      {groups.unknown > 0 && <p className="turn-change-note">{groups.unknown} 个文件无可用行数，汇总仅含已知统计。</p>}
+      {groups.regular.slice(0, limit).map(render)}
+      {groups.regular.length > limit && <button className="turn-change-more" onClick={() => setLimit(limit + PAGE)}>再显示 {Math.min(PAGE, groups.regular.length - limit)} 个文件（剩余 {groups.regular.length - limit} 个）</button>}
+      {groups.generated.length > 0 && <div className="turn-generated">
+        <button className="turn-change-heading" aria-expanded={generatedOpen} onClick={() => setGeneratedOpen(!generatedOpen)}>
+          {generatedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}构建与生成文件 · {groups.generated.length}
+        </button>
+        {generatedOpen && <>{groups.generated.slice(0, generatedLimit).map(render)}
+          {groups.generated.length > generatedLimit && <button className="turn-change-more" onClick={() => setGeneratedLimit(generatedLimit + PAGE)}>显示更多生成文件</button>}</>}
+      </div>}
+      {data.artifacts.length > 0 && <div className="artifact-deliverables">
+        {data.artifacts.map((artifact) => {
+          const Icon = ARTIFACT_ICON[artifact.kind] ?? Package;
+          return <button key={artifact.path} onClick={() => onOpen(artifact.path, false)} className="artifact-card" title={artifact.path}>
+            <Icon size={16} /><span><span className="artifact-name">{artifact.path.split(/[\\/]/).pop()}</span><span className="artifact-meta">{fmtSize(artifact.size)}</span></span>
+          </button>;
+        })}
+      </div>}
+    </>}
+  </section>;
 }

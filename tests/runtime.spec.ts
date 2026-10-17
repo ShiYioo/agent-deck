@@ -205,7 +205,7 @@ test("an agent-proposed collaboration plan starts the shared graph run only afte
   await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
   await emit(page, "pi-event", planEvent("plan-1"));
   // 计划以自然语言呈现，用户只需判断「要不要这么做」，不必自己搭 DAG
-  await expect(page.getByText("建议这样拆给多个模型")).toBeVisible();
+  await expect(page.getByText("执行分工", { exact: true })).toBeVisible();
   await expect(page.getByText("实现与测试互相独立，可并行后再对比")).toBeVisible();
   await expect(page.getByRole("list").getByText("把侧栏改成浮层")).toBeVisible();
   await expect(page.getByRole("list").getByText("补 860px 断点回归测试")).toBeVisible();

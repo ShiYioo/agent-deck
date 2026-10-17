@@ -159,6 +159,15 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                 }
                 // 原生适配器控制事件（提问通道）：直接转发前端，不进日志/事件模型。
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if let Some(model) = reported_model(&value) {
+                        let _ = store.append_event(
+                            task_id,
+                            &serde_json::json!({
+                                "type":"model_observed","model":model
+                            })
+                            .to_string(),
+                        );
+                    }
                     match value.get("type").and_then(serde_json::Value::as_str) {
                         Some("native_form_request") => {
                             let _ = app.emit(
@@ -194,13 +203,19 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                         let _ = store.set_session_id(task_id, id);
                     }
                     if let Ok(mut value) = serde_json::to_value(&event) {
-                        if matches!(event, AgentEvent::ToolUse { .. } | AgentEvent::ToolResult { .. }) {
+                        if matches!(
+                            event,
+                            AgentEvent::ToolUse { .. } | AgentEvent::ToolResult { .. }
+                        ) {
                             if let Some(id) = tool_call_id(trimmed) {
                                 value["callId"] = serde_json::Value::String(id);
                             }
                         }
                         let _ = store.append_event(task_id, &value.to_string());
-                        let _ = app.emit("task-event", serde_json::json!({ "taskId": task_id, "event": value }));
+                        let _ = app.emit(
+                            "task-event",
+                            serde_json::json!({ "taskId": task_id, "event": value }),
+                        );
                     }
                 }
             }
@@ -209,13 +224,60 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     failed
 }
 
+fn reported_model(value: &serde_json::Value) -> Option<String> {
+    if value["type"] == "native_model_observed" {
+        return value["model"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    if value["type"] == "message.updated" {
+        let info = &value["properties"]["info"];
+        if info["role"] != "assistant" {
+            return None;
+        }
+        if let Some(model) = info["model"].as_str().filter(|s| !s.is_empty()) {
+            return Some(model.into());
+        }
+        if let (Some(provider), Some(model)) = (
+            info["model"]["providerID"].as_str(),
+            info["model"]["modelID"]
+                .as_str()
+                .or_else(|| info["model"]["id"].as_str()),
+        ) {
+            return Some(format!("{provider}/{model}"));
+        }
+        if let (Some(provider), Some(model)) =
+            (info["providerID"].as_str(), info["modelID"].as_str())
+        {
+            return Some(format!("{provider}/{model}"));
+        }
+    }
+    None
+}
+
 fn tool_call_id(raw: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
     [
-        "/properties/part/callID", "/part/callID", "/part/callId",
-        "/item/id", "/toolCallId", "/callID", "/call_id",
-        "/payload/toolCallId", "/properties/toolCallId", "/data/toolCallId", "/id",
-    ].into_iter().find_map(|path| value.pointer(path).and_then(|id| id.as_str()).map(str::to_string))
+        "/properties/part/callID",
+        "/part/callID",
+        "/part/callId",
+        "/item/id",
+        "/toolCallId",
+        "/callID",
+        "/call_id",
+        "/payload/toolCallId",
+        "/properties/toolCallId",
+        "/data/toolCallId",
+        "/id",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        value
+            .pointer(path)
+            .and_then(|id| id.as_str())
+            .map(str::to_string)
+    })
 }
 
 /// 主循环：并行读 stdout/stderr，结束后回写退出码并通知前端。
@@ -339,13 +401,19 @@ mod tests {
     #[test]
     fn native_tool_call_identity_survives_each_adapter_envelope() {
         for (raw, expected) in [
-            (r#"{"type":"message.part.updated","properties":{"part":{"callID":"oc-1"}}}"#, "oc-1"),
+            (
+                r#"{"type":"message.part.updated","properties":{"part":{"callID":"oc-1"}}}"#,
+                "oc-1",
+            ),
             (r#"{"type":"item.completed","item":{"id":"cx-2"}}"#, "cx-2"),
             (r#"{"kind":"tool_result","id":"zc-3"}"#, "zc-3"),
         ] {
             assert_eq!(super::tool_call_id(raw).as_deref(), Some(expected));
         }
-        assert_eq!(super::tool_call_id(r#"{"kind":"tool_use","tool":{"name":"read"}}"#), None);
+        assert_eq!(
+            super::tool_call_id(r#"{"kind":"tool_use","tool":{"name":"read"}}"#),
+            None
+        );
     }
     use super::*;
 
@@ -389,6 +457,26 @@ mod tests {
         assert_eq!(terminal_status(Some(0), false, true), "failed");
         assert_eq!(terminal_status(Some(1), true, true), "cancelled");
         assert_eq!(terminal_status(None, false, false), "failed");
+    }
+    #[test]
+    fn observed_model_comes_from_runtime_reports_not_requested_options_or_tool_text() {
+        assert_eq!(
+            reported_model(
+                &serde_json::json!({"type":"native_model_observed","model":"actual-model"})
+            ),
+            Some("actual-model".into())
+        );
+        assert_eq!(
+            reported_model(
+                &serde_json::json!({"type":"message.updated","properties":{"info":{
+            "role":"assistant","providerID":"provider","modelID":"actual"}}})
+            ),
+            Some("provider/actual".into())
+        );
+        assert!(
+            reported_model(&serde_json::json!({"type":"tool_result","model":"claimed"})).is_none()
+        );
+        assert!(reported_model(&serde_json::json!({"model":"requested"})).is_none());
     }
 
     #[cfg(windows)]

@@ -179,6 +179,8 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
         break;
       }
       case "status": {
+        // Intent parsing is a transient activity, not a message in the transcript.
+        if (ev.planning) break;
         // 本地压缩占位（local-compact）不是 API 重试，不参与阈值过滤
         if (ev.retryKey && ev.retryKey !== "local-compact") {
           const attempt = retryAttempt(ev.text);
@@ -201,14 +203,12 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
         break;
       }
       case "complete":
-        if (turnStart !== null && ev.ts && ev.ts > turnStart) {
-          (ev as { durationMs?: number }).durationMs = ev.ts - turnStart;
-        }
-        turnStart = null;
         rows.push({
           kind: "complete", key, ok: ev.ok,
-          durationMs: ev.durationMs, tokens: ev.tokens,
+          durationMs: turnStart !== null && ev.ts && ev.ts > turnStart ? ev.ts - turnStart : ev.durationMs,
+          tokens: ev.tokens,
         });
+        turnStart = null;
         break;
       case "error":
         rows.push({ kind: "error", key, message: ev.message });
@@ -222,6 +222,36 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
     if (ev.ts) prevTs = ev.ts;
   }
   return claimLocalCompact(rows);
+}
+
+/** Keep unchanged semantic rows referentially stable so memoized message views
+ * don't reparse historical Markdown on every streaming snapshot. One projection
+ * belongs to one timeline; removed rows are dropped rather than retained. */
+export function createConversationProjector() {
+  let previous: ConversationRow[] = [];
+  let byKey = new Map<number, ConversationRow>();
+  return (items: { event: AgentEvent; key: number }[]): ConversationRow[] => {
+    const rows = buildConversation(items);
+    const next = new Map<number, ConversationRow>();
+    let unchanged = rows.length === previous.length;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const cached = byKey.get(row.key);
+      if (cached && sameRow(cached, row)) rows[i] = cached;
+      next.set(row.key, rows[i]);
+      if (rows[i] !== previous[i]) unchanged = false;
+    }
+    byKey = next;
+    if (!unchanged) previous = rows;
+    return previous;
+  };
+}
+
+function sameRow(a: ConversationRow, b: ConversationRow): boolean {
+  const left = a as unknown as Record<string, unknown>;
+  const right = b as unknown as Record<string, unknown>;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => Object.is(left[key], right[key]));
 }
 
 /** 乐观占位认领：/compact 发出时本地先插一条「已请求压缩上下文…」占位行；

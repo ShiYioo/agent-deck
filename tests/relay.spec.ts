@@ -53,7 +53,7 @@ test("A to B to A resumes separate native handles while retaining one timeline a
   await openConversation(page);
   await send(page, "@codex 检查现有修改");
   await finish(page, "new-task", "Codex 发现需要修正按钮间距。");
-  await expect(page.locator(".message-source")).toContainText(["codex"]);
+  await expect(page.locator(".message-source")).toContainText(["Codex"]);
   await send(page, "@zcode 根据检查修正间距");
   await expect.poll(async () => (await requests(page)).length).toBe(2);
   const [first, second] = await requests(page);

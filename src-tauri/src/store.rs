@@ -542,12 +542,28 @@ impl Store {
     }
 
     pub fn list_tasks(&self, limit: i64) -> Result<Vec<TaskRow>, String> {
+        self.query_tasks(limit, true)
+    }
+
+    /// Sidebar/history metadata never needs directory manifests. Select NULL at
+    /// the SQL boundary so large snapshots aren't read, allocated or sent to IPC.
+    pub fn list_task_summaries(&self, limit: i64) -> Result<Vec<TaskRow>, String> {
+        self.query_tasks(limit, false)
+    }
+
+    fn query_tasks(&self, limit: i64, with_manifests: bool) -> Result<Vec<TaskRow>, String> {
         let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let baseline = if with_manifests { "baseline" } else { "NULL" };
+        let result_manifest = if with_manifests {
+            "result_manifest"
+        } else {
+            "NULL"
+        };
         let mut stmt = conn
             .prepare(
-                "SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, baseline, status, exit_code,
-                        created_at, finished_at, conversation_seq, execution_config, result_manifest
-                 FROM tasks ORDER BY created_at DESC LIMIT ?1",
+                &format!("SELECT id, harness, cwd, prompt, mode, model, project_id, base_branch, worktree_dir, session_id, conversation_id, attachments, {baseline}, status, exit_code,
+                        created_at, finished_at, conversation_seq, execution_config, {result_manifest}
+                 FROM tasks ORDER BY created_at DESC LIMIT ?1"),
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -1015,6 +1031,27 @@ impl Store {
         .map_err(|e| e.to_string())
     }
 
+    /// Recover constraints without materializing old tool output in memory.
+    pub(crate) fn get_user_events(&self, task_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT event FROM task_events WHERE task_id = ?1 AND
+             CASE WHEN json_valid(event) THEN json_extract(event, '$.type') = 'user_message'
+                  ELSE 1 END
+             ORDER BY seq ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        // Preserve malformed records so the caller can report corruption rather
+        // than silently treating missing user constraints as an empty history.
+        let rows = stmt
+            .query_map(params![task_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
     /// 分页读取事件（event 列是 AgentEvent 的 JSON）。
     pub fn get_events(
         &self,
@@ -1041,6 +1078,27 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_summaries_omit_large_manifests_without_changing_stored_tasks() {
+        let store = Store::in_memory().unwrap();
+        store
+            .create_task("large", "codex", ".", "check", None, None, None)
+            .unwrap();
+        let manifest = "x".repeat(1_000_000);
+        store.set_task_baseline("large", &manifest).unwrap();
+        store.set_task_result_manifest("large", &manifest).unwrap();
+        let summaries = store.list_task_summaries(10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].prompt, "check");
+        assert!(summaries[0].baseline.is_none());
+        assert!(summaries[0].result_manifest.is_none());
+        assert!(serde_json::to_vec(&summaries).unwrap().len() < 1024);
+        let stored = store.get_task("large").unwrap().unwrap();
+        assert_eq!(stored.baseline.as_deref(), Some(manifest.as_str()));
+        assert_eq!(stored.result_manifest.as_deref(), Some(manifest.as_str()));
+        assert!(store.list_tasks(10).unwrap()[0].baseline.is_some());
+    }
 
     #[test]
     fn create_finish_and_list_task() {

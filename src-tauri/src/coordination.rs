@@ -101,6 +101,7 @@ pub(crate) fn refresh_binding(conn: &Connection, task_id: &str) -> Result<(), St
         "INSERT INTO runtime_bindings(conversation_id,harness,cwd,session_id,task_id,cursor_task_id,status,updated_at)
          SELECT conversation_id,harness,cwd,session_id,id,CASE WHEN status = 'done' THEN id END,status,created_at
          FROM tasks WHERE id = ?1 AND conversation_id IS NOT NULL AND session_id IS NOT NULL AND session_id != ''
+         AND NOT EXISTS (SELECT 1 FROM task_events WHERE task_id=?1 AND json_valid(event) AND json_extract(event,'$.planning')=1)
          ON CONFLICT(conversation_id,harness,cwd) DO UPDATE SET
            session_id=excluded.session_id, task_id=excluded.task_id, cursor_task_id=excluded.cursor_task_id,
            status=excluded.status, updated_at=excluded.updated_at

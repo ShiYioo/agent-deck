@@ -29,6 +29,11 @@ await build({
   target: "node20",
   logLevel: "info",
 });
+await build({
+  entryPoints: ["scripts/runnerctl.mjs"],
+  outfile: "agent/dist/runnerctl.mjs",
+  bundle: true, platform: "node", format: "esm", target: "node20", logLevel: "info",
+});
 
 // photon 的 wasm：图片缩放（ImageContent → 模型可读）运行时按 execDir/photon/ 回退查找，
 // 打包安装后落在资源目录的 photon/ 下即可命中

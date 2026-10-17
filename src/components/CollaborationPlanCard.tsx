@@ -20,12 +20,14 @@ export type CollaborationPlan = {
 export default function CollaborationPlanCard({
   taskId,
   plan,
+  issues = [],
   onConfirm,
   onError,
   onCancel,
 }: {
   taskId: string;
   plan: CollaborationPlan;
+  issues?: string[];
   onConfirm: (nodes: GraphNodeSpec[]) => Promise<void>;
   onError: (message: string) => void;
   onCancel: () => void;
@@ -35,7 +37,11 @@ export default function CollaborationPlanCard({
   const [nodes, setNodes] = useState(plan.nodes);
 
   const total = plan.nodes.length;
-  const direct = total === 1 && !nodes[0]?.supervision;
+  const artifacts = nodes[0]?.contract?.workspace === "artifacts";
+  const direct = total === 1 && !nodes[0]?.supervision && !artifacts && !nodes[0]?.contract?.acceptance;
+  const unresolved = nodes.some((node) =>
+    (node.contract?.model_hint && !node.execution?.model)
+    || (node.supervision?.model_hint && !node.supervision.execution?.model));
   const confirm = async () => {
     setBusy(true);
     setError(null);
@@ -51,11 +57,16 @@ export default function CollaborationPlanCard({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 text-xs font-medium text-amber-800">
+       <div className="flex items-center gap-2 text-xs font-medium text-stone-700">
         <GitMerge size={14} />
-        {direct ? "建议交给指定运行器" : "建议这样拆给多个模型"}
+        {direct ? "交给指定运行器" : "执行分工"}
       </div>
       {plan.why && <div className="text-[11px] leading-relaxed text-stone-600">{plan.why}</div>}
+      {issues.length > 0 && <div className="context-error" role="status">
+        {issues.map((issue, i) => <div key={i}>{issue}</div>)}
+        {unresolved && <div>请选择实际模型；选择其他型号会替换这次任务的原模型要求。</div>}
+      </div>}
+      {!issues.length && <p className="text-xs text-stone-500">执行安排已就绪，确认后开始。</p>}
       <RelationshipGraph nodes={nodes.map((spec) => ({ spec, status: "pending" }))} />
 
       <ol className="space-y-1">
@@ -70,6 +81,9 @@ export default function CollaborationPlanCard({
               )}
             </div>
             <div className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-stone-500">{n.prompt}</div>
+            {n.contract?.model_hint && <div className="text-xs text-stone-500">要求的模型：{n.contract.model_hint}</div>}
+            {!!n.contract?.outputs.length && <div className="text-xs text-stone-500">输出：{n.contract.outputs.join("、")}</div>}
+            {n.contract?.acceptance && <div className="text-xs text-stone-500">独立验收 · 结论绑定成果版本</div>}
             <ExecutionPicker harness={n.harness} taskId={taskId} value={n.execution ?? inheritedExecution()}
               label={`${n.id} 执行 `} disabled={busy} onChange={(execution) =>
                 setNodes((previous) => previous.map((node, i) => i === index ? { ...node, execution } : node))} />
@@ -83,13 +97,13 @@ export default function CollaborationPlanCard({
 
       <div className="text-[11px] text-stone-500">
         {direct ? "在当前工作目录执行。" :
-          `最多 ${plan.parallel} 路并行，总时限 ${plan.minutes} 分钟，共 ${total} 个节点。执行在隔离工作树中进行。`}
+          `最多 ${plan.parallel} 路并行，总时限 ${plan.minutes} 分钟，共 ${total} 个节点。${artifacts ? "成果按文件版本在独立目录交接。" : "执行在隔离工作树中进行。"}`}
       </div>
 
       {error && <div className="context-error">{error}</div>}
 
       <div className="flex items-center gap-2">
-        <button onClick={confirm} disabled={busy} className="task-action task-action-primary">
+        <button onClick={confirm} disabled={busy || unresolved} className="task-action task-action-primary">
           {busy ? "正在交接并启动…" : "确认并启动"}
         </button>
         <button onClick={onCancel} disabled={busy} className="task-action">

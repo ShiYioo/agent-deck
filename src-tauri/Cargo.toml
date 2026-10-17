@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 command-group = { version = "5.0", features = ["with-tokio"] }
@@ -30,6 +30,10 @@ thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+encoding_rs = "0.8"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

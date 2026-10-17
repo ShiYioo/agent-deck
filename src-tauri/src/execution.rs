@@ -15,6 +15,7 @@ pub(crate) fn initialize(app: &AppHandle) {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
     // None inherits; an empty string explicitly selects the harness default.
     pub model: Option<String>,
@@ -270,7 +271,7 @@ fn zcode_models() -> Vec<ModelCapability> {
     out
 }
 
-fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
+pub(crate) fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
     let cache = CATALOGS.get_or_init(Default::default);
     if let Some((time, values)) = cache.lock().map_err(|_| "模型目录锁错误")?.get(harness) {
         if time.elapsed().as_secs() < 60 {
@@ -315,6 +316,63 @@ fn catalog(harness: &str) -> Result<Vec<ModelCapability>, String> {
         .map_err(|_| "模型目录锁错误")?
         .insert(harness.into(), (Instant::now(), values.clone()));
     Ok(values)
+}
+
+/// Resolve only exact identifiers or unambiguous spelling variants of a model's
+/// leaf name. Substring/fuzzy matches are suggestions, never execution authority.
+pub(crate) fn bind_model(hint: &str, models: &[ModelCapability]) -> Result<String, String> {
+    if let Some(model) = models.iter().find(|m| m.model == hint) {
+        return Ok(model.model.clone());
+    }
+    let normalize = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let wanted = normalize(hint);
+    let matches: Vec<_> = models
+        .iter()
+        .filter(|m| {
+            let leaf = m.model.rsplit(['/', ':']).next().unwrap_or(&m.model);
+            !wanted.is_empty() && (normalize(&m.model) == wanted || normalize(leaf) == wanted)
+        })
+        .collect();
+    match matches.as_slice() {
+        [model] => Ok(model.model.clone()),
+        [] => Err(format!(
+            "模型「{hint}」未在该运行器目录中唯一匹配，请选择具体模型"
+        )),
+        _ => Err(format!("模型「{hint}」对应多个供应商，请选择完整模型 ID")),
+    }
+}
+
+pub(crate) fn workflow_models(
+    store: &Store,
+    harness: &str,
+) -> Result<Vec<ModelCapability>, String> {
+    if harness != "deck" {
+        return catalog(harness);
+    }
+    let mut models = Vec::new();
+    for profile in store.list_model_profiles(true)? {
+        let mut ids: Vec<String> = store
+            .list_profile_models(&profile.id)?
+            .into_iter()
+            .map(|m| m.model)
+            .collect();
+        if let Some(model) = profile.model {
+            ids.push(model);
+        }
+        ids.sort();
+        ids.dedup();
+        models.extend(ids.into_iter().map(|id| ModelCapability {
+            model: format!("{}:{id}", profile.id),
+            efforts: Vec::new(),
+            context_window: None,
+        }));
+    }
+    Ok(models)
 }
 
 #[tauri::command]
@@ -461,7 +519,11 @@ pub(crate) fn snapshot(
     resolved: &ExecutionConfig,
     transport: &str,
 ) -> Result<(), String> {
-    let value = json!({"requested":requested,"resolved":resolved,"transport":transport});
+    let planning: bool = store.conn.lock().map_err(|_| "store poisoned")?
+        .query_row("SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=?1 AND json_extract(event,'$.planning')=1)",
+            [task_id], |row| row.get(0)).map_err(|e| e.to_string())?;
+    let value = json!({"requested":requested,"resolved":resolved,"transport":transport,
+        "purpose":if planning { "planning" } else { "execution" }});
     let changed = store
         .conn
         .lock()

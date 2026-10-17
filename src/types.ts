@@ -6,7 +6,7 @@ export type AgentEvent = (
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
   | { type: "tool_use"; tool: string; callId?: string; detail: string; args?: Record<string, unknown> }
   | { type: "tool_result"; tool: string; callId?: string; ok: boolean; detail: string; added?: number; removed?: number }
-  | { type: "status"; text: string; retryKey?: string | null; compacting?: boolean }
+  | { type: "status"; text: string; retryKey?: string | null; compacting?: boolean; planning?: boolean }
   | {
       type: "complete";
       ok: boolean;
@@ -15,7 +15,7 @@ export type AgentEvent = (
     }
   | { type: "error"; kind: string; message: string }
   | { type: "raw"; line: string }
-) & { sourceHarness?: string; sourceTaskId?: string };
+) & { sourceHarness?: string; sourceTaskId?: string; workflow_visible?: boolean };
 
 /** 统一事件可携带入库时间戳（ms，Rust append_event 统一打点），用于思考/轮次耗时 */
 export type TimedAgentEvent = AgentEvent & { ts?: number };
@@ -247,6 +247,9 @@ export type LiveTask = {
   conversationId?: string | null;
   events: { event: AgentEvent; key: number }[];
   running: boolean;
+  /** Source task ID: only this task's protocol output is hidden. */
+  workflowPlanning?: string;
+  workflowPhase?: "planning" | "launching";
   status?: TaskRow["status"];
   exitCode: number | null;
   sessionId?: string;

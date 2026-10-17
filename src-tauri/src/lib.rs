@@ -7,13 +7,18 @@ mod diff_watch;
 mod discovery;
 mod execution;
 mod executors;
+mod file_preview;
 mod handoff;
 mod orchestration;
 mod pi_session;
 mod plan_launch;
-mod runner;
+mod project_files;
 mod recovery;
+mod runner;
 mod store;
+mod turn_review;
+mod workflow;
+mod workflow_artifacts;
 mod worktree;
 
 use std::collections::HashMap;
@@ -289,7 +294,25 @@ async fn start_task(
     conversation_id: Option<String>,
     relay: Option<bool>,
     attachments: Vec<String>,
+    workflow: Option<bool>,
 ) -> Result<TaskStartInfo, String> {
+    if workflow::should_plan(relay, workflow) {
+        return workflow::start_request(
+            app,
+            harness,
+            cwd,
+            prompt,
+            mode,
+            model,
+            effort,
+            permission,
+            resume_session_id,
+            project_id,
+            conversation_id,
+            attachments,
+        )
+        .await;
+    }
     start_task_impl(
         app,
         registry,
@@ -309,6 +332,7 @@ async fn start_task(
         None,
         None,
         effort,
+        None,
         None,
         None,
         None,
@@ -343,6 +367,7 @@ pub(crate) async fn start_task_impl(
         String,
     )>,
     reservation: Option<store::ConversationLaunch>,
+    runtime_override: Option<String>,
 ) -> Result<TaskStartInfo, String> {
     if prompt.trim().is_empty() {
         return Err("请输入任务描述".into());
@@ -433,7 +458,10 @@ pub(crate) async fn start_task_impl(
     } else {
         Some(store.claim_workspace(&cwd, &pi_session_task_id())?)
     };
-    let mut prepared = if let Some(id) = conversation_id.as_deref() {
+    let mut prepared = if let Some(id) = conversation_id
+        .as_deref()
+        .filter(|_| runtime_override.is_none())
+    {
         let archive_dir = normalize_windows_path(
             app.path()
                 .app_data_dir()
@@ -455,10 +483,24 @@ pub(crate) async fn start_task_impl(
     } else {
         None
     };
-    let runtime_prompt = prepared
-        .as_ref()
-        .map(|turn| turn.prompt.clone())
-        .unwrap_or_else(|| prompt.clone());
+    let mut runtime_prompt = runtime_override.clone().unwrap_or_else(|| {
+        prepared
+            .as_ref()
+            .map(|turn| turn.prompt.clone())
+            .unwrap_or_else(|| prompt.clone())
+    });
+    let runtime_mode = if runtime_override.is_some() {
+        Some(
+            match harness.as_str() {
+                "codex" => "readonly",
+                "deck" => "intent",
+                _ => "plan",
+            }
+            .to_string(),
+        )
+    } else {
+        mode.clone()
+    };
     let resume_session_id = prepared
         .as_ref()
         .map(|turn| turn.resume_session_id.clone())
@@ -466,6 +508,9 @@ pub(crate) async fn start_task_impl(
     // deck = AgentDeck 自有运行时（pi sidecar），走独立通道
     if harness.eq_ignore_ascii_case("deck") {
         let task_id = pi_session_task_id();
+        if runtime_override.is_none() && workflow_owner.is_none() {
+            runtime_prompt.push_str(&workflow::control_prompt(&app, &task_id));
+        }
         // 项目归属按仓库根判定（子目录里派任务也落到同一个项目）
         let repo_root = worktree::project_root(Path::new(&cwd))
             .to_string_lossy()
@@ -527,6 +572,15 @@ pub(crate) async fn start_task_impl(
             model.as_deref(),
             deck_project.as_deref(),
         )?;
+        if runtime_override.is_some() {
+            store.append_event(
+                &task_id,
+                &serde_json::json!({
+                    "type":"status","text":"正在理解任务…","planning":true
+                })
+                .to_string(),
+            )?;
+        }
         let mut launch_outcome = coordination::LaunchOutcome::new(&store, &task_id);
         execution::snapshot(
             &store,
@@ -564,10 +618,12 @@ pub(crate) async fn start_task_impl(
             );
         }
         // 轮次基线：任务开始时的目录快照（产出面板按它判定本轮改动）
-        store.set_task_baseline(
-            &task_id,
-            &snapshot_dir_manifest(Path::new(&cwd)).to_string(),
-        )?;
+        if runtime_override.is_none() {
+            store.set_task_baseline(
+                &task_id,
+                &snapshot_dir_manifest(Path::new(&cwd)).to_string(),
+            )?;
+        }
         if let Some(id) = &resume_session_id {
             store.set_session_id(&task_id, id)?;
         }
@@ -584,8 +640,8 @@ pub(crate) async fn start_task_impl(
             attachments: attachments.clone(),
             // plan/goal 模式直通 sidecar（只读工具集 / 会话目标）；
             // approved = 工具执行前经 UI 审批（P2 权限门）；其余 auto
-            mode: match mode.as_deref() {
-                Some(m @ ("plan" | "goal")) => m,
+            mode: match runtime_mode.as_deref() {
+                Some(m @ ("plan" | "goal" | "intent")) => m,
                 _ if permission.as_deref() == Some("approved") => "approved",
                 _ => "auto",
             }
@@ -660,6 +716,9 @@ pub(crate) async fn start_task_impl(
 
     let harness = Harness::parse(&harness)?;
     let task_id = runner::new_task_id(harness);
+    if runtime_override.is_none() && workflow_owner.is_none() {
+        runtime_prompt.push_str(&workflow::control_prompt(&app, &task_id));
+    }
 
     let worktree_root =
         worktree::root(store.get_setting("worktree_root").ok().flatten().as_deref());
@@ -667,6 +726,7 @@ pub(crate) async fn start_task_impl(
     // 用户的文件留在原处（对齐 ZCode 的原地工作方式）。
     let mut worktree: Option<WorktreePaths> = None;
     if resume_session_id.is_none()
+        && runtime_override.is_none()
         && conversation_id.is_none()
         && workflow_owner.is_none()
         && project_id.is_none()
@@ -715,6 +775,15 @@ pub(crate) async fn start_task_impl(
         model.as_deref(),
         cli_project.as_deref(),
     )?;
+    if runtime_override.is_some() {
+        store.append_event(
+            &task_id,
+            &serde_json::json!({
+                "type":"status","text":"正在理解任务…","planning":true
+            })
+            .to_string(),
+        )?;
+    }
     let mut launch_outcome = coordination::LaunchOutcome::new(&store, &task_id);
     execution::snapshot(
         &store,
@@ -765,7 +834,7 @@ pub(crate) async fn start_task_impl(
     if let Some(id) = &resume_session_id {
         store.set_session_id(&task_id, id)?;
     }
-    if worktree.is_none() {
+    if worktree.is_none() && runtime_override.is_none() {
         // 无 worktree 隔离：落目录基线，产出面板只显示本轮改动
         store.set_task_baseline(
             &task_id,
@@ -807,7 +876,7 @@ pub(crate) async fn start_task_impl(
     };
     let child = runner::spawn(
         harness,
-        &mode,
+        &runtime_mode,
         &model,
         &task_cwd,
         &runtime_prompt,
@@ -961,7 +1030,9 @@ async fn confirm_conversation_recovery(
             return Err(check.summary);
         }
         store.confirm_recovery(&task_id)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -973,11 +1044,20 @@ async fn inspect_conversation_recovery(
     let store = store.clone_handle();
     let registry = registry.inner().clone();
     tauri::async_runtime::spawn_blocking(move || recovery::inspect(&store, &registry, &task_id))
-        .await.map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn child_pid(registry: &TaskRegistry, task_id: &str) -> Option<u32> {
-    registry.0.lock().ok()?.get_mut(task_id)?.child.as_mut()?.inner().id()
+    registry
+        .0
+        .lock()
+        .ok()?
+        .get_mut(task_id)?
+        .child
+        .as_mut()?
+        .inner()
+        .id()
 }
 
 #[tauri::command]
@@ -992,7 +1072,10 @@ fn reset_conversation_binding(
 /// 前端 → Rust：最近的任务历史。
 #[tauri::command]
 async fn list_tasks(store: State<'_, Store>, limit: Option<i64>) -> Result<Vec<TaskRow>, String> {
-    store.list_tasks(limit.unwrap_or(50))
+    let store = store.clone_handle();
+    tauri::async_runtime::spawn_blocking(move || store.list_task_summaries(limit.unwrap_or(50)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 前端 → Rust：读取某个任务的全部事件（历史回放）。
@@ -1557,17 +1640,12 @@ pub(crate) fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value 
     let skip = |name: &str| {
         matches!(
             name,
-            "node_modules"
-                | "target"
-                | "dist"
-                | "build"
-                | "__pycache__"
-                | ".venv"
-                | "vendor"
-                | "worktrees"
+            "node_modules" | "target" | "__pycache__" | ".venv" | "vendor" | "worktrees"
         ) || name.starts_with('.')
     };
     let mut entries = serde_json::Map::new();
+    let head = turn_git_ok(dir, &["rev-parse", "--verify", "HEAD"]).map(|s| s.trim().to_owned());
+    let mut hash_budget = 64 * 1024 * 1024u64;
     let mut stack = vec![dir.to_path_buf()];
     let mut visited = 0usize;
     while let Some(d) = stack.pop() {
@@ -1577,7 +1655,7 @@ pub(crate) fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value 
         for entry in rd.flatten() {
             visited += 1;
             if visited > 5000 {
-                return serde_json::json!({ "entries": entries, "truncated": true });
+                return serde_json::json!({ "entries": entries, "truncated": true, "head": head });
             }
             let name = entry.file_name().to_string_lossy().to_string();
             let p = entry.path();
@@ -1601,10 +1679,16 @@ pub(crate) fn snapshot_dir_manifest(dir: &std::path::Path) -> serde_json::Value 
                 .strip_prefix(dir)
                 .map(|x| x.to_string_lossy().to_string())
                 .unwrap_or(name.clone());
-            entries.insert(rel, serde_json::json!([mtime, meta.len()]));
+            let hash = if meta.len() <= hash_budget && meta.len() <= turn_review::FILE_LIMIT {
+                hash_budget -= meta.len();
+                turn_review::fingerprint(&p)
+            } else {
+                None
+            };
+            entries.insert(rel, serde_json::json!([mtime, meta.len(), hash]));
         }
     }
-    serde_json::json!({ "entries": entries })
+    serde_json::json!({ "entries": entries, "head": head })
 }
 
 /// 本任务事件流里"被工具改过的文件"——跨会话隔离的权威来源。
@@ -1719,14 +1803,7 @@ fn classify_turn_changes(
         let skip = |name: &str| {
             matches!(
                 name,
-                "node_modules"
-                    | "target"
-                    | "dist"
-                    | "build"
-                    | "__pycache__"
-                    | ".venv"
-                    | "vendor"
-                    | "worktrees"
+                "node_modules" | "target" | "__pycache__" | ".venv" | "vendor" | "worktrees"
             ) || name.starts_with('.')
         };
         let mut stack = vec![dir.to_path_buf()];
@@ -1792,22 +1869,35 @@ fn classify_turn_changes(
             Some(entry) => {
                 let bm = entry.get(0).and_then(|v| v.as_u64()).unwrap_or(0);
                 let bs = entry.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
-                bm != *mtime || bs != *size
+                let hash_changed = entry
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .zip(
+                        frozen
+                            .and_then(|f| f["entries"].get(rel))
+                            .and_then(|v| v.get(2))
+                            .and_then(|v| v.as_str()),
+                    )
+                    .is_some_and(|(before, after)| before != after);
+                bm != *mtime || bs != *size || hash_changed
             }
             None => true,
         };
         if !changed {
             continue;
         }
-        let bytes = std::fs::read(dir.join(rel)).unwrap_or_default();
+        let bytes = preview_sample(&dir.join(rel));
         let binary = bytes.contains(&0);
         let is_new = !manifest_entries.contains_key(rel);
         let (added, removed) = if binary {
             (None, None)
-        } else if is_new {
+        } else if is_new && *size <= bytes.len() as u64 {
             // 新增文件：全部行数即新增
             (
-                Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1),
+                Some(
+                    bytes.iter().filter(|&&b| b == 10).count() as u64
+                        + u64::from(!bytes.is_empty() && !bytes.ends_with(b"\n")),
+                ),
                 Some(0),
             )
         } else if let Some((a, r)) = numstat.get(rel) {
@@ -1817,13 +1907,8 @@ fn classify_turn_changes(
             // 非 git 目录的修改：没有可信的 diff 统计，宁缺毋滥
             (None, None)
         };
-        let diff = if git_inside {
-            turn_git_ok(dir, &["diff", "HEAD", "--unified=3", "--", rel])
-                .map(|s| s.chars().take(60_000).collect::<String>())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // Patches are read on demand by get_task_file_patch, never for every poll.
+        let diff = String::new();
         files.push(TurnFileChange {
             path: rel.clone(),
             status: if manifest_entries.contains_key(rel) {
@@ -1855,9 +1940,19 @@ fn classify_turn_changes(
 
 /// 前端 → Rust：轮次产出面板（基线驱动；旧任务无基线时回退 git/mtime 行为）。
 #[tauri::command]
-fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnArtifacts, String> {
+async fn get_turn_artifacts(
+    store: State<'_, Store>,
+    task_id: String,
+) -> Result<TurnArtifacts, String> {
+    let store = store.clone_handle();
+    tauri::async_runtime::spawn_blocking(move || collect_turn_artifacts(&store, &task_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn collect_turn_artifacts(store: &Store, task_id: &str) -> Result<TurnArtifacts, String> {
     let row = store
-        .get_task(&task_id)?
+        .get_task(task_id)?
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
     let dir = row.worktree_dir.clone().unwrap_or_else(|| row.cwd.clone());
     let dir_path = std::path::Path::new(&dir);
@@ -1883,7 +1978,7 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         // 运行中（还没有冻结快照）：目录对比分不出"谁改的"——别的会话此刻的改动会被算进来。
         // 只保留本任务自己的工具事件碰过的文件，做到跨会话隔离。
         if frozen.is_none() {
-            let events = store.get_events(&task_id, 0, 20_000)?;
+            let events = store.get_events(task_id, 0, 20_000)?;
             if !events.is_empty() {
                 let touched = touched_files_from_events(&events, dir_path);
                 files.retain(|f| touched.contains(&f.path));
@@ -1944,14 +2039,14 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         };
         let mut stack = vec![dir_path.to_path_buf()];
         let mut visited = 0usize;
-        while let Some(d) = stack.pop() {
+        'scan: while let Some(d) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&d) else {
                 continue;
             };
             for entry in rd.flatten() {
                 visited += 1;
                 if visited > 5000 {
-                    break;
+                    break 'scan;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
                 let p = entry.path();
@@ -2056,11 +2151,12 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
         let untracked = xy.starts_with("??");
         let deleted = xy.contains('D');
         let (added, removed, binary) = if untracked {
-            match std::fs::read(dir_path.join(path)) {
-                Ok(bytes) => {
+            match std::fs::metadata(dir_path.join(path)) {
+                Ok(meta) => {
+                    let bytes = preview_sample(&dir_path.join(path));
                     let bin = bytes.contains(&0);
                     (
-                        if bin {
+                        if bin || meta.len() > bytes.len() as u64 {
                             None
                         } else {
                             Some(bytes.iter().filter(|&&b| b == 10).count() as u64 + 1)
@@ -2075,17 +2171,7 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
             let (a, r) = numstat.get(path).copied().unwrap_or((None, None));
             (a, r, a.is_none() && r.is_none())
         };
-        let diff = if deleted {
-            String::new()
-        } else if untracked {
-            turn_git_ok(dir_path, &["diff", "--no-index", "--", "/dev/null", path])
-                .map(|o| o.chars().take(60_000).collect())
-                .unwrap_or_default()
-        } else {
-            turn_git_ok(dir_path, &["diff", "HEAD", "--unified=3", "--", path])
-                .map(|s| s.chars().take(60_000).collect())
-                .unwrap_or_default()
-        };
+        let diff = String::new();
         let status = if untracked {
             "added"
         } else if deleted {
@@ -2121,41 +2207,66 @@ fn get_turn_artifacts(store: State<'_, Store>, task_id: String) -> Result<TurnAr
     })
 }
 
-/// 前端 → Rust：撤销单文件改动（未跟踪 = 删除新文件；跟踪 = 还原到 HEAD）。
+/// Artifact scans sample file headers instead of allocating entire large files.
+fn preview_sample(path: &std::path::Path) -> Vec<u8> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(8192).read_to_end(&mut bytes);
+    }
+    bytes
+}
+
+/// Restore only verified turn results; never overwrite later edits or dirty baselines.
 #[tauri::command]
-fn undo_task_file(store: State<'_, Store>, task_id: String, path: String) -> Result<(), String> {
-    let row = store
-        .get_task(&task_id)?
-        .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let dir = row.worktree_dir.clone().unwrap_or_else(|| row.cwd.clone());
-    let dir_path = std::path::Path::new(&dir);
-    if !dir_path.is_dir() {
-        return Err(format!("任务目录不存在：{dir}"));
-    }
-    let safe = path.replace('"', "");
-    let status_out =
-        turn_git_ok(dir_path, &["status", "--porcelain", "--", &safe]).ok_or("git status 失败")?;
-    let untracked = status_out
-        .lines()
-        .next()
-        .map(|l| l.starts_with("??"))
-        .unwrap_or(false);
-    let out = if untracked {
-        turn_git(dir_path, &["clean", "-f", "--", &safe])
-    } else {
-        turn_git(dir_path, &["checkout", "HEAD", "--", &safe])
-    };
-    match out {
-        Some(o) if o.status.success() => Ok(()),
-        Some(o) => Err(format!(
-            "撤销失败：{}",
-            String::from_utf8_lossy(&o.stderr)
-                .lines()
-                .next()
-                .unwrap_or("未知错误")
-        )),
-        None => Err("无法执行 git".into()),
-    }
+async fn undo_task_file(
+    app: AppHandle,
+    store: State<'_, Store>,
+    task_id: String,
+    path: String,
+) -> Result<String, String> {
+    let store = store.clone_handle();
+    let backups = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("turn-undo");
+    tauri::async_runtime::spawn_blocking(move || {
+        let row = store
+            .get_task(&task_id)?
+            .ok_or_else(|| format!("unknown task: {task_id}"))?;
+        let dir = row.worktree_dir.clone().unwrap_or_else(|| row.cwd.clone());
+        let dir_path = std::path::Path::new(&dir);
+        if !dir_path.is_dir() {
+            return Err(format!("任务目录不存在：{dir}"));
+        }
+        if row.status == "running" {
+            return Err("执行结束后才能撤销".into());
+        }
+        let _conversation =
+            store.claim_conversation_mutation(&store.ensure_conversation(&task_id)?)?;
+        let _workspace = store.claim_workspace(&dir, "undo-file")?;
+        let baseline = serde_json::from_str(
+            row.baseline
+                .as_deref()
+                .ok_or("缺少起始快照，无法安全撤销")?,
+        )
+        .map_err(|e| format!("{e}"))?;
+        let result = serde_json::from_str(
+            row.result_manifest
+                .as_deref()
+                .ok_or("缺少成果快照，无法安全撤销")?,
+        )
+        .map_err(|e| format!("{e}"))?;
+        let backup = turn_review::undo(dir_path, &path, &baseline, &result, &backups)?;
+        store.append_event(
+            &task_id,
+            &serde_json::json!({"type":"file_undo","path":path,"backup_dir":backup}).to_string(),
+        )?;
+        Ok(backup)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 用系统默认程序打开工件；reveal = 在文件夹中显示。
@@ -2912,6 +3023,9 @@ pub fn run() {
             orchestration::start_graph_run,
             orchestration::list_graph_runs,
             plan_launch::start_approved_plan,
+            workflow::get_pending_workflow_plan,
+            workflow::cancel_workflow_plan,
+            workflow::get_workflow_limits,
             orchestration::cancel_graph_node,
             orchestration::cancel_graph_run,
             orchestration::integrate_graph_run,
@@ -2925,6 +3039,10 @@ pub fn run() {
             get_turn_artifacts,
             undo_task_file,
             open_artifact,
+            file_preview::preview_task_file,
+            file_preview::get_task_file_patch,
+            project_files::list_task_directory,
+            project_files::read_task_text_window,
             delete_session,
             list_tasks,
             get_task_events,

@@ -191,6 +191,21 @@ pub async fn run_pi_task(
                         continue;
                     }
                     let parsed = serde_json::from_str::<serde_json::Value>(trimmed).ok();
+                    if let Some(value) = parsed.as_ref().filter(|v| {
+                        v["type"] == "message_end" && v["message"]["role"] == "assistant"
+                    }) {
+                        if let Some(model) =
+                            value["message"]["model"].as_str().filter(|s| !s.is_empty())
+                        {
+                            let _ = store2.append_event(
+                                &task_id2,
+                                &serde_json::json!({
+                                    "type":"model_observed","model":model
+                                })
+                                .to_string(),
+                            );
+                        }
+                    }
                     let event_type = parsed
                         .as_ref()
                         .and_then(|v| v.get("type"))

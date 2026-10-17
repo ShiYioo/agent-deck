@@ -19,6 +19,7 @@ pub enum Harness {
 }
 
 impl Harness {
+    pub const ALL: [Self; 3] = [Self::Zcode, Self::Codex, Self::Opencode];
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.to_ascii_lowercase().as_str() {
             "zcode" => Ok(Self::Zcode),

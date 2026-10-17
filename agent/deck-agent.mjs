@@ -37,6 +37,7 @@ import path from "node:path";
 import os from "node:os";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { normalizeWorkflowPlan } from "./workflow-plan.mjs";
 
 let session = null;
 let currentModel = null; // 当前底层 provider（glm/gpt）
@@ -839,7 +840,7 @@ const PROPOSE_COLLABORATION_TOOL = {
       nodes: {
         type: "array",
         minItems: 1,
-        maxItems: 12,
+        maxItems: 1024,
         items: {
           type: "object",
           properties: {
@@ -852,6 +853,17 @@ const PROPOSE_COLLABORATION_TOOL = {
               description: "必须先完成的节点 id；留空表示可立即开始",
             },
             read_only: { type: "boolean", description: "默认 true：只产出结论，不改文件" },
+            contract: {
+              type: "object",
+              properties: {
+                workspace: { type: "string", enum: ["git", "artifacts"], description: "代码用 git；小说/文档等用 artifacts，不依赖 Git" },
+                model_hint: { type: ["string", "null"], description: "用户指定模型的原文，禁止猜测替换" },
+                outputs: { type: "array", items: { type: "string" }, description: "向后续节点提交的相对文件路径" },
+                inputs: { type: "array", items: { type: "string" }, description: "从源工作目录读取并冻结的相对文件路径" },
+                acceptance: { type: "boolean", description: "独立只读验收，结论必须绑定成果版本" },
+              },
+              required: ["workspace", "outputs", "acceptance"],
+            },
             execution: {
               type: "object",
               description: "指定执行模型；用户要求免费或特定模型时必须填写确认过的完整模型 ID",
@@ -865,6 +877,10 @@ const PROPOSE_COLLABORATION_TOOL = {
               properties: {
                 commander: { type: "string", enum: PLAN_HARNESSES, description: "规划和验收方，必须与 harness 不同" },
                 max_rounds: { type: "integer", minimum: 1, maximum: 3 },
+                model_hint: { type: ["string", "null"] },
+                execution: { type: "object", properties: {
+                  model: { type: ["string", "null"] }, effort: { type: ["string", "null"] },
+                } },
               },
               required: ["commander", "max_rounds"],
             },
@@ -872,57 +888,16 @@ const PROPOSE_COLLABORATION_TOOL = {
           required: ["id", "harness", "prompt"],
         },
       },
-      parallel: { type: "number", description: "最多同时执行几条任务链，1-4，默认 2" },
-      minutes: { type: "number", description: "协作总时限（分钟），1-60，默认 15" },
+      parallel: { type: "integer", description: "并发上限，默认 2，受平台当前额度约束" },
+      minutes: { type: "integer", description: "协作总时限（分钟），默认 15，受平台当前额度约束" },
     },
     required: ["why", "nodes"],
   },
   execute: async (toolCallId, args, signal) => {
     const id = toolCallId || randomUUID();
-    const raw = Array.isArray(args?.nodes) ? args.nodes : [];
-    if (raw.length < 1 || raw.length > 12) {
-      return {
-        content: [{ type: "text", text: "协作计划需要 1 到 12 个节点。" }],
-        isError: true,
-      };
-    }
-    const declared = new Set(raw.map((n) => String(n?.id ?? "")));
-    const nodes = raw.slice(0, 12).map((n) => {
-      const nodeId = String(n?.id ?? "");
-      return {
-        id: nodeId,
-        harness: PLAN_HARNESSES.includes(n?.harness) ? n.harness : "codex",
-        prompt: String(n?.prompt ?? ""),
-        // 只保留真实存在且非自身的依赖，别把无效 id 交给 Rust 侧的 DAG 校验
-        dependencies: (Array.isArray(n?.dependencies) ? n.dependencies : [])
-          .map(String)
-          .filter((d) => d !== nodeId && declared.has(d)),
-        read_only: n?.read_only !== false,
-         execution: n?.execution ? {
-           model: typeof n.execution.model === "string" ? n.execution.model : null,
-           effort: typeof n.execution.effort === "string" ? n.execution.effort : null,
-         } : undefined,
-         supervision: n?.supervision ? {
-           commander: String(n.supervision.commander ?? ""),
-           max_rounds: Number(n.supervision.max_rounds),
-         } : null,
-      };
-    });
-    if (nodes.some((n) => !n.id || !n.prompt.trim())) {
-      return { content: [{ type: "text", text: "每个节点都需要非空 id 与 prompt。" }], isError: true };
-    }
-    if (nodes.some((n) => n.supervision && (
-      !PLAN_HARNESSES.includes(n.supervision.commander) || n.supervision.commander === n.harness ||
-      !Number.isInteger(n.supervision.max_rounds) || n.supervision.max_rounds < 1 || n.supervision.max_rounds > 3
-    ))) {
-      return { content: [{ type: "text", text: "指挥方必须是不同于执行方的有效运行器，执行轮数必须为 1 到 3。" }], isError: true };
-    }
-    const plan = {
-      why: String(args?.why ?? ""),
-      nodes,
-      parallel: Math.min(4, Math.max(1, Math.floor(Number(args?.parallel) || 2))),
-      minutes: Math.min(60, Math.max(1, Number(args?.minutes) || 15)),
-    };
+    let plan;
+    try { plan = normalizeWorkflowPlan(args, PLAN_HARNESSES); }
+    catch (error) { return { content: [{ type: "text", text: error.message }], isError: true }; }
     const answer = await new Promise((resolve) => {
       const onAbort = () => resolve(null);
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -1022,13 +997,14 @@ async function handle(msg) {
             mode:
               msg.mode === "approved" ? "approved" : msg.mode === "plan" ? "plan" : "auto",
             resumeFile,
+            toolsEnabled: msg.mode !== "intent",
           });
           if (i === 0 && msg.resumeSessionFile) firstRun = false; // 续接：纪律已在历史里
           // 目标模式：首轮 prompt 即会话目标，跨轮持续注入（续接同会话由历史自证）
           if (msg.mode === "goal" && i === 0) currentGoal = msg.prompt;
           deckEvent("run_start", { model: p.provider });
           // 通用级运行规范：仅会话首轮注入（纪律只说一次）
-          const promptText = firstRun
+          const promptText = firstRun && msg.mode !== "intent"
             ? buildUniversalPrompt(msg.cwd, msg.memories) + "\n\n==== 任务 ====\n" + msg.prompt
             : msg.prompt;
           if (abortRequested) break;

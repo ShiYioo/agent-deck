@@ -1,6 +1,6 @@
 import { lazy, memo, Suspense, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, History, LoaderCircle } from "lucide-react";
-import { buildConversation, foldToolRows } from "../conversation";
+import { createConversationProjector, foldToolRows, type ToolSegment } from "../conversation";
 import type { AgentEvent } from "../types";
 import { useAutoScroll } from "../hooks/useAutoScroll";
 import { Disclosure } from "./Disclosure";
@@ -30,8 +30,15 @@ export const ConversationTimeline = memo(function ConversationTimeline({
   const hasNew = !follow && detachedAt.current !== (events.at(-1)?.key ?? null);
   const hidden = Math.max(0, events.length - limit);
   // Reduce before slicing so tool pairs and turn boundaries survive paging.
-  const rows = useMemo(() => buildConversation(events), [events]);
-  const activeFromKey = running ? [...rows].reverse().find((row) => row.kind === "user")?.key ?? rows[0]?.key : undefined;
+  const project = useMemo(createConversationProjector, []);
+  const rows = useMemo(() => project(events), [events, project]);
+  let activeFromKey: number | undefined;
+  if (running) {
+    activeFromKey = rows[0]?.key;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].kind === "user") { activeFromKey = rows[i].key; break; }
+    }
+  }
   const display = useMemo(() => foldToolRows(rows.filter((row) =>
     !hidden || row.key >= events[hidden].key), activeFromKey), [rows, hidden, events, activeFromKey]);
   useLayoutEffect(() => {
@@ -45,6 +52,9 @@ export const ConversationTimeline = memo(function ConversationTimeline({
     if (viewport) anchor.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
     setLimit((value) => value + PAGE_SIZE);
   };
+  const entries = useMemo(() => display.map((group) =>
+    group.kind === "single" ? <EventLine key={group.row.key} row={group.row} />
+      : <ToolGroup key={group.rows[0].key} group={group} />), [display]);
 
   return (
     <div className="conversation-timeline">
@@ -59,24 +69,7 @@ export const ConversationTimeline = memo(function ConversationTimeline({
               running ? (blocked ? null : <Activity label={activity} />) : "发送消息，继续这个任务"}
           </div>}
           <Suspense fallback={<div className="content-loading" role="status">正在加载对话…</div>}>
-            {display.map((group) => {
-              if (group.kind === "single") return <EventLine key={group.row.key} row={group.row} />;
-              const summary = group.uses.map(({ tool, n, targets, sample }) => {
-                if (targets !== null) {
-                  if (tool === "grep" || tool === "find") return `${tool} ×${n}（搜索 ${targets} 处）`;
-                  return `${tool} ×${n}（${sample.join("、")}${targets > sample.length ? ` 等 ${targets} 个文件` : ""}）`;
-                }
-                return `${tool} ×${n}`;
-              }).join(" · ");
-              return <Disclosure key={group.rows[0].key} className="activity-event"
-                defaultOpen={group.failed}
-                title={<><ToolIcon tool="tool" /><span>工具操作 ×{group.rows.length}：{summary}</span>
-                  {group.deletes > 0 && <span className="text-red-600">删除 {group.deletes}</span>}
-                  {group.failed && <span className="text-red-600">含失败</span>}</>}>
-                {[...group.thoughts, ...group.rows].sort((a, b) => a.key - b.key)
-                  .map((row) => <EventLine key={row.key} row={row} />)}
-              </Disclosure>;
-            })}
+            {entries}
           </Suspense>
           {events.length > 0 && running && !blocked && <Activity label={activity} />}
           {footer}
@@ -90,6 +83,27 @@ export const ConversationTimeline = memo(function ConversationTimeline({
     </div>
   );
 });
+
+const ToolGroup = memo(function ToolGroup({ group }: { group: ToolSegment }) {
+  const summary = group.uses.map(({ tool, n, targets, sample }) => {
+    if (targets !== null) {
+      if (tool === "grep" || tool === "find") return `${tool} ×${n}（搜索 ${targets} 处）`;
+      return `${tool} ×${n}（${sample.join("、")}${targets > sample.length ? ` 等 ${targets} 个文件` : ""}）`;
+    }
+    return `${tool} ×${n}`;
+  }).join(" · ");
+  return <Disclosure className="activity-event" defaultOpen={group.failed}
+    title={<><ToolIcon tool="tool" /><span>工具操作 ×{group.rows.length}：{summary}</span>
+      {group.deletes > 0 && <span className="text-red-600">删除 {group.deletes}</span>}
+      {group.failed && <span className="text-red-600">含失败</span>}</>}>
+    {[...group.thoughts, ...group.rows].sort((a, b) => a.key - b.key)
+      .map((row) => <EventLine key={row.key} row={row} />)}
+  </Disclosure>;
+}, (previous, next) =>
+  previous.group.rows.length === next.group.rows.length
+  && previous.group.thoughts.length === next.group.thoughts.length
+  && previous.group.rows.every((row, index) => row === next.group.rows[index])
+  && previous.group.thoughts.every((row, index) => row === next.group.thoughts[index]));
 
 function Activity({ label }: { label: string }) {
   return <div className="transcript-loading timeline-activity" role="status" aria-label="加载中">

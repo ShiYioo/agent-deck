@@ -1,14 +1,16 @@
-import { useState } from "react";
-import Markdown from "react-markdown";
+import { useContext, useState } from "react";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Copy, Check } from "lucide-react";
+import { FilePreviewContext, localFilePath } from "../filePreview";
 
 
-/** 助手文本渲染：``` 代码块分块 + 深底 + 复制按钮（Codex 桌面端习惯） */
+/** 助手文本渲染：Markdown 正文、独立代码块与复制操作。 */
 export function AssistantText({ text }: { text: string }) {
+  const openFile = useContext(FilePreviewContext);
   return (
     <div className="assistant-markdown">
-      <Markdown remarkPlugins={[remarkGfm]} components={{
+      <Markdown remarkPlugins={[remarkGfm]} urlTransform={(url) => localFilePath(url) !== null ? url : defaultUrlTransform(url)} components={{
         pre: ({ children }) => <>{children}</>,
         code: ({ className, children, node, ...props }) => {
           const fenced = node?.position && node.position.end.line > node.position.start.line;
@@ -16,7 +18,12 @@ export function AssistantText({ text }: { text: string }) {
             ? <CodeBlock code={String(children).replace(/\n$/, "")} lang={className?.replace("language-", "") ?? ""} />
             : <code {...props}>{children}</code>;
         },
-        a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+        a: ({ children, href, ...props }) => {
+          const local = localFilePath(href ?? "");
+          return local && openFile
+            ? <a {...props} href={href} onClick={(event) => { event.preventDefault(); openFile(local); }}>{children}</a>
+            : <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
+        },
         table: ({ children }) => <div className="markdown-table"><table>{children}</table></div>,
       }}>{text}</Markdown>
     </div>
@@ -35,19 +42,19 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
     );
   };
   return (
-    <div className="group relative my-1 overflow-hidden rounded-lg border border-stone-200 bg-stone-900">
-      <div className="flex items-center justify-between px-2.5 py-1 text-[10px] text-stone-400">
+    <div className="code-block">
+      <div className="code-block-heading">
         <span className="font-sans">{lang || "code"}</span>
         <button
            onClick={copy}
            title={copied ? "已复制" : "复制代码"}
            aria-label={copied ? "已复制" : "复制代码"}
-          className="font-sans text-stone-400 transition-colors hover:text-stone-200"
+          className="code-copy-button"
         >
           {copied ? <Check size={13} /> : <Copy size={13} />}
         </button>
       </div>
-      <pre className="overflow-x-auto bg-stone-950/60 px-3 py-2 text-stone-200">
+      <pre>
         {code}
       </pre>
     </div>

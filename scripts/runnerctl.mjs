@@ -37,30 +37,41 @@ export async function main(args = process.argv.slice(2)) {
       source: { type: "string" }, "nodes-file": { type: "string" },
       parallel: { type: "string", default: "2" }, timeout: { type: "string", default: "900" },
       node: { type: "string" }, "control-file": { type: "string" },
+      runner: { type: "string" }, "plan-file": { type: "string" }, "request-id": { type: "string" },
       "wait-seconds": { type: "string", default: "3600" }, help: { type: "boolean" },
     },
   });
   const [command, id] = positionals;
   if (values.help || !command) {
     console.log(`runnerctl tasks
+runnerctl capabilities [--runner RUNNER]
 runnerctl runs --source TASK
+runnerctl handoff --source TASK --request-id STABLE_ID --plan-file plan.json
 runnerctl submit --source TASK --nodes-file plan.json [--parallel 2] [--timeout 900]
 runnerctl wait RUN --source TASK [--wait-seconds 3600]
 runnerctl cancel RUN [--node NODE]
 
-AgentDeck must be running. TASK is an existing completed conversation task.
+AgentDeck must be running. submit requires a completed source.
+handoff accepts a running source, acknowledges the plan and releases it before dispatch.
+After handoff returns accepted, finish the source turn; do not wait while occupying it.
 Output is JSON. Submit once, then query/wait; do not blindly retry timed-out submissions.`);
     return;
   }
-  if (!["tasks", "runs", "submit", "wait", "cancel"].includes(command)) {
+  if (!["tasks", "capabilities", "handoff", "runs", "submit", "wait", "cancel"].includes(command)) {
     throw new Error(`Unknown command: ${command}`);
   }
-  if (["runs", "submit", "wait"].includes(command) && !values.source) throw new Error("--source is required");
+  if (["runs", "submit", "handoff", "wait"].includes(command) && !values.source) throw new Error("--source is required");
   if (["wait", "cancel"].includes(command) && !id) throw new Error("Run ID is required");
   const discovery = JSON.parse(await readFile(values["control-file"] || discoveryPath(), "utf8"));
   const request = (data) => requestControl(discovery, data);
   let result;
   if (command === "tasks") result = await request({ action: "tasks" });
+  if (command === "capabilities") result = await request({ action: "capabilities", harness: values.runner ?? null });
+  if (command === "handoff") {
+    if (!values["plan-file"] || !values["request-id"]) throw new Error("--plan-file and stable --request-id are required");
+    const plan = JSON.parse(await readFile(values["plan-file"], "utf8"));
+    result = await request({ action: "handoff", source_task_id: values.source, request_id: values["request-id"], plan });
+  }
   if (command === "runs") result = await request({ action: "runs", source_task_id: values.source });
   if (command === "submit") {
     if (!values["nodes-file"]) throw new Error("--nodes-file is required");

@@ -17,6 +17,43 @@ export function contextRecords(archive, fallback) {
   }, ...archive.records];
 }
 
+// A compaction notification is never an execution verdict. Manual compaction
+// may interrupt the active turn; resume only after BOTH notifications arrive,
+// regardless of their ordering. Duplicate notifications are harmless.
+export class CompactionGate {
+  constructor() { this.reset(); }
+  reset() { this.requested = false; this.compacted = false; this.interrupted = false; this.settled = false; }
+  request() {
+    if (this.requested || this.settled) return false;
+    this.requested = true;
+    // An earlier automatic compaction cannot acknowledge this new request.
+    this.compacted = false;
+    this.interrupted = false;
+    return true;
+  }
+  observe(kind, status) {
+    if (this.settled) return "wait";
+    if (kind === "compacted") this.compacted = true;
+    if (kind === "turn") {
+      if (status === "completed") {
+        this.settled = true;
+        return "complete";
+      }
+      // A failed turn is not a recoverable compaction interruption.
+      if (!this.requested || status !== "interrupted") {
+        this.settled = true;
+        return "fail";
+      }
+      this.interrupted = true;
+    }
+    if (this.requested && this.compacted && this.interrupted) {
+      this.settled = true;
+      return "resume";
+    }
+    return "wait";
+  }
+}
+
 export function historyTool(records, tool, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Invalid history arguments");
   if (tool === "agentdeck_search_history") {
@@ -173,7 +210,8 @@ async function stopChild(child) {
   child.stderr?.destroy();
 }
 
-async function codex(params) {
+export async function codex(params, { launch = executable, commandInput = process.stdin, emit = output } = {}) {
+  const output = emit;
   let history = [];
   if (params.contextArchive) {
     if ((await stat(params.contextArchive)).size > 100_000_000) throw new Error("Shared history archive exceeds adapter safety limit");
@@ -185,7 +223,7 @@ async function codex(params) {
   // 请求作答——发 native_form_request 给 UI，stdin 的 approve/reject（带同一 itemId）
   // 映射回 { answers: { [questionId]: { answers: [...] } } }。无 id 的指令走 /compact。
   const pendingInputs = new Map();
-  const stdinLines = createInterface({ input: process.stdin });
+  const stdinLines = createInterface({ input: commandInput });
   stdinLines.on("line", (line) => {
     let command;
     try { command = JSON.parse(line); } catch { return; }
@@ -196,9 +234,10 @@ async function codex(params) {
       return;
     }
     if (command?.cmd === "compact" && threadId) {
-      compactRequested = true;
+      if (!compaction.request()) return;
+      compactTimer = setTimeout(() => fail(new Error("压缩请求后未收到完成通知")), 180_000);
       rpc.call("thread/compact/start", { threadId }).catch((error) =>
-        output({ type: "error", message: `上下文压缩失败：${error?.message ?? error}` }));
+        fail(new Error(`上下文压缩失败：${error?.message ?? error}`)));
     }
   });
   stdinLines.on("close", () => {
@@ -233,17 +272,26 @@ async function codex(params) {
     }
     return { answers };
   };
-  const child = executable(params.program, ["app-server", "--stdio"], { cwd: params.cwd, stdio: ["pipe", "pipe", "pipe"] });
+  const child = launch(params.program, ["app-server", "--stdio"], { cwd: params.cwd, stdio: ["pipe", "pipe", "pipe"] });
   child.stderr.on("data", (data) => process.stderr.write(data));
   let complete;
   let fail;
   let threadId;
   let turnId;
+  let startingTurn = false;
+  const earlyTurns = [];
   let usage;
   // /compact 会中断进行中的 turn（codex 语义）——这不算失败：
-  // 等 thread/compacted 到达后干净收尾
-  let compactRequested = false;
-  const done = new Promise((resolve, reject) => { complete = resolve; fail = reject; });
+  // 等压缩完成与中断通知都到达，再续接；不能作为任务成功收尾。
+  const compaction = new CompactionGate();
+  let compactTimer;
+  let done = new Promise((resolve, reject) => { complete = resolve; fail = reject; });
+  const observe = (kind, status, error) => {
+    const action = compaction.observe(kind, status);
+    if (action === "resume") complete({ resume: true });
+    if (action === "complete") complete({ resume: false });
+    if (action === "fail") fail(new Error(JSON.stringify(error ?? status)));
+  };
   // Register immediately so a very fast notification cannot be lost.
   done.catch(() => {});
   const rpc = new Rpc(child, (event) => {
@@ -253,7 +301,7 @@ async function codex(params) {
       // 压缩终态：thread/compacted 已废弃，现在以 contextCompaction 条目收尾
       if (p.item?.type === "contextCompaction") {
         output({ type: "thread.compacted" });
-        if (compactRequested) complete();
+        observe("compacted");
         return;
       }
       const item = codexItem(p.item ?? {});
@@ -263,20 +311,13 @@ async function codex(params) {
     // 上下文压缩完成（codex 的 app-server 只报终态）：交给 codex.rs 渲染为状态行
     if (event.method === "thread/compacted") {
       output({ type: "thread.compacted" });
-      if (compactRequested) complete();
+      observe("compacted");
       return;
     }
     if (event.method === "turn/completed") {
+      if (startingTurn) { earlyTurns.push(p.turn); return; }
       if (turnId && p.turn?.id !== turnId) return;
-      if (p.turn?.status !== "completed") {
-        if (compactRequested) {
-          // 压缩中断 turn 是预期路径；thread/compacted 若 3 分钟没来则按失败收尾
-          const timer = setTimeout(() => fail(new Error("压缩请求后未收到完成通知")), 180_000);
-          done.catch(() => {}).finally(() => clearTimeout(timer));
-          return;
-        }
-        fail(new Error(JSON.stringify(p.turn?.error ?? p.turn?.status)));
-      } else complete();
+      observe("turn", p.turn?.status, p.turn?.error);
     }
     if (event.method === "error" && !p.willRetry) fail(new Error(p.error?.message ?? "Native harness error"));
   }, (request) => {
@@ -329,6 +370,9 @@ async function codex(params) {
       params.resume ? { ...options, threadId: params.resume } : options);
     threadId = started.thread?.id;
     if (!threadId) throw new Error("App Server did not return a thread ID");
+    if (typeof started.model === "string" && started.model) {
+      output({ type: "native_model_observed", model: started.model });
+    }
     output({ type: "thread.started", thread_id: threadId });
     const text = params.contextArchive
       ? `本轮完整请求可用 agentdeck_read_history 的 index=0 分页读取；其余索引是带来源的历史资料。不得因文件读取受限而跳过当前请求。\n${params.prompt}`
@@ -338,15 +382,35 @@ async function codex(params) {
     const policy = sandbox === "workspace-write"
       ? { type: "workspaceWrite", writableRoots: [params.cwd], networkAccess: false }
       : sandbox === "danger-full-access" ? { type: "dangerFullAccess" } : { type: "readOnly" };
-    const turn = await rpc.call("turn/start", { threadId, input, cwd: params.cwd, approvalPolicy: "never", sandboxPolicy: policy,
-      ...(params.effort ? { effort: params.effort } : {}) });
-    turnId = turn.turn?.id;
-    await done;
+    const startTurn = async (turnInput) => {
+      startingTurn = true;
+      const turn = await rpc.call("turn/start", { threadId, input: turnInput, cwd: params.cwd,
+        approvalPolicy: "never", sandboxPolicy: policy,
+        ...(params.effort ? { effort: params.effort } : {}) });
+      turnId = turn.turn?.id;
+      if (!turnId) throw new Error("App Server did not return a turn ID");
+      startingTurn = false;
+      for (const early of earlyTurns.splice(0)) {
+        if (early?.id === turnId) observe("turn", early.status, early.error);
+      }
+    };
+    await startTurn(input);
+    while ((await done)?.resume) {
+      clearTimeout(compactTimer);
+      compaction.reset();
+      done = new Promise((resolve, reject) => { complete = resolve; fail = reject; });
+      done.catch(() => {});
+      output({ type: "status", text: "上下文已整理，正在恢复任务…", compacting: false });
+      const recovery = `上下文压缩已完成，原任务尚未完成。继续原任务，不重新执行结果不明的命令，先核对实际文件与执行结果。\
+用户最新要求优先于旧历史。重新核对以下平台保存的本轮请求和约束，完成原有验收后再报告成果：\n${text}`;
+      await startTurn([{ type: "text", text: recovery }]);
+    }
     output({ type: "turn.completed", usage: usage ? {
       input_tokens: usage.inputTokens, output_tokens: usage.outputTokens,
       cached_input_tokens: usage.cachedInputTokens, reasoning_output_tokens: usage.reasoningOutputTokens,
     } : undefined });
   } finally {
+    clearTimeout(compactTimer);
     stdinLines.close();
     rpc.close();
     await stopChild(child);

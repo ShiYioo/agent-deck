@@ -2,7 +2,88 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { Rpc, codexItem, historyTool, contextRecords, opencodeEventOutputs, trackToolName } from "./native-harness.mjs";
+import { Rpc, CompactionGate, codex, codexItem, historyTool, contextRecords, opencodeEventOutputs, trackToolName } from "./native-harness.mjs";
+
+test("manual compaction resumes once only after interruption and compaction, in either order", () => {
+  for (const order of [["compacted", "turn"], ["turn", "compacted"]]) {
+    const gate = new CompactionGate();
+    assert.equal(gate.request(), true);
+    assert.equal(gate.request(), false);
+    assert.equal(gate.observe(order[0], "interrupted"), "wait");
+    assert.equal(gate.observe(order[1], "interrupted"), "resume");
+    assert.equal(gate.observe("compacted"), "wait");
+    assert.equal(gate.observe("turn", "interrupted"), "wait");
+    gate.reset();
+    assert.equal(gate.observe("compacted"), "wait");
+    assert.equal(gate.observe("turn", "completed"), "complete");
+  }
+});
+
+test("automatic compaction does not complete a stage or mask execution failure", () => {
+  const gate = new CompactionGate();
+  assert.equal(gate.observe("compacted"), "wait");
+  assert.equal(gate.observe("turn", "failed"), "fail");
+  const manual = new CompactionGate();
+  manual.request();
+  assert.equal(manual.observe("compacted"), "wait");
+  assert.equal(manual.observe("turn", "failed"), "fail");
+  const later = new CompactionGate();
+  assert.equal(later.observe("compacted"), "wait");
+  later.request();
+  assert.equal(later.observe("turn", "interrupted"), "wait");
+  assert.equal(later.observe("compacted"), "resume");
+});
+
+test("Codex adapter continues interrupted work on the same thread before reporting success", { timeout: 5000 }, async () => {
+  for (const reversed of [false, true]) {
+    const { child } = fixture();
+    child.stderr = new PassThrough();
+    child.kill = () => {};
+    const commands = new PassThrough();
+    const events = [];
+    const turns = [];
+    const send = (value) => child.stdout.write(`${JSON.stringify(value)}\n`);
+    child.stdin.on("data", (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.id === undefined) return;
+      const reply = (result) => send({ id: message.id, result });
+      if (message.method === "initialize") reply({});
+      else if (message.method === "thread/start") reply({ thread: { id: "thread-one" } });
+      else if (message.method === "thread/compact/start") {
+        reply({});
+        const notifications = [
+          { method: "turn/completed", params: { threadId: "thread-one", turn: { id: "turn-1", status: "interrupted" } } },
+          { method: "item/completed", params: { threadId: "thread-one", item: { type: "contextCompaction" } } },
+        ];
+        if (reversed) notifications.reverse();
+        notifications.forEach(send);
+        send({ method: "thread/compacted", params: { threadId: "thread-one" } });
+      } else if (message.method === "turn/start") {
+        turns.push(message.params);
+        if (turns.length === 1) {
+          reply({ turn: { id: "turn-1" } });
+          setImmediate(() => commands.write('{"cmd":"compact"}\n'));
+        } else {
+          assert.equal(events.filter((event) => event.type === "turn.completed").length, 0);
+          // Exercise completion arriving before the turn/start RPC response.
+          send({ method: "turn/completed", params: { threadId: "thread-one", turn: { id: "turn-2", status: "completed" } } });
+          reply({ turn: { id: "turn-2" } });
+        }
+      } else throw new Error(`Unexpected RPC: ${message.method}`);
+    });
+    try {
+      await codex({ program: "mock", cwd: process.cwd(), prompt: "不得修改支付模块；验收版本 v42", mode: "write", effort: "high" }, {
+        launch: () => child, commandInput: commands, emit: (event) => events.push(event),
+      });
+      assert.equal(turns.length, 2);
+      assert.equal(turns[1].threadId, turns[0].threadId);
+      assert.deepEqual(turns[1].sandboxPolicy, turns[0].sandboxPolicy);
+      assert.equal(turns[1].effort, "high");
+      assert.match(turns[1].input[0].text, /不得修改支付模块；验收版本 v42/);
+      assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+    } finally { commands.destroy(); }
+  }
+});
 
 function fixture() {
   const child = new EventEmitter();

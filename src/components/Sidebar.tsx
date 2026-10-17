@@ -84,7 +84,7 @@ export const Sidebar = memo(function Sidebar({
         </div>
       </div>
       <nav className="sidebar-nav">
-        <button className="nav-action" onClick={() => onNew()}><SquarePen size={17} />新聊天</button>
+        <button className="nav-action sidebar-primary-action" aria-label="新聊天" onClick={() => onNew()}><SquarePen size={17} />新聊天<kbd aria-hidden="true">Ctrl N</kbd></button>
       </nav>
       {searchOpen && (
         <div className="sidebar-search">

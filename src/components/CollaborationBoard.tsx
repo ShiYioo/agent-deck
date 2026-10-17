@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { GitFork, Play, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
-  getContextPolicy, getSetting, listGraphRuns, resetConversationBinding, setSetting, startGraphRun, updateContextPolicy,
-  type ContextPolicy, type GraphNodeSpec, type GraphRun,
+  getContextPolicy, getSetting, getWorkflowLimits, listGraphRuns, resetConversationBinding, setSetting, startGraphRun, updateContextPolicy,
+  type ContextPolicy, type GraphNodeSpec, type GraphRun, type WorkflowLimits,
 } from "../api";
 import { inheritedExecution } from "../api";
 import { ExecutionPicker } from "./ExecutionPicker";
@@ -31,6 +31,13 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transports, setTransports] = useState<Record<string, string>>({});
+  const [limits, setLimits] = useState<WorkflowLimits>({ max_nodes: 64, max_parallel: 4, max_timeout_secs: 3600 });
+  useEffect(() => {
+    let disposed = false;
+    void getWorkflowLimits().then((value) => { if (!disposed && value?.max_nodes) setLimits(value); })
+      .catch((reason) => { if (!disposed) setError(String(reason)); });
+    return () => { disposed = true; };
+  }, []);
   const epoch = useRef(0);
   const nextId = useRef(3);
   const draft = useRef({ nodes, parallel, minutes });
@@ -142,7 +149,21 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
               });
             }}><option value="cli">CLI</option><option value="native">原生服务</option>{h === "opencode" && <option value="acp">ACP</option>}</select>
           </label>)}</div>
-          <div className="context-actions"><span>v{policy.version}</span>
+           <fieldset disabled={locked}><legend>工作流额度</legend>
+             <div className="graph-budget">{([
+               ["max_nodes", "节点上限", 1, 1024],
+               ["max_parallel", "并发上限", 1, 64],
+               ["max_timeout_secs", "最长秒数", 60, 86400],
+             ] as const).map(([key, label, min, max]) => <label key={key}>{label}
+               <input aria-label={`工作流${label}`} type="number" min={min} max={max} value={limits[key]}
+                 onChange={(event) => setLimits((previous) => ({ ...previous, [key]: Number(event.target.value) }))} />
+             </label>)}</div>
+             <button type="button" className="context-command" onClick={() => void action(async () => {
+               await setSetting("workflow_limits", JSON.stringify(limits));
+               setLimits(await getWorkflowLimits());
+             })}>保存工作流额度</button>
+           </fieldset>
+           <div className="context-actions"><span>v{policy.version}</span>
             <button type="submit" className="icon-button" title="保存共享策略" aria-label="保存共享策略"><Save size={16} /></button>
             <button type="button" className="icon-button" title="刷新共享策略" aria-label="刷新共享策略" onClick={() => {
               if (window.confirm("刷新并放弃未保存的共享策略改动？")) setPolicyLoaded(false);
@@ -211,15 +232,15 @@ export default function CollaborationBoard({ taskId, onChanged }: { taskId: stri
           </div>)}
           <div className="graph-toolbar">
             <button type="button" className="context-command" aria-label="添加指挥链" title="添加指挥链"
-              disabled={locked || nodes.length >= 12}
+               disabled={locked || nodes.length >= limits.max_nodes}
               onClick={() => setNodes((p) => [...p, {
                 id: `task-${nextId.current++}`, harness: "codex", prompt: "", dependencies: [], read_only: true,
                 supervision: { commander: "opencode", max_rounds: 3 },
               }])}><GitFork size={16} />添加指挥链</button>
-            <button type="button" className="icon-button" aria-label="添加协作任务" title="添加协作任务" disabled={locked || nodes.length >= 12}
+            <button type="button" className="icon-button" aria-label="添加协作任务" title="添加协作任务" disabled={locked || nodes.length >= limits.max_nodes}
               onClick={() => setNodes((p) => [...p, { id: `task-${nextId.current++}`, harness: "codex", prompt: "", dependencies: [], read_only: true }])}><Plus size={16} /></button>
-            <label>并发上限<input aria-label="并行数量" type="number" min={1} max={4} value={parallel} disabled={locked} onChange={(e) => setParallel(Number(e.target.value))} /></label>
-            <label>分钟<input aria-label="协作总时限" type="number" min={1} max={60} value={minutes} disabled={locked} onChange={(e) => setMinutes(Number(e.target.value))} /></label>
+            <label>并发上限<input aria-label="并行数量" type="number" min={1} max={limits.max_parallel} value={parallel} disabled={locked} onChange={(e) => setParallel(Number(e.target.value))} /></label>
+            <label>分钟<input aria-label="协作总时限" type="number" min={1} max={Math.floor(limits.max_timeout_secs / 60)} value={minutes} disabled={locked} onChange={(e) => setMinutes(Number(e.target.value))} /></label>
             <button type="submit" className="icon-button" aria-label="启动并行协作" title="启动并行协作" disabled={locked}><Play size={16} /></button>
           </div>
         </form>

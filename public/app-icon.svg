@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 64 64">
+  <title>AgentDeck</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#242723"/>
+  <path d="M13 47 25 17h8L21 47Zm17-30h8l12 30h-8Z" fill="#F4F0E6"/>
+  <path d="M25 35h29l-3 7H22Z" fill="#E9A16C"/>
+</svg>

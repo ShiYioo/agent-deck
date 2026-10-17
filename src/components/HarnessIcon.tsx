@@ -29,11 +29,11 @@ export function HarnessIcon({
         style={{
           width: size,
           height: size,
-          background: "linear-gradient(135deg, #44403c 0%, #1c1917 100%)",
+          background: "#242723",
         }}
         title="AgentDeck Agent"
       >
-        <IconBrandMark size={Math.round(size * 0.62)} />
+        <IconBrandMark size={Math.round(size * 0.72)} centerColor="#E9A16C" />
       </span>
     );
   }

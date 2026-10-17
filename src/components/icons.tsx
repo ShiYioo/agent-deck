@@ -30,23 +30,16 @@ const fill = (size: number, props: SVGProps<SVGSVGElement>) => ({
   ...props,
 });
 
-/** 品牌符：四菱风车。centerColor 可选——传入时中心菱用该色（用于品牌砖双色处理） */
+/** 折叠 A 与交接卡片；几何形状与 public/app-icon.svg 保持一致。 */
 export function IconBrandMark({
   size = 24,
   className,
   centerColor,
 }: IconProps & { centerColor?: string }) {
   return (
-    <svg {...fill(size, { className })}>
-      <path d="M12 1.6l2.6 2.6L12 6.8 9.4 4.2z" />
-      <path d="M17.8 9.4l2.6 2.6-2.6 2.6-2.6-2.6z" />
-      <path d="M12 17.2l2.6 2.6L12 22.4l-2.6-2.6z" />
-      <path d="M6.2 9.4L8.8 12l-2.6 2.6L3.6 12z" />
-      <path
-        d="M12 9.4l2.6 2.6-2.6 2.6L9.4 12z"
-        opacity={centerColor ? undefined : 0.55}
-        fill={centerColor ?? "currentColor"}
-      />
+    <svg {...fill(size, { className })} viewBox="10 14 46 36" aria-hidden="true">
+      <path d="M13 47 25 17h8L21 47Zm17-30h8l12 30h-8Z" />
+      <path d="M25 35h29l-3 7H22Z" fill={centerColor ?? "currentColor"} />
     </svg>
   );
 }

@@ -26,7 +26,7 @@ struct Plan {
     minutes: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PlanOutcome {
     pub kind: String,
     pub task_id: Option<String>,
@@ -82,6 +82,18 @@ pub async fn start_approved_plan(
     approval_id: String,
     nodes: Vec<orchestration::NodeSpec>,
 ) -> Result<PlanOutcome, String> {
+    start_approved_plan_impl(app, store, registry, task_id, approval_id, nodes, None).await
+}
+
+pub(crate) async fn start_approved_plan_impl(
+    app: AppHandle,
+    store: State<'_, Store>,
+    registry: State<'_, PlanLaunchRegistry>,
+    task_id: String,
+    approval_id: String,
+    nodes: Vec<orchestration::NodeSpec>,
+    reservation: Option<crate::store::ConversationLaunch>,
+) -> Result<PlanOutcome, String> {
     {
         let mut active = registry.0.lock().map_err(|_| "plan registry poisoned")?;
         if !active.insert(task_id.clone()) {
@@ -90,16 +102,70 @@ pub async fn start_approved_plan(
     }
     let _guard = LaunchGuard(registry.inner().clone(), task_id.clone());
     let source = store.get_task(&task_id)?.ok_or("规划任务已删除")?;
-    if source.harness != "deck" || source.status != "running" {
+    let events = store.get_events(&task_id, 0, i64::MAX)?;
+    for raw in &events {
+        let event: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+        if event["type"] == "collaboration_plan_started" && event["approval_id"] == approval_id {
+            return serde_json::from_value(event["result"].clone()).map_err(|e| e.to_string());
+        }
+    }
+    // Recover a launch whose process started before the acknowledgement was
+    // persisted. Refuse to dispatch another executor for the same proposal.
+    let launched = store.list_graph_runs_for_request(&task_id)?;
+    if let Some(run) = launched.into_iter().next() {
+        return Ok(PlanOutcome {
+            kind: "graph".into(),
+            task_id: None,
+            run: Some(run),
+        });
+    }
+    let ambiguous_launch = events.iter().any(|raw| {
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .is_some_and(|v| v["type"] == "plan_launch_intent" && v["approval_id"] == approval_id)
+    }) && !events.iter().any(|raw| {
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .is_some_and(|v| v["type"] == "plan_launch_failed" && v["approval_id"] == approval_id)
+    });
+    if ambiguous_launch {
+        return Err("上次交接在启动期间中断，请核对执行记录；为避免重复执行，未再次派发".into());
+    }
+    let semantic = events.iter().any(|raw| {
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .is_some_and(|v| v["planning"] == true || v["args"]["__workflow"] == true)
+    });
+    let handed_off = events.iter().any(|raw| {
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .is_some_and(|v| v["type"] == "workflow_handoff_stopped")
+    });
+    let planner_stopped = events.iter().any(|raw| {
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .is_some_and(|v| v["type"] == "plan_planner_stopped" && v["approval_id"] == approval_id)
+    });
+    if (!semantic
+        && (source.harness != "deck"
+            || !(source.status == "running" || (source.status == "cancelled" && planner_stopped))))
+        || (semantic && source.status != "done" && !(handed_off && source.status == "cancelled"))
+    {
         return Err("规划执行者已结束，请重新生成计划".into());
     }
     let plan = pending_plan(&store.get_events(&task_id, 0, i64::MAX)?, &approval_id)?;
+    if semantic && crate::workflow::superseded(&store, &task_id)? {
+        return Err("用户已发送新要求，旧计划已失效，请使用最新计划".into());
+    }
     verify_nodes(&plan, &nodes)?;
     orchestration::validate(&nodes, plan.parallel, plan.minutes.saturating_mul(60))?;
-    let restricted = source
-        .mode
-        .as_deref()
-        .is_some_and(|mode| !matches!(mode, "" | "auto" | "default" | "full" | "yolo"));
+    crate::workflow::validate_budget(
+        &store,
+        nodes.len(),
+        plan.parallel,
+        plan.minutes.saturating_mul(60),
+    )?;
+    let restricted = crate::workflow::readonly_mode(source.mode.as_deref());
     if restricted && nodes.iter().any(|n| !n.read_only) {
         return Err("源会话权限受限，只能派发只读协作者".into());
     }
@@ -107,15 +173,23 @@ pub async fn start_approved_plan(
     let cid = store.ensure_conversation(&task_id)?;
     // All launch/delete entry points share this reservation, including ordinary sends.
     // Keep ownership through shutdown and transfer it into the actual launch.
-    let reservation = store.claim_conversation_mutation(&cid)?;
+    let reservation = match reservation {
+        Some(guard) => guard,
+        None => store.claim_conversation_mutation(&cid)?,
+    };
     let policy = store.context_policy(&task_id)?;
     for node in &nodes {
-        let targets = std::iter::once((&node.harness, &node.execution)).chain(
+        let targets = std::iter::once((
+            &node.harness,
+            &node.execution,
+            node.contract.model_hint.clone(),
+        ))
+        .chain(
             node.supervision
                 .as_ref()
-                .map(|s| (&s.commander, &s.execution)),
+                .map(|s| (&s.commander, &s.execution, s.model_hint.clone())),
         );
-        for (harness, config) in targets {
+        for (harness, config, hint) in targets {
             policy.authorize(harness)?;
             if harness != "deck"
                 && crate::discovery::locate(crate::executors::Harness::parse(harness)?).is_none()
@@ -127,44 +201,53 @@ pub async fn start_approved_plan(
             let harness = harness.clone();
             let config = config.clone();
             tokio::task::spawn_blocking(move || {
+                crate::workflow::verify_binding(&copy, &harness, &config, hint.as_deref())?;
                 execution::resolve(&copy, Some(&cid), &harness, &config)
             })
             .await
             .map_err(|e| e.to_string())??;
         }
     }
-    let direct = nodes.len() == 1 && nodes[0].supervision.is_none();
+    let direct = nodes.len() == 1
+        && nodes[0].supervision.is_none()
+        && nodes[0].contract.workspace == crate::workflow_artifacts::WorkspaceKind::Git
+        && !nodes[0].contract.acceptance;
     if !direct {
         let root = store.get_task(&cid)?.ok_or("会话根任务不存在")?;
-        if root
-            .mode
-            .as_deref()
-            .is_some_and(|m| !matches!(m, "" | "auto" | "default" | "full" | "yolo"))
+        if crate::workflow::readonly_mode(root.mode.as_deref())
             && nodes.iter().any(|n| !n.read_only)
         {
             return Err("源会话权限受限，只能派发只读协作者".into());
         }
         let cwd = std::path::PathBuf::from(&root.cwd);
-        tokio::task::spawn_blocking(move || orchestration::graph_baseline(&cwd))
-            .await
-            .map_err(|e| e.to_string())??;
+        let artifacts =
+            nodes[0].contract.workspace == crate::workflow_artifacts::WorkspaceKind::Artifacts;
+        tokio::task::spawn_blocking(move || {
+            if artifacts {
+                Ok(String::new())
+            } else {
+                orchestration::graph_baseline(&cwd)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     }
     // Resolve approval by handing over, not by telling the planner execution has already started.
-    pi_session::send_command(
-        &app.state::<pi_session::PiRegistry>(),
-        &task_id,
-        "abort",
-        None,
-        None,
-    )?;
-    store.append_event(
-        &task_id,
-        &json!({
-            "type": "deck_approval_decided", "id": approval_id, "approved": true,
-            "handoff": true
-        })
-        .to_string(),
-    )?;
+    if !semantic && source.status == "running" {
+        store.append_event(
+            &task_id,
+            &json!({"type":"plan_planner_stopped","approval_id":approval_id}).to_string(),
+        )?;
+        pi_session::send_command(
+            &app.state::<pi_session::PiRegistry>(),
+            &task_id,
+            "abort",
+            None,
+            None,
+        )?;
+    }
+    // Keep the proposal pending until a real task/graph was launched. Failed
+    // preflight or launch remains retryable and cannot consume the approval.
     crate::await_stopped(&store, std::slice::from_ref(&task_id))
         .await
         .map_err(|_| "规划执行者尚未确认停止，未启动执行任务，请稍后重新安排".to_string())?;
@@ -172,6 +255,10 @@ pub async fn start_approved_plan(
         .await_workspace_released(&source.cwd, std::time::Duration::from_secs(10))
         .await?;
     let result = if direct {
+        store.append_event(
+            &task_id,
+            &json!({"type":"plan_launch_intent","approval_id":approval_id}).to_string(),
+        )?;
         let node = nodes.into_iter().next().unwrap();
         let mode = if node.read_only {
             if node.harness == "codex" {
@@ -208,8 +295,15 @@ pub async fn start_approved_plan(
             None,
             None,
             Some(reservation),
+            None,
         )
-        .await?;
+        .await
+        .inspect_err(|_error| {
+            let _ = store.append_event(
+                &task_id,
+                &json!({"type":"plan_launch_failed","approval_id":approval_id}).to_string(),
+            );
+        })?;
         PlanOutcome {
             kind: "task".into(),
             task_id: Some(task.task_id),
@@ -236,7 +330,14 @@ pub async fn start_approved_plan(
     store.append_event(
         &task_id,
         &json!({
-            "type": "collaboration_plan_started", "result": result
+            "type":"deck_approval_decided","id":approval_id,"approved":true,"handoff":true
+        })
+        .to_string(),
+    )?;
+    store.append_event(
+        &task_id,
+        &json!({
+            "type": "collaboration_plan_started", "approval_id":approval_id, "result": result
         })
         .to_string(),
     )?;

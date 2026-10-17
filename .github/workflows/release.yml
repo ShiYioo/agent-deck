@@ -1,6 +1,6 @@
 name: Release
 
-# 打 tag（v*）触发：构建 NSIS 安装包并发布 GitHub Release。
+# 打 tag（v*）触发：构建支持自定义目录、当前用户/所有用户安装范围的 NSIS 安装包并发布 GitHub Release。
 # 版本号以 tauri.conf.json 的 version 为准，tag 应与其一致（如 v0.1.0）。
 on:
   push:
@@ -41,6 +41,14 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "AgentDeck ${{ github.ref_name }}"
-          releaseBody: "Windows 安装包：下载 AgentDeck_*_x64-setup.exe 安装。运行 deck 引擎与各 CLI harness 需要本机已装 Node.js。"
+          releaseBody: |
+            Windows 安装包：下载 `AgentDeck_*_x64-setup.exe`。
+
+            安装器支持：
+            - 自定义安装目录
+            - 仅为当前用户安装
+            - 为所有用户安装（需要管理员权限）
+
+            运行 deck 引擎与各 CLI harness 需要本机已装 Node.js。
           releaseDraft: false
           prerelease: false

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AgentDeck",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.shiyoo.agentdeck",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -22,15 +22,23 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self' ipc: http://ipc.localhost; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' data: asset: http://asset.localhost; media-src 'self' asset: http://asset.localhost; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:",
+      "assetProtocol": { "enable": true, "scope": [] }
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "startMenuFolder": "AgentDeck"
+      }
+    },
     "resources": {
       "../agent/dist/deck-agent.mjs": "agent/deck-agent.mjs",
       "../agent/dist/native-harness.mjs": "agent/native-harness.mjs",
+      "../agent/dist/runnerctl.mjs": "agent/runnerctl.mjs",
       "../agent/dist/photon/": "photon/"
     },
     "icon": [

@@ -19,6 +19,14 @@ struct Control {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Request {
     Tasks,
+    Capabilities {
+        harness: Option<String>,
+    },
+    Handoff {
+        source_task_id: String,
+        request_id: String,
+        plan: crate::workflow::Plan,
+    },
     Runs {
         source_task_id: String,
     },
@@ -66,6 +74,33 @@ async fn dispatch(app: &AppHandle, request: Request) -> Result<Value, String> {
             // Reuse the store's public task listing rather than exposing database access.
             serde_json::to_value(store.list_tasks(200)?).map_err(|e| e.to_string())
         }
+        Request::Capabilities { harness } => {
+            crate::execution::initialize(app);
+            if let Some(harness) = harness {
+                if harness != "deck" {
+                    crate::executors::Harness::parse(&harness)?;
+                }
+                let copy = store.clone_handle();
+                let models = tokio::task::spawn_blocking(move || {
+                    crate::execution::workflow_models(&copy, &harness)
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                Ok(json!({"models":models}))
+            } else {
+                let mut runners: Vec<_> = crate::executors::Harness::ALL.iter().map(|h|
+                    json!({"id":h.name(),"installed":crate::discovery::locate(*h).is_some()})).collect();
+                runners.push(
+                    json!({"id":"deck","installed":!store.list_model_profiles(true)?.is_empty()}),
+                );
+                Ok(json!({"runners":runners,"limits":crate::workflow::limits(&store)?}))
+            }
+        }
+        Request::Handoff {
+            source_task_id,
+            request_id,
+            plan,
+        } => crate::workflow::handoff(app.clone(), source_task_id, request_id, plan).await,
         Request::Runs { source_task_id } => {
             serde_json::to_value(orchestration::list_graph_runs(store, source_task_id)?)
                 .map_err(|e| e.to_string())

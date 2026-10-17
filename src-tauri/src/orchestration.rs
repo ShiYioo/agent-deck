@@ -13,6 +13,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeSpec {
     pub id: String,
     pub harness: String,
@@ -23,13 +24,18 @@ pub struct NodeSpec {
     pub execution: crate::execution::ExecutionConfig,
     #[serde(default)]
     pub supervision: Option<Supervision>,
+    #[serde(default)]
+    pub contract: crate::workflow_artifacts::Contract,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Supervision {
     pub commander: String,
     pub max_rounds: u32,
     #[serde(default)]
     pub execution: crate::execution::ExecutionConfig,
+    #[serde(default)]
+    pub model_hint: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StageRecord {
@@ -38,6 +44,8 @@ pub struct StageRecord {
     pub harness: String,
     pub task_id: String,
     pub report: String,
+    #[serde(default)]
+    pub evidence: Option<serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
@@ -56,6 +64,12 @@ pub struct Node {
     pub round: u32,
     #[serde(default)]
     pub history: Vec<StageRecord>,
+    #[serde(default)]
+    pub stage_baseline: Option<String>,
+    #[serde(default)]
+    pub review_version: Option<String>,
+    #[serde(default)]
+    pub evidence: Option<serde_json::Value>,
 }
 impl Node {
     fn harness(&self) -> &str {
@@ -66,21 +80,39 @@ impl Node {
     }
     // A successful process exit is only a stage result; the commander owns acceptance.
     fn finish_stage(&mut self, report: String) -> bool {
+        self.history.push(StageRecord {
+            phase: self.phase.clone(),
+            round: self.round,
+            harness: self.harness().into(),
+            task_id: self.task_id.clone().unwrap_or_default(),
+            report: report.clone(),
+            evidence: self.evidence.clone(),
+        });
+        if (self.phase == "reviewing" || self.spec.contract.acceptance)
+            && self.review_version.is_some()
+            && !crate::workflow::approved_version(&report, self.review_version.as_deref().unwrap())
+        {
+            // Invalid/missing verdict is never success. A commander can still drive rework.
+            if self.spec.supervision.is_none() {
+                self.status = "needs_attention".into();
+                self.error = Some("验收未通过，或验收结论没有绑定当前成果版本".into());
+                self.report = Some(report);
+                return false;
+            }
+        }
         if let Some(supervision) = &self.spec.supervision {
-            self.history.push(StageRecord {
-                phase: self.phase.clone(),
-                round: self.round,
-                harness: self.harness().into(),
-                task_id: self.task_id.clone().unwrap_or_default(),
-                report: report.clone(),
-            });
             match self.phase.as_str() {
                 "planning" => {
                     self.phase = "executing".into();
                     self.round = 1;
                 }
                 "executing" => self.phase = "reviewing".into(),
-                "reviewing" if crate::collaboration::review_approved(&report) => {
+                "reviewing"
+                    if self.review_version.as_ref().map_or_else(
+                        || crate::collaboration::review_approved(&report),
+                        |version| crate::workflow::approved_version(&report, version),
+                    ) =>
+                {
                     self.status = "done".into();
                     self.report = Some(
                         self.history
@@ -135,6 +167,10 @@ pub struct GraphRun {
     pub state_version: i64,
     #[serde(default)]
     pub policy_version: i64,
+    #[serde(default)]
+    pub request_task_id: Option<String>,
+    #[serde(default)]
+    pub input_manifest: Option<(String, String)>,
 }
 #[derive(Clone, Default)]
 pub struct GraphRegistry(
@@ -175,11 +211,11 @@ pub(crate) fn graph_baseline(cwd: &Path) -> Result<String, String> {
 
 pub fn validate(specs: &[NodeSpec], parallel: usize, timeout: u64) -> Result<Vec<usize>, String> {
     if specs.is_empty()
-        || specs.len() > 12
-        || !(1..=4).contains(&parallel)
-        || !(60..=3600).contains(&timeout)
+        || specs.len() > 1024
+        || !(1..=64).contains(&parallel)
+        || !(60..=86400).contains(&timeout)
     {
-        return Err("任务图限制：1 到 12 个任务、1 到 4 路并行、60 到 3600 秒总时限".into());
+        return Err("任务图结构超过系统上限".into());
     }
     let mut ids = HashSet::new();
     for s in specs {
@@ -192,12 +228,39 @@ pub fn validate(specs: &[NodeSpec], parallel: usize, timeout: u64) -> Result<Vec
             || !ids.insert(s.id.clone())
             || s.prompt.trim().is_empty()
             || s.prompt.len() > 16_000
-            || s.dependencies.len() > 12
+            || s.dependencies.len() > specs.len()
+            || s.dependencies.iter().collect::<HashSet<_>>().len() != s.dependencies.len()
         {
             return Err("任务标识、要求或依赖无效".into());
         }
         if s.harness != "deck" {
             Harness::parse(&s.harness)?;
+        }
+        if s.contract.outputs.len() > 128
+            || s.contract
+                .outputs
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect::<HashSet<_>>()
+                .len()
+                != s.contract.outputs.len()
+        {
+            return Err("单节点最多声明 128 个不重名的成果".into());
+        }
+        if s.contract.inputs.len() > 128 {
+            return Err("单节点最多声明 128 个源输入".into());
+        }
+        for output in s.contract.outputs.iter().chain(s.contract.inputs.iter()) {
+            crate::workflow_artifacts::relative(output)?;
+        }
+        if s.contract.acceptance && !s.read_only {
+            return Err("验收节点必须只读".into());
+        }
+        if s.contract.workspace == crate::workflow_artifacts::WorkspaceKind::Artifacts
+            && !s.read_only
+            && s.contract.outputs.is_empty()
+        {
+            return Err("成果目录任务必须声明输出文件".into());
         }
         if let Some(supervision) = &s.supervision {
             crate::collaboration::validate_pair(
@@ -206,6 +269,12 @@ pub fn validate(specs: &[NodeSpec], parallel: usize, timeout: u64) -> Result<Vec
                 supervision.max_rounds,
             )?;
         }
+    }
+    if specs
+        .iter()
+        .any(|s| s.contract.workspace != specs[0].contract.workspace)
+    {
+        return Err("同一任务图必须使用一致的工作区策略".into());
     }
     let mut order = Vec::new();
     let mut visited = HashSet::new();
@@ -278,6 +347,25 @@ fn load(store: &Store, id: &str) -> Result<GraphRun, String> {
         })
         .map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| e.to_string())
+}
+
+impl Store {
+    pub(crate) fn list_graph_runs_for_request(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<GraphRun>, String> {
+        let conn = self.conn.lock().map_err(|_| "store poisoned")?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM graph_runs WHERE json_extract(data,'$.request_task_id')=?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([task_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| {
+            serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        })
+        .collect()
+    }
 }
 
 #[tauri::command]
@@ -417,17 +505,19 @@ pub async fn start_graph_run(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_graph_run_reserved(
     app: AppHandle,
     store: State<'_, Store>,
     registry: State<'_, GraphRegistry>,
     source_task_id: String,
-    nodes: Vec<NodeSpec>,
+    mut nodes: Vec<NodeSpec>,
     max_parallel: usize,
     timeout_secs: u64,
     reservation: Option<crate::store::ConversationLaunch>,
 ) -> Result<GraphRun, String> {
     validate(&nodes, max_parallel, timeout_secs)?;
+    crate::workflow::validate_budget(&store, nodes.len(), max_parallel, timeout_secs)?;
     let selected = store.get_task(&source_task_id)?.ok_or("源任务不存在")?;
     let cid = store.ensure_conversation(&source_task_id)?;
     let source = store.get_task(&cid)?.ok_or("会话根任务不存在")?;
@@ -435,11 +525,9 @@ pub(crate) async fn start_graph_run_reserved(
     if source.status == "running" {
         return Err("请先停止源任务或等待结束".into());
     }
-    let restricted = [&selected, &source].iter().any(|s| {
-        s.mode
-            .as_deref()
-            .is_some_and(|m| !matches!(m, "" | "auto" | "default" | "full" | "yolo"))
-    });
+    let restricted = [&selected, &source]
+        .iter()
+        .any(|s| crate::workflow::readonly_mode(s.mode.as_deref()));
     if restricted && nodes.iter().any(|n| !n.read_only) {
         return Err("源会话权限受限，只能派发只读协作者".into());
     }
@@ -449,11 +537,17 @@ pub(crate) async fn start_graph_run_reserved(
         store.claim_conversation(&cid)?
     };
     crate::execution::initialize(&app);
-    for node in &nodes {
+    for node in &mut nodes {
         let copy = store.clone_handle();
         let resolving_cid = cid.clone();
         let resolving_node = node.clone();
-        tokio::task::spawn_blocking(move || {
+        let (mut config, _) = tokio::task::spawn_blocking(move || {
+            crate::workflow::verify_binding(
+                &copy,
+                &resolving_node.harness,
+                &resolving_node.execution,
+                resolving_node.contract.model_hint.as_deref(),
+            )?;
             crate::execution::resolve(
                 &copy,
                 Some(&resolving_cid),
@@ -463,11 +557,21 @@ pub(crate) async fn start_graph_run_reserved(
         })
         .await
         .map_err(|e| e.to_string())??;
-        if let Some(supervision) = &node.supervision {
+        if config.model.is_none() {
+            config.model = Some(String::new());
+        }
+        node.execution = config;
+        if let Some(supervision) = &mut node.supervision {
             let copy = store.clone_handle();
             let cid = cid.clone();
             let supervision = supervision.clone();
-            tokio::task::spawn_blocking(move || {
+            let (mut config, _) = tokio::task::spawn_blocking(move || {
+                crate::workflow::verify_binding(
+                    &copy,
+                    &supervision.commander,
+                    &supervision.execution,
+                    supervision.model_hint.as_deref(),
+                )?;
                 crate::execution::resolve(
                     &copy,
                     Some(&cid),
@@ -477,6 +581,10 @@ pub(crate) async fn start_graph_run_reserved(
             })
             .await
             .map_err(|e| e.to_string())??;
+            if config.model.is_none() {
+                config.model = Some(String::new());
+            }
+            node.supervision.as_mut().unwrap().execution = config;
         }
     }
     let policy = store.context_policy(&source_task_id)?;
@@ -493,14 +601,52 @@ pub(crate) async fn start_graph_run_reserved(
     let id = format!("graph-{}", crate::pi_session_task_id());
     let lease = store.claim_workspace(&source.cwd, &id)?;
     let cwd = PathBuf::from(&source.cwd);
-    let baseline = tokio::task::spawn_blocking(move || graph_baseline(&cwd))
-        .await
-        .map_err(|e| e.to_string())??;
+    let artifacts =
+        nodes[0].contract.workspace == crate::workflow_artifacts::WorkspaceKind::Artifacts;
+    let baseline = tokio::task::spawn_blocking(move || {
+        if artifacts {
+            Ok(String::new())
+        } else {
+            graph_baseline(&cwd)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let input_manifest = if artifacts {
+        let inputs: Vec<_> = nodes
+            .iter()
+            .flat_map(|n| n.contract.inputs.iter().cloned())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if inputs.is_empty() {
+            None
+        } else {
+            let cwd = PathBuf::from(&source.cwd);
+            let dir = crate::normalize_windows_path(
+                app.path().app_data_dir().map_err(|e| e.to_string())?,
+            )
+            .join("collaboration-artifacts")
+            .join(&id)
+            .join("source");
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    crate::workflow_artifacts::freeze(&cwd, &inputs, &dir)
+                })
+                .await
+                .map_err(|e| e.to_string())??,
+            )
+        }
+    } else {
+        None
+    };
     let mut turns = store.session_tasks(&source_task_id)?;
     turns.sort_by(crate::conversation::turn_order);
     let context_source_task_id = turns.last().ok_or("会话轮次缺失")?.id.clone();
     let state_version = store.shared_state(&cid)?.version;
     let run = GraphRun {
+        request_task_id: Some(selected.id.clone()),
+        input_manifest,
         id: id.clone(),
         source_task_id,
         context_source_task_id,
@@ -523,6 +669,9 @@ pub(crate) async fn start_graph_run_reserved(
                 .into(),
                 round: 0,
                 history: Vec::new(),
+                stage_baseline: None,
+                review_version: None,
+                evidence: None,
                 spec,
                 status: "pending".into(),
                 task_id: None,
@@ -581,10 +730,56 @@ fn verified_patch(node: &Node) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn stage_version(cwd: &Path) -> Result<String, String> {
+    if cwd.join(".git").exists() {
+        git(cwd, &["add", "--all"])?;
+        Ok(git(cwd, &["write-tree"])?.trim().into())
+    } else {
+        crate::workflow_artifacts::version(cwd)
+    }
+}
+
 fn create_branch(run: &GraphRun, index: usize, root: &Path) -> Result<(String, String), String> {
     let dir = root.join(&run.id).join(&run.nodes[index].spec.id);
     std::fs::create_dir_all(dir.parent().ok_or("工作树目录无效")?).map_err(|e| e.to_string())?;
     let path = dir.to_str().ok_or("工作树目录编码无效")?;
+    if run.base_commit.is_empty() {
+        use crate::workflow_artifacts as artifacts;
+        // Never reuse a half-created directory from an interrupted launch.
+        std::fs::create_dir(&dir).map_err(|e| format!("创建隔离成果目录失败：{e}"))?;
+        if !run.nodes[index].spec.contract.inputs.is_empty() {
+            let (manifest, hash) = run.input_manifest.as_ref().ok_or("源输入快照缺失")?;
+            artifacts::materialize_selected(
+                Path::new(manifest),
+                hash,
+                &dir,
+                Some(&run.nodes[index].spec.contract.inputs),
+            )?;
+        }
+        let mut owners = HashMap::<String, (usize, String)>::new();
+        for i in ancestors(run, index)? {
+            let node = &run.nodes[i];
+            let manifest_path = Path::new(node.patch_path.as_deref().ok_or("依赖成果缺失")?);
+            let hash = node.patch_hash.as_deref().ok_or("依赖成果版本缺失")?;
+            let manifest = artifacts::read_manifest(manifest_path, hash)?;
+            let lineage = ancestors(run, i)?;
+            for (name, digest) in &manifest {
+                if let Some((previous, old)) = owners.get(name) {
+                    if old != digest && !lineage.contains(previous) {
+                        return Err(format!(
+                            "并行成果冲突：{name}；请增加显式合并节点并使用不同输出文件名"
+                        ));
+                    }
+                }
+                owners.insert(name.clone(), (i, digest.clone()));
+            }
+            artifacts::materialize(manifest_path, hash, &dir)?;
+        }
+        return Ok((
+            path.into(),
+            serde_json::to_string(&artifacts::snapshot(&dir)?).map_err(|e| e.to_string())?,
+        ));
+    }
     git(
         Path::new(&run.cwd),
         &["worktree", "add", "--detach", path, &run.base_commit],
@@ -605,6 +800,34 @@ fn create_branch(run: &GraphRun, index: usize, root: &Path) -> Result<(String, S
 
 fn collect_artifact(node: &Node, root: &Path, run_id: &str) -> Result<(String, String), String> {
     let cwd = Path::new(node.worktree.as_ref().ok_or("工作树缺失")?);
+    if node.spec.contract.workspace == crate::workflow_artifacts::WorkspaceKind::Artifacts {
+        use crate::workflow_artifacts as artifacts;
+        let current = artifacts::snapshot(cwd)?;
+        if node.spec.read_only
+            && Some(&serde_json::to_string(&current).map_err(|e| e.to_string())?)
+                != node.baseline_tree.as_ref()
+        {
+            return Err("只读验收修改了成果文件，成果已拒绝".into());
+        }
+        let baseline: artifacts::Manifest =
+            serde_json::from_str(node.baseline_tree.as_deref().ok_or("输入基线缺失")?)
+                .map_err(|e| e.to_string())?;
+        if !node.spec.read_only
+            && current.iter().any(|(name, hash)| {
+                baseline.get(name) != Some(hash) && !node.spec.contract.outputs.contains(name)
+            })
+        {
+            return Err("执行者修改了未声明的成果文件，成果已拒绝".into());
+        }
+        if baseline.keys().any(|name| !current.contains_key(name)) {
+            return Err("执行者删除了输入成果，成果已拒绝".into());
+        }
+        return artifacts::freeze(
+            cwd,
+            &node.spec.contract.outputs,
+            &root.join(run_id).join(&node.spec.id),
+        );
+    }
     git(cwd, &["add", "--all"])?;
     let tree = git(cwd, &["write-tree"])?;
     let base = node.baseline_tree.as_ref().ok_or("基线缺失")?;
@@ -719,11 +942,64 @@ async fn drive(
             let node_stopping = stopping
                 || cancelled_nodes.contains(&(run.id.clone(), run.nodes[i].spec.id.clone()));
             if run.nodes[i].status == "done" && !node_stopping {
-                let report = crate::handoff::assistant_text(&store.get_events(&id, 0, i64::MAX)?);
+                let events = store.get_events(&id, 0, i64::MAX)?;
+                let report = crate::handoff::assistant_text(&events);
+                let observed = events
+                    .iter()
+                    .filter_map(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .rfind(|event| event["type"] == "model_observed")
+                    .and_then(|event| event["model"].as_str().map(str::to_string));
+                run.nodes[i].evidence = Some(serde_json::json!({
+                    "task_id":id,"harness":row.harness,"execution":row.execution_config,"observed_model":observed
+                }));
+                let expected = row
+                    .execution_config
+                    .as_ref()
+                    .and_then(|v| v["resolved"]["model"].as_str())
+                    .filter(|m| !m.is_empty());
+                if let (Some(expected), Some(actual)) = (expected, observed.as_deref()) {
+                    let expected = if row.harness == "deck" {
+                        expected
+                            .split_once(':')
+                            .map(|(_, model)| model)
+                            .unwrap_or(expected)
+                    } else {
+                        expected
+                    };
+                    let matches = expected == actual
+                        || (!actual.contains('/') && expected.rsplit('/').next() == Some(actual));
+                    if !matches {
+                        run.nodes[i].status = "needs_attention".into();
+                        run.nodes[i].error = Some(format!(
+                            "运行器报告模型 {actual} 与绑定模型 {expected} 不一致，已停止交接"
+                        ));
+                        continue;
+                    }
+                }
                 if report.trim().is_empty() {
                     run.nodes[i].status = "failed".into();
                     run.nodes[i].error = Some("执行者未返回有效报告，成果未获验收".into());
                     continue;
+                }
+                if let Some(expected) = run.nodes[i].stage_baseline.clone() {
+                    let cwd = PathBuf::from(run.nodes[i].worktree.as_ref().ok_or("阶段目录缺失")?);
+                    let actual = match tokio::task::spawn_blocking(move || stage_version(&cwd))
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result)
+                    {
+                        Ok(version) => version,
+                        Err(error) => {
+                            run.nodes[i].status = "failed".into();
+                            run.nodes[i].error = Some(error);
+                            continue;
+                        }
+                    };
+                    if actual != expected {
+                        run.nodes[i].status = "failed".into();
+                        run.nodes[i].error = Some("只读阶段修改了成果，已拒绝继续交接".into());
+                        continue;
+                    }
                 }
                 if !run.nodes[i].finish_stage(report) {
                     continue;
@@ -811,6 +1087,31 @@ async fn drive(
                 run.nodes[i].baseline_tree = Some(tree);
                 cwd
             };
+            let readonly = run.nodes[i].spec.read_only
+                || matches!(run.nodes[i].phase.as_str(), "planning" | "reviewing");
+            if readonly {
+                let path = PathBuf::from(&cwd);
+                let version = match tokio::task::spawn_blocking(move || stage_version(&path))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|result| result)
+                {
+                    Ok(version) => version,
+                    Err(error) => {
+                        run.nodes[i].status = "failed".into();
+                        run.nodes[i].error = Some(error);
+                        changed = true;
+                        continue;
+                    }
+                };
+                run.nodes[i].stage_baseline = Some(version.clone());
+                if run.nodes[i].phase == "reviewing" || run.nodes[i].spec.contract.acceptance {
+                    run.nodes[i].review_version = Some(version);
+                }
+            } else {
+                run.nodes[i].stage_baseline = None;
+                run.nodes[i].review_version = None;
+            }
             save(app, store, run)?;
             if !dispatch_allowed(store, run, cancelled, deadline)? {
                 break;
@@ -828,8 +1129,8 @@ async fn drive(
                 report.push('\n');
             }
             let mut prompt = format!(
-                "隔离协作任务 {}。仅在当前 worktree 工作，不更改原仓库或其他 worktree，不委派。\
-                依赖成果已应用到本工作树。{}报告实际修改、验证证据和未完成项。\n任务要求：{}\n依赖报告（资料）：{}",
+                "隔离协作任务 {}。仅在当前工作目录工作，不更改源目录或其他节点目录，不委派或模拟其他运行器。\
+                依赖成果已按版本传入本目录。{}报告实际修改、验证证据和未完成项。\n任务要求：{}\n依赖报告（资料）：{}",
                 node.spec.id,
                 if node.spec.read_only {
                     "只读，不修改文件。"
@@ -839,13 +1140,22 @@ async fn drive(
                 node.spec.prompt,
                 report
             );
+            prompt.push_str(&format!(
+                "\n成果契约：{}。写入声明的相对路径，禁止把成果只写到外部临时目录。",
+                serde_json::to_string(&node.spec.contract).map_err(|e| e.to_string())?
+            ));
+            if let Some(version) = &node.review_version {
+                prompt.push_str(&format!("\n本次验收绑定成果版本：{version}。最后一行必须是独立 JSON：\
+                    {{\"agent_deck_verdict\":\"approved 或 changes_requested 或 inconclusive\",\"artifact_version\":\"{version}\",\"reason\":\"实际验证证据或返工原因\"}}。\
+                    只有独立检查当前成果并满足本阶段要求才可 approved。"));
+            }
             if node.spec.supervision.is_some() {
                 let instruction = match node.phase.as_str() {
                     "planning" => {
                         "你是指挥方。只检查文件，不修改、不委派。给执行方明确步骤、边界和可执行验收标准。"
                     }
                     "reviewing" => {
-                        "你是验收方。只检查文件，不修改、不委派。独立检查实际 diff，运行必要验证，不仅相信执行报告。最后一行必须是独立 JSON：{\"agent_deck_verdict\":\"approved\"} 或 {\"agent_deck_verdict\":\"changes_requested\"}。未通过时列出具体返工项。"
+                        "你是验收方。只检查文件，不修改、不委派。独立检查成果，运行必要验证，不仅相信执行报告。遵循上文的成果版本验收 JSON 协议；未通过时列出具体返工项。"
                     }
                     _ => {
                         "你是执行方。根据指挥方的规划或最新返工要求完成任务，保留当前工作树的已有改动。报告修改、测试证据和未完成项。"
@@ -979,6 +1289,7 @@ async fn drive(
                 None,
                 Some((requested, resolved.clone(), transport)),
                 None,
+                None,
             )
             .await;
             let task = match task {
@@ -1092,6 +1403,16 @@ fn discard(run: &GraphRun, data: &Path) -> Result<(), String> {
     if integration_patch.exists() {
         managed_path(&integration_patch, data, "collaboration-artifacts")?;
     }
+    if let Some((path, _)) = &run.input_manifest {
+        managed_path(Path::new(path), data, "collaboration-artifacts")?;
+        let files = Path::new(path)
+            .parent()
+            .ok_or("源快照目录无效")?
+            .join("files");
+        if files.exists() {
+            managed_path(&files, data, "collaboration-artifacts")?;
+        }
+    }
     // Validate every target before any removal, including symlink resolution.
     for node in &run.nodes {
         if let Some(path) = &node.worktree {
@@ -1102,26 +1423,60 @@ fn discard(run: &GraphRun, data: &Path) -> Result<(), String> {
         if let Some(path) = &node.patch_path {
             if Path::new(path).exists() {
                 managed_path(Path::new(path), data, "collaboration-artifacts")?;
+                if run.base_commit.is_empty() {
+                    let files = Path::new(path)
+                        .parent()
+                        .ok_or("成果目录无效")?
+                        .join("files");
+                    if files.exists() {
+                        managed_path(&files, data, "collaboration-artifacts")?;
+                    }
+                }
             }
         }
     }
     for node in &run.nodes {
         if let Some(path) = &node.worktree {
             if Path::new(path).exists() {
-                git(
-                    Path::new(&run.cwd),
-                    &["worktree", "remove", "--force", path],
-                )?;
+                if run.base_commit.is_empty() {
+                    // All absolute canonical targets were checked above.
+                    std::fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+                } else {
+                    git(
+                        Path::new(&run.cwd),
+                        &["worktree", "remove", "--force", path],
+                    )?;
+                }
             }
         }
         if let Some(path) = &node.patch_path {
             if Path::new(path).exists() {
+                if run.base_commit.is_empty() {
+                    let files = Path::new(path)
+                        .parent()
+                        .ok_or("成果路径无效")?
+                        .join("files");
+                    if files.exists() {
+                        managed_path(&files, data, "collaboration-artifacts")?;
+                        std::fs::remove_dir_all(files).map_err(|e| e.to_string())?;
+                    }
+                }
                 std::fs::remove_file(path).map_err(|e| e.to_string())?;
             }
         }
     }
     if integration_patch.exists() {
         std::fs::remove_file(&integration_patch).map_err(|e| e.to_string())?;
+    }
+    if let Some((path, _)) = &run.input_manifest {
+        let files = Path::new(path)
+            .parent()
+            .ok_or("源快照目录无效")?
+            .join("files");
+        if files.exists() {
+            std::fs::remove_dir_all(files).map_err(|e| e.to_string())?;
+        }
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1172,11 +1527,17 @@ pub async fn discard_graph_run(
         node.patch_hash = None;
     }
     run.status = "discarded".into();
+    run.input_manifest = None;
     save(&app, &store, &run)?;
     Ok(run)
 }
 
 fn integrate(run: &GraphRun, data: &Path) -> Result<(), String> {
+    if run.base_commit.is_empty() {
+        return Err(
+            "文件成果已保存在各阶段目录，请从成果卡打开；不会将文档自动覆盖到项目目录".into(),
+        );
+    }
     let cwd = Path::new(&run.cwd);
     if git(cwd, &["rev-parse", "HEAD"])?.trim() != run.base_commit
         || !git(cwd, &["status", "--porcelain"])?.trim().is_empty()
@@ -1266,6 +1627,7 @@ mod tests {
             read_only: true,
             execution: Default::default(),
             supervision: None,
+            contract: Default::default(),
         }
     }
     #[test]
@@ -1278,7 +1640,7 @@ mod tests {
         assert!(validate(&[spec("a", &["missing"])], 2, 900).is_err());
         assert!(validate(&[spec("a", &[]), spec("a", &[])], 2, 900).is_err());
         assert!(validate(&[spec("../escape", &[])], 2, 900).is_err());
-        assert!(validate(&[spec("a", &[])], 5, 900).is_err());
+        assert!(validate(&[spec("a", &[])], 65, 900).is_err());
     }
 
     fn supervised(id: &str, commander: &str, worker: &str) -> Node {
@@ -1289,6 +1651,7 @@ mod tests {
                     commander: commander.into(),
                     max_rounds: 2,
                     execution: Default::default(),
+                    model_hint: None,
                 }),
                 ..spec(id, &[])
             },
@@ -1303,6 +1666,9 @@ mod tests {
             report: None,
             error: None,
             history: Vec::new(),
+            stage_baseline: None,
+            review_version: None,
+            evidence: None,
         }
     }
 
@@ -1393,6 +1759,8 @@ mod tests {
         }
         fn run(&self, specs: Vec<NodeSpec>) -> GraphRun {
             GraphRun {
+                request_task_id: None,
+                input_manifest: None,
                 id: "test".into(),
                 source_task_id: "source".into(),
                 context_source_task_id: "source".into(),
@@ -1415,6 +1783,9 @@ mod tests {
                         phase: "executing".into(),
                         round: 0,
                         history: Vec::new(),
+                        stage_baseline: None,
+                        review_version: None,
+                        evidence: None,
                         spec,
                         status: "done".into(),
                         task_id: None,
@@ -1456,6 +1827,148 @@ mod tests {
             read_only: false,
             ..spec(id, deps)
         }
+    }
+    fn artifact_spec(
+        id: &str,
+        harness: &str,
+        deps: &[&str],
+        outputs: &[&str],
+        acceptance: bool,
+    ) -> NodeSpec {
+        let mut node = spec(id, deps);
+        node.harness = harness.into();
+        node.read_only = outputs.is_empty();
+        node.contract.workspace = crate::workflow_artifacts::WorkspaceKind::Artifacts;
+        node.contract.outputs = outputs.iter().map(|s| s.to_string()).collect();
+        node.contract.acceptance = acceptance;
+        node
+    }
+
+    #[test]
+    fn four_executor_artifact_chain_preserves_versions_without_git_or_source_changes() {
+        let f = Repository::new();
+        let specs = vec![
+            artifact_spec("draft", "zcode", &[], &["novel.md"], false),
+            artifact_spec("expand", "codex", &["draft"], &["novel.md"], false),
+            artifact_spec("check", "opencode", &["expand"], &[], true),
+            artifact_spec("accept", "deck", &["check"], &[], true),
+        ];
+        let mut run = f.run(specs);
+        run.base_commit.clear();
+        // The actual source is a plain non-Git directory; it need not be clean.
+        let source = f.root.parent().unwrap().join("documents");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("notes.txt"), "用户笔记").unwrap();
+        run.cwd = source.to_string_lossy().into();
+        let draft = f.branch(&mut run, 0);
+        assert!(!draft.join(".git").exists());
+        std::fs::write(draft.join("novel.md"), "初稿").unwrap();
+        f.artifact(&mut run, 0);
+        let expanded = f.branch(&mut run, 1);
+        assert_eq!(
+            std::fs::read_to_string(expanded.join("novel.md")).unwrap(),
+            "初稿"
+        );
+        std::fs::write(expanded.join("novel.md"), "扩写后的第二版").unwrap();
+        f.artifact(&mut run, 1);
+        for i in [2, 3] {
+            let path = f.branch(&mut run, i);
+            assert_eq!(
+                std::fs::read_to_string(path.join("novel.md")).unwrap(),
+                "扩写后的第二版"
+            );
+            let version = stage_version(&path).unwrap();
+            run.nodes[i].review_version = Some(version.clone());
+            run.nodes[i].task_id = Some(format!("actual-{}", run.nodes[i].spec.harness));
+            assert!(run.nodes[i].finish_stage(format!(
+                "{{\"agent_deck_verdict\":\"approved\",\"artifact_version\":\"{version}\"}}"
+            )));
+            f.artifact(&mut run, i);
+        }
+        assert_eq!(run.nodes[3].history[0].harness, "deck");
+        assert_ne!(run.nodes[0].patch_hash, run.nodes[1].patch_hash);
+        assert_eq!(
+            std::fs::read_to_string(draft.join("novel.md")).unwrap(),
+            "初稿"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("notes.txt")).unwrap(),
+            "用户笔记"
+        );
+        assert!(!source.join("novel.md").exists());
+        discard(&run, &f.data).unwrap();
+        assert!(!draft.exists());
+        assert!(source.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn read_only_mutations_missing_outputs_and_parallel_collisions_are_rejected() {
+        let f = Repository::new();
+        let mut run = f.run(vec![
+            artifact_spec("a", "zcode", &[], &["same.md"], false),
+            artifact_spec("b", "codex", &[], &["same.md"], false),
+            artifact_spec("join", "deck", &["a", "b"], &[], true),
+        ]);
+        run.base_commit.clear();
+        for i in [0, 1] {
+            let path = f.branch(&mut run, i);
+            assert!(
+                collect_artifact(
+                    &run.nodes[i],
+                    &f.data.join("collaboration-artifacts"),
+                    &run.id
+                )
+                .is_err()
+            );
+            std::fs::write(path.join("same.md"), format!("branch-{i}")).unwrap();
+            f.artifact(&mut run, i);
+        }
+        assert!(
+            create_branch(&run, 2, &f.data.join("collaboration-worktrees"))
+                .unwrap_err()
+                .contains("冲突")
+        );
+        // An isolated reviewer cannot modify the input and still pass collection.
+        run.nodes[2].spec.dependencies = vec!["a".into()];
+        let review = f.data.join("review-isolated");
+        std::fs::create_dir(&review).unwrap();
+        std::fs::write(review.join("same.md"), "before").unwrap();
+        run.nodes[2].worktree = Some(review.to_string_lossy().into());
+        run.nodes[2].baseline_tree = Some(
+            serde_json::to_string(&crate::workflow_artifacts::snapshot(&review).unwrap()).unwrap(),
+        );
+        std::fs::write(review.join("same.md"), "after").unwrap();
+        assert!(
+            collect_artifact(
+                &run.nodes[2],
+                &f.data.join("collaboration-artifacts"),
+                &run.id
+            )
+            .unwrap_err()
+            .contains("只读")
+        );
+    }
+
+    #[test]
+    fn arbitrary_parallel_command_groups_and_version_bound_rework_are_supported() {
+        let nodes: Vec<_> = (0..20)
+            .map(|i| supervised(&format!("chain-{i}"), "opencode", "zcode").spec)
+            .collect();
+        assert!(validate(&nodes, 4, 900).is_ok());
+        let mut node = supervised("loop", "opencode", "zcode");
+        assert!(!node.finish_stage("步骤与标准".into()));
+        assert!(!node.finish_stage("第一轮成果".into()));
+        node.review_version = Some("current".into());
+        assert!(!node.finish_stage(
+            "{\"agent_deck_verdict\":\"approved\",\"artifact_version\":\"old\"}".into()
+        ));
+        assert_eq!(node.phase, "executing");
+        node.review_version = None;
+        assert!(!node.finish_stage("第二轮成果".into()));
+        node.review_version = Some("new".into());
+        assert!(node.finish_stage(
+            "{\"agent_deck_verdict\":\"approved\",\"artifact_version\":\"new\"}".into()
+        ));
     }
     #[test]
     fn dispatch_rechecks_cancellation_deadline_and_changed_constraints() {

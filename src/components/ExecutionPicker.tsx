@@ -17,9 +17,10 @@ export const readableModel = (value: string | null | undefined) => {
 
 const inherit = "__inherit__";
 export function ExecutionPicker({ harness, value, onChange, label = "", disabled = false, taskId = null,
-  allowInherit = true, modelOptions, showModel = true }: {
+  allowInherit = true, modelOptions, showModel = true, hideUnavailableEffort = false }: {
   harness: string; value: ExecutionConfig; onChange: (value: ExecutionConfig) => void; label?: string;
   disabled?: boolean; taskId?: string | null; allowInherit?: boolean; modelOptions?: DropdownOption[]; showModel?: boolean;
+  hideUnavailableEffort?: boolean;
 }) {
   const [models, setModels] = useState<ModelCapability[]>([]);
   const [options, setOptions] = useState<DropdownOption[]>([]);
@@ -76,14 +77,14 @@ export function ExecutionPicker({ harness, value, onChange, label = "", disabled
       displayLabel={modelValue ? undefined : loading ? "加载中" : "选择模型"}
       options={modelChoices} groupBy={(v) => v === inherit ? "默认" : v.includes("/") ? v.split("/")[0] : harness}
       onChange={(model) => onChange({ model: model === inherit ? null : model, effort: model === inherit ? null : "" })} />}
-    <Dropdown title={`${label}思考强度`} icon={<Brain size={14} />} value={value.effort === null && allowInherit ? inherit : value.effort ?? ""}
+    {(!hideUnavailableEffort || efforts.length > 0 || unsupported) && <Dropdown title={`${label}思考强度`} icon={<Brain size={14} />} value={value.effort === null && allowInherit ? inherit : value.effort ?? ""}
       displayLabel={loading ? "加载中" : unsupported ? "档位待调整" : efforts.length ? effortLabel(effectiveEffort || "默认") : "不可配置"}
       disabled={locked || loading || (!efforts.length && !unsupported)}
       options={[
         ...(allowInherit ? [{ value: inherit, label: "继承会话配置" }] : []),
         { value: "", label: "默认" },
         ...efforts.map((effort) => ({ value: effort, label: effortLabel(effort) })),
-      ]} onChange={(effort) => onChange({ ...value, effort: effort === inherit ? null : effort })} />
+      ]} onChange={(effort) => onChange({ ...value, effort: effort === inherit ? null : effort })} />}
     {error && <button type="button" className="icon-button" title={`模型能力加载失败：${error}`} aria-label={`${label}重试模型目录`} onClick={() => setRefresh((n) => n + 1)}><RefreshCw size={14} /></button>}
     {transport === "acp" && <span className="execution-note">ACP · 默认配置</span>}
     {unsupported && <span className="execution-note" role="alert">当前模型不支持该档位</span>}

@@ -9,7 +9,7 @@ export const inTauri =
 
 export type HarnessHealth = { ready: boolean; issues: string[] };
 export type ExecutionConfig = { model: string | null; effort: string | null };
-export type ExecutionSnapshot = { requested: ExecutionConfig; resolved: ExecutionConfig; transport: string };
+export type ExecutionSnapshot = { requested: ExecutionConfig; resolved: ExecutionConfig; transport: string; purpose?: "planning" | "execution" };
 export type ModelCapability = { model: string; efforts: string[]; context_window: number | null };
 export type PhaseExecution = { planning: ExecutionConfig; executing: ExecutionConfig; reviewing: ExecutionConfig };
 export type ExecutionOverride = { target: string; version: number; config: ExecutionConfig };
@@ -139,14 +139,17 @@ export type ContextPolicy = {
 };
 export type GraphNodeSpec = {
   id: string; harness: string; prompt: string; dependencies: string[]; read_only: boolean; execution?: ExecutionConfig;
-  supervision?: { commander: string; max_rounds: number; execution?: ExecutionConfig } | null;
+  supervision?: { commander: string; max_rounds: number; execution?: ExecutionConfig; model_hint?: string | null } | null;
+  contract?: { workspace: "git" | "artifacts"; model_hint?: string | null; outputs: string[]; inputs?: string[]; acceptance: boolean };
 };
 export type GraphRun = {
   id: string; source_task_id: string; conversation_id: string; cwd: string; base_commit: string;
   status: string; integrated: boolean; max_parallel: number; timeout_secs: number; error: string | null;
   nodes: { spec: GraphNodeSpec; status: string; task_id: string | null; report: string | null; error: string | null;
     phase?: string; round?: number;
-    history?: { phase: string; round: number; harness: string; task_id: string; report: string }[];
+    history?: { phase: string; round: number; harness: string; task_id: string; report: string;
+      evidence?: { execution?: ExecutionSnapshot; observed_model?: string | null } | null }[];
+    evidence?: { execution?: ExecutionSnapshot; observed_model?: string | null } | null;
     patch_path: string | null; patch_hash: string | null; worktree: string | null }[];
 };
 export async function getContextPolicy(taskId: string): Promise<ContextPolicy> {
@@ -209,7 +212,7 @@ export async function startTask(params: {
   if (!inTauri) browserStub("派任务");
   // Rust/Tauri 的 Vec<String> 参数是必填键；无附件也必须传空数组。
   const { attachments = [], ...rest } = params;
-  const { task_id } = await invoke<{ task_id: string }>("start_task", { ...rest, attachments });
+  const { task_id } = await invoke<{ task_id: string }>("start_task", { ...rest, attachments, workflow: !params.relay });
   return task_id;
 }
 
@@ -234,14 +237,55 @@ export type TurnArtifacts = {
   base_dir: string;
 };
 
+export type FilePreviewData = {
+  path: string;
+  kind: "text" | "markdown" | "image" | "pdf" | "audio" | "video" | "document" | "archive" | "binary" | "unsupported";
+  size: number;
+  content: string;
+  next_offset: number | null;
+  encoding: string;
+  notice: string | null;
+};
+
+// Share only in-flight reads. Reopening/refreshing a file always reads fresh bytes.
+const fileReads = new Map<string, Promise<unknown>>();
+function fileRequest<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  const key = JSON.stringify([command, args]);
+  const pending = fileReads.get(key);
+  if (pending) return pending as Promise<T>;
+  const request = invoke<T>(command, args).finally(() => {
+    if (fileReads.get(key) === request) fileReads.delete(key);
+  });
+  fileReads.set(key, request);
+  return request;
+}
+
+export async function previewTaskFile(taskId: string, path: string, offset = 0): Promise<FilePreviewData> {
+  return fileRequest<FilePreviewData>("preview_task_file", { taskId, path, offset });
+}
+
+export async function getTaskFilePatch(taskId: string, path: string): Promise<{ text: string; truncated: boolean }> {
+  return fileRequest("get_task_file_patch", { taskId, path });
+}
+
+export type ProjectEntry = { name: string; path: string; directory: boolean; symlink: boolean };
+export type DirectoryPage = { entries: ProjectEntry[]; next: number | null };
+export function listTaskDirectory(taskId: string, path = "", offset = 0): Promise<DirectoryPage> {
+  return fileRequest("list_task_directory", { taskId, path, offset });
+}
+export type TextWindow = { start: number; total: number; lines: string[] };
+export function readTaskTextWindow(taskId: string, path: string, start: number): Promise<TextWindow> {
+  return fileRequest("read_task_text_window", { taskId, path, start });
+}
+
 /** 轮次产出：改动文件（+/-行、diff、可撤销）与生成工件 */
 export async function getTurnArtifacts(taskId: string): Promise<TurnArtifacts> {
   return await invoke<TurnArtifacts>("get_turn_artifacts", { taskId });
 }
 
-/** 撤销单文件改动（未跟踪 = 删除新文件；跟踪 = 还原到 HEAD） */
-export async function undoTaskFile(taskId: string, path: string): Promise<void> {
-  await invoke("undo_task_file", { taskId, path });
+/** Verify turn fingerprints before restoring; returns the recovery backup directory. */
+export async function undoTaskFile(taskId: string, path: string): Promise<string> {
+  return await invoke("undo_task_file", { taskId, path });
 }
 
 /** 用系统默认程序打开工件 */
@@ -289,8 +333,22 @@ export async function getTaskEvents(taskId: string): Promise<AgentEvent[]> {
 export async function getTaskReplay(taskId: string): Promise<AgentEvent[]> {
   if (!inTauri) return [];
   const events = await invoke<(PiEvent | AgentEvent)[]>("get_task_events", { taskId });
-  return events.flatMap(normalizeAgentEvents);
+  const planning = new Set(events.filter((event) => event.type === "status" && event.planning === true)
+    .map((event) => event.sourceTaskId ?? taskId));
+  return events.filter((event) => !planning.has(event.sourceTaskId ?? taskId) || event.workflow_visible === true
+    || ["user_message", "status", "error", "deck_error"].includes(event.type)).flatMap(normalizeAgentEvents);
 }
+
+export async function getPendingWorkflowPlan(taskId: string): Promise<{
+  id: string; tool: string; args: Record<string, unknown>; taskId?: string;
+} | null> {
+  return invoke("get_pending_workflow_plan", { taskId });
+}
+export async function cancelWorkflowPlan(taskId: string, approvalId?: string): Promise<void> {
+  return invoke("cancel_workflow_plan", { taskId, approvalId: approvalId ?? null });
+}
+export type WorkflowLimits = { max_nodes: number; max_parallel: number; max_timeout_secs: number };
+export async function getWorkflowLimits(): Promise<WorkflowLimits> { return invoke("get_workflow_limits"); }
 
 export async function getTaskDiff(taskId: string): Promise<string> {
   if (!inTauri) browserStub("查看 Diff");

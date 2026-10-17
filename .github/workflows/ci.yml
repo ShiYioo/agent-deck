@@ -59,3 +59,15 @@ jobs:
 
       - name: Frontend typecheck & build
         run: pnpm build
+
+      # 验证 Windows NSIS 安装器：包含自定义目录和当前用户/所有用户安装模式。
+      - name: Build Windows NSIS installer
+        run: pnpm tauri build --debug
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentDeck-windows-installer
+          path: src-tauri/target/debug/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14

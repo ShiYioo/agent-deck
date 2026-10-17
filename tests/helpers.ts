@@ -72,6 +72,14 @@ export async function mockDesktop(page: Page, failSend = true) {
         calls.push(cmd);
         (w.__testInvokes as { cmd: string; args: Record<string, unknown> }[]).push({ cmd, args });
         if (cmd === "check_harness") return { ready: true, issues: [] };
+        if (cmd === "get_workflow_limits") return w.__testWorkflowLimits ?? { max_nodes: 64, max_parallel: 4, max_timeout_secs: 3600 };
+        if (cmd === "get_pending_workflow_plan") return (w.__testPendingPlans as Record<string, unknown> | undefined)?.[String(args.taskId)] ?? null;
+        if (cmd === "cancel_workflow_plan") {
+          w.__testCancelledWorkflow = args;
+          const pending = w.__testPendingPlans as Record<string, unknown> | undefined;
+          if (pending) delete pending[String(args.taskId)];
+          return;
+        }
         if (cmd === "get_execution_defaults") return executionDefaults[`${args.taskId ?? "default"}:${args.harness}`] ?? { model: null, effort: null };
         if (cmd === "set_execution_defaults") {
           executionDefaults[`${args.taskId ?? "default"}:${args.harness}`] = args.config as { model: string | null; effort: string | null };

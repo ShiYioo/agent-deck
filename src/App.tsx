@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelLeft, SquarePen, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff, PenLine } from "lucide-react";
+import { PanelLeft, SquarePen, Folder, RotateCcw, X, ListChecks, Ellipsis, FileDiff, PenLine, FileSearch } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
@@ -28,7 +28,6 @@ import {
   invokeTaskCommand,
   compactTask,
   inTauri,
-  discoverModels,
   listTasks,
   listCollaborations,
   listGraphRuns,
@@ -37,6 +36,8 @@ import {
   startTask,
   startCollaboration,
   startApprovedPlan,
+  getPendingWorkflowPlan,
+  cancelWorkflowPlan,
   getExecutionDefaults,
   setExecutionDefaults,
   inheritedExecution,
@@ -47,7 +48,6 @@ import { ConversationStatus, type ConversationPhase } from "./components/Convers
 import { conversationState } from "./conversationState";
 import { CollaborationInspector } from "./components/CollaborationInspector";
 import { ContextUsageBadge } from "./components/ContextUsageBadge";
-import { detectExecutorMention } from "./executorMention";
 import { ExecutionPicker, effortLabel, readableModel } from "./components/ExecutionPicker";
 import { DelegationExecution } from "./components/DelegationExecution";
 import CollaborationPlanCard, { type CollaborationPlan } from "./components/CollaborationPlanCard";
@@ -70,6 +70,8 @@ import { MotionLayer, useMotionPolicy } from "./motion/MotionProvider";
 import { useFrameQueue } from "./hooks/useFrameQueue";
 import { Disclosure } from "./components/Disclosure";
 import { TurnArtifactsPanel } from "./components/TurnArtifacts";
+import { FilePreviewContext } from "./filePreview";
+import type { FileSelection } from "./components/FilePreviewPanel";
 import {
   IconBack,
   IconKey,
@@ -81,6 +83,7 @@ import {
 const emptyEvents: LogItem[] = [];
 const ConversationContext = lazy(() => import("./components/ConversationContext"));
 const DiffModal = lazy(() => import("./components/DiffModal").then((module) => ({ default: module.DiffModal })));
+const FileWorkspace = lazy(() => import("./components/FileWorkspace"));
 const SettingsPage = lazy(() => import("./components/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const CreateProjectModal = lazy(() => import("./components/CreateProjectModal").then((module) => ({ default: module.CreateProjectModal })));
 
@@ -111,6 +114,9 @@ export default function App() {
   const reconfiguringTasks = useRef(new Set<string>());
   const drainingQueues = useRef(new Set<string>());
   const cooperationBusy = useRef(false);
+  const workflowSources = useRef(new Set<string>());
+  const workflowStates = useRef(new Map<string, string>());
+  const workflowTargets = useRef(new Map<string, string>());
   const listenersReady = useRef<Promise<unknown>>(Promise.resolve());
   const setLive = useCallback((update: (prev: Record<string, LiveTask>) => Record<string, LiveTask>) => {
     const next = update(liveRef.current);
@@ -148,7 +154,13 @@ export default function App() {
   const [historyEvents, setHistoryEvents] = useState<Record<string, AgentEvent[]>>({});
   const [loadingEvents, setLoadingEvents] = useState<Set<string>>(new Set());
   const eventRequests = useRef(new Set<string>());
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelectedState] = useState<string | null>(null);
+  const selectedRef = useRef<string | null>(null);
+  const setSelected = useCallback((update: string | null | ((current: string | null) => string | null)) => {
+    const id = typeof update === "function" ? update(selectedRef.current) : update;
+    selectedRef.current = id;
+    setSelectedState(id);
+  }, []);
   const executionScope = history.find((row) => row.id === selected)?.conversation_id ?? selected;
   const [executionPreferences, setExecutionPreferences] = useState<Record<string, ExecutionConfig>>({});
   const preferencesRef = useRef(executionPreferences);
@@ -196,6 +208,7 @@ export default function App() {
 
   // diff 弹层
   const [diff, setDiff] = useState<{ taskId: string; text: string } | null>(null);
+  const [fileSelection, setFileSelection] = useState<FileSelection | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // 换档提示：接力/切模型时的一次性说明（发送即清）
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -220,13 +233,28 @@ export default function App() {
   // 队列「编辑」：撤回完整输入意图到 composer（带版本号驱动注入）
   const [queuedWithdraw, setQueuedWithdraw] = useState<{ text: string; version: number } | null>(null);
   const bumpGraphs = useCallback(() => setGraphRefresh((n) => n + 1), []);
+  useEffect(() => {
+    if (!selected || !inTauri) return;
+    let disposed = false;
+    void getPendingWorkflowPlan(selected).then((pending) => {
+      if (disposed || !pending?.id) return;
+      const owner = pending.taskId ?? selected;
+      setApprovals((previous) => ({
+        ...previous, [selected]: [{ ...pending, taskId: owner },
+          ...(previous[selected] ?? []).filter((request) => request.id !== pending.id)],
+      }));
+    }).catch((error) => { if (!disposed) console.warn("恢复工作流计划失败", error); });
+    return () => { disposed = true; };
+  }, [selected, graphRefresh]);
   const clearApproval = useCallback((taskId: string, id?: string) => {
     setApprovals((prev) => {
-      const queue = prev[taskId];
-      if (!queue) return prev;
-      const nextQueue = id ? queue.filter((a) => a.id !== id) : [];
-      const next = { ...prev, [taskId]: nextQueue };
-      if (!nextQueue.length) delete next[taskId];
+      let next = prev;
+      for (const [key, queue] of Object.entries(prev)) {
+        const remaining = queue.filter((request) => request.taskId !== taskId || (!!id && request.id !== id));
+        if (remaining.length === queue.length) continue;
+        if (next === prev) next = { ...prev };
+        if (remaining.length) next[key] = remaining; else delete next[key];
+      }
       return next;
     });
   }, []);
@@ -317,7 +345,8 @@ export default function App() {
   const stopSelected = useCallback(() => {
     if (selected) {
       setLive((prev) => prev[selected] ? { ...prev, [selected]: { ...prev[selected], queuePaused: true } } : prev);
-      cancelTask(selected).catch((e) => setActionError(String(e)));
+      (liveRef.current[selected]?.workflowPlanning
+        ? cancelWorkflowPlan(selected) : cancelTask(selected)).catch((e) => setActionError(String(e)));
     }
   }, [selected, setLive]);
 
@@ -370,7 +399,7 @@ export default function App() {
           continue;
         }
         next[id] = applyTaskUpdates(task, updates);
-        changed = true;
+        if (next[id] !== task) changed = true;
       }
       return changed ? next : prev;
     });
@@ -409,6 +438,10 @@ export default function App() {
     });
     if (rows.length) setHistory(rows.filter((row) => !deletedTasks.current.has(row.id)));
     const startedRow = rows.find((row) => row.id === taskId);
+    const planning = startedRow?.execution_config?.purpose === "planning";
+    const planningActive = planning && (!workflowStates.current.has(taskId)
+      || ["planning", "launching"].includes(workflowStates.current.get(taskId)!));
+    if (planningActive) workflowSources.current.add(taskId);
     const taskCwd = startedRow?.cwd ?? params.cwd;
     setLive((prev) => ({
       ...prev,
@@ -421,6 +454,10 @@ export default function App() {
         conversationId: startedRow?.conversation_id ?? params.conversationId ?? null,
         events: [
           ...(previous?.events ?? []),
+          ...(planning ? [{
+            event: { type: "status", text: "正在理解任务…", planning: true, sourceTaskId: taskId } as AgentEvent,
+            key: nextKey(),
+          }] : []),
           // 自动接力请求不伪装成用户消息；用户本轮输入始终保留。
           // ts = 派发时刻：complete 的工作耗时以此为起点
           {
@@ -439,9 +476,29 @@ export default function App() {
             key: nextKey(),
           },
         ],
-        running: true, status: "running", exitCode: null, queued, queuedConfigs, queuePaused,
+        running: planning ? planningActive : true,
+        workflowPlanning: planning ? taskId : undefined,
+        workflowPhase: planningActive ? workflowStates.current.get(taskId) === "launching" ? "launching" : "planning" : undefined,
+        status: "running", exitCode: null, queued, queuedConfigs, queuePaused,
       },
     }));
+    const targetId = workflowTargets.current.get(taskId);
+    const attached = targetId ? liveRef.current[targetId] : undefined;
+    if (targetId && attached) {
+      if (queued?.length) {
+        setLive((prev) => ({ ...prev, [targetId]: { ...prev[targetId], queued, queuedConfigs, queuePaused },
+          [taskId]: { ...prev[taskId], queued: [], queuedConfigs: [] } }));
+      }
+      setSelected(targetId);
+      setHarness(attached.harness);
+      setModel(attached.model ?? "");
+      setEffort(attached.effort ?? "");
+      setMode(attached.mode ?? "default");
+      setPermission(attached.permission ?? "auto");
+      setCwd(attached.cwd);
+      refreshHistory();
+      return targetId;
+    }
     setSelected(taskId);
     setHarness(params.harness);
     setModel(params.model ?? "");
@@ -470,7 +527,8 @@ export default function App() {
         attachments: config?.attachments ?? [],
         projectId: task.projectId,
         conversationId: task.conversationId ?? sourceId,
-        resumeSessionId: target === task.harness ? task.sessionId ?? null : null,
+        resumeSessionId: target === task.harness && !task.workflowPlanning
+          && task.executionConfig?.purpose !== "planning" ? task.sessionId ?? null : null,
       }, task, task.queued?.slice(1), task.queuedConfigs?.slice(1), false)
         .then(() => setLive((prev) => prev[sourceId] ? ({
           ...prev, [sourceId]: { ...prev[sourceId], queued: [], queuedConfigs: [] },
@@ -539,6 +597,7 @@ export default function App() {
       listen<{ taskId: string; code: number | null; status?: TaskRow["status"] }>("task-exit", (e) => {
         const { taskId, code } = e.payload;
         if (deletedTasks.current.has(taskId)) return;
+        if (workflowSources.current.has(taskId)) return;
         const status = e.payload.status ?? (code === 0 ? "done" : code === null ? "cancelled" : "failed");
         enqueueUpdate({
           taskId, running: false, exitCode: code,
@@ -561,6 +620,53 @@ export default function App() {
           }
         }
         setTimeout(refreshHistory, 300);
+      }),
+      listen<{ taskId: string; status: string; targetTaskId?: string | null; message?: string | null }>("workflow-update", (e) => {
+        const { taskId, status, targetTaskId, message } = e.payload;
+        workflowStates.current.set(taskId, status);
+        if (status === "planning" || status === "launching") {
+          workflowSources.current.add(taskId);
+          setLive((prev) => prev[taskId] ? ({ ...prev, [taskId]: {
+            ...prev[taskId], running: true, status: "running", workflowPhase: status,
+          } }) : prev);
+          return;
+        }
+        workflowSources.current.delete(taskId);
+        setLive((prev) => prev[taskId] ? ({
+          ...prev, [taskId]: { ...prev[taskId], running: false, workflowPhase: undefined,
+            status: ["failed", "needs_attention"].includes(status) ? "failed" : status === "cancelled" ? "cancelled" : "done",
+            queuePaused: status !== "launched" ? true : prev[taskId].queuePaused },
+        }) : prev);
+        if (message) setActionError(message);
+        if (targetTaskId) {
+          workflowTargets.current.set(taskId, targetTaskId);
+          // Load the actual executor from persisted task state; no synthetic stage.
+          void Promise.all([listTasks(Number.MAX_SAFE_INTEGER), getTaskEvents(targetTaskId)]).then(([rows, events]) => {
+            const worker = rows.find((row) => row.id === targetTaskId);
+            if (!worker || deletedTasks.current.has(targetTaskId)) return;
+            const queued = liveRef.current[taskId];
+            setHistory(rows);
+            setLive((prev) => ({ ...prev, [targetTaskId]: {
+              ...prev[targetTaskId], harness: worker.harness, cwd: worker.cwd, prompt: worker.prompt,
+              mode: worker.mode, model: worker.model, executionConfig: worker.execution_config,
+              permission: queued?.permission, projectId: worker.project_id, conversationId: worker.conversation_id,
+              sessionId: worker.session_id ?? undefined,
+              events: events.map((event) => ({ event, key: nextKey() })),
+              running: worker.status === "running", status: worker.status, exitCode: worker.exit_code,
+              queued: queued?.queued, queuedConfigs: queued?.queuedConfigs, queuePaused: queued?.queuePaused,
+            } }));
+            if (selectedRef.current === taskId) {
+              setSelected(targetTaskId);
+              setHarness(worker.harness); setModel(worker.model ?? ""); setMode(worker.mode ?? "default");
+            }
+            setLive((prev) => prev[taskId] ? ({ ...prev, [taskId]: { ...prev[taskId], queued: [], queuedConfigs: [] } }) : prev);
+            const attached = liveRef.current[targetTaskId];
+            if (worker.status === "done" && attached?.queued?.length && !attached.queuePaused) {
+              flushQueued(attached, attached.queued[0], targetTaskId);
+            }
+          }).catch((error) => setActionError(String(error)));
+        }
+        bumpGraphs(); refreshHistory();
       }),
       // deck（pi 运行时）事件：归一化到统一渲染管道；退出由 task-exit 之外的
       // deck_run_end 体现，这里同时以 task-exit 兜底
@@ -610,12 +716,13 @@ export default function App() {
           if (event.type === "session_id") sessionIds.current.set(taskId, event.id);
           enqueueUpdate({ taskId, item: { event, key: nextKey() } });
         }
-        const running = payload.type === "deck_run_end" ? false : payload.type === "deck_run_start" ? true : undefined;
+        const planning = workflowSources.current.has(taskId);
+        const running = !planning && payload.type === "deck_run_end" ? false : payload.type === "deck_run_start" ? true : undefined;
         if (running !== undefined) enqueueUpdate({
           taskId, running,
           status: running ? "running" : payload.status === "cancelled" ? "cancelled" : payload.ok === false ? "failed" : "done",
         });
-        if (payload.type === "deck_run_end") {
+        if (payload.type === "deck_run_end" && !planning) {
           flushUpdates();
           clearApproval(taskId);
           setTimeout(refreshHistory, 300);
@@ -740,34 +847,8 @@ export default function App() {
         setActionError("请输入任务描述");
         return false;
       }
-      // 自然语言执行器指名（“用/让 ZCode 的 xxx 模型 …”）：语义同 @ 路由——
-      // 原生 harness 没有跨执行器委派工具，不拦就变成对方自己的 subagent。
-      if (!atTarget && harness !== "deck") {
-        const mention = detectExecutorMention(text, harness);
-        if (mention) {
-          let mentionModel: string | null = null;
-          if (mention.modelHint) {
-            try {
-              const norm = mention.modelHint.toLowerCase().replace(/[^a-z0-9]/g, "");
-              const list = await discoverModels(mention.harness);
-              const hit = list.find((entry: string) => {
-                const raw = entry.split("	")[0].toLowerCase().replace(/[^a-z0-9]/g, "");
-                const label = (entry.split("	")[2] ?? entry).toLowerCase().replace(/[^a-z0-9]/g, "");
-                return label.includes(norm) || raw.includes(norm);
-              });
-              if (hit) mentionModel = hit.split("	")[0];
-            } catch {
-              // 模型目录发现失败就不指定模型，交给目标执行器的默认
-            }
-          }
-          atTarget = mention.harness;
-          atModel = mentionModel;
-          text = mention.rest;
-          setActionNotice(
-            `已按你的指示改派 ${mention.harness}${mentionModel ? ` · ${mentionModel.split("/").pop()}` : ""}（原会话执行器 ${harness}）`,
-          );
-        }
-      }
+      // Natural language is interpreted by the platform's semantic planning phase.
+      // @ remains an explicit initial executor selection; it does not erase later stages.
 
       const row = selected ? history.find((t) => t.id === selected) : undefined;
       if (selected && reconfiguringTasks.current.has(selected)) {
@@ -832,9 +913,11 @@ export default function App() {
       const continuing = !!resumeSource
         && directoryKey(resumeSource.cwd) === directoryKey(cwd || ".");
       const binding = continuing ? [...(selectedConversation?.turns ?? [])].reverse().find((turn) =>
-        turn.harness === useHarness && turn.session_id && turn.status !== "running") : undefined;
+        turn.harness === useHarness && turn.session_id && turn.status !== "running"
+        && turn.execution_config?.purpose !== "planning") : undefined;
       const resumeId = binding?.session_id
-        ?? (continuing && resumeSource?.harness === useHarness ? resumeSource.sessionId : null);
+        ?? (continuing && resumeSource?.harness === useHarness
+          && !resumeSource.workflowPlanning && resumeSource.executionConfig?.purpose !== "planning" ? resumeSource.sessionId : null);
       // 记住这次的工作目录，下次启动作为默认
       const useCwd = continuing ? resumeSource!.cwd : cwd || ".";
       if (cwd.trim()) {
@@ -946,6 +1029,7 @@ export default function App() {
           projectId: row.project_id, conversationId: row.conversation_id,
           sessionId: row.session_id ?? undefined,
           events: [], running: row.status === "running", status: row.status,
+          workflowPlanning: row.execution_config?.purpose === "planning" ? row.id : undefined,
           exitCode: row.exit_code,
           ...savedQueue,
         }, events.map((event) => ({
@@ -1036,7 +1120,7 @@ export default function App() {
             key: i,
           }))
         : emptyEvents),
-    [selectedLive, selected, historyEvents],
+    [selectedLive?.events, selected, historyEvents],
   );
   const selectedRunning = selectedLive?.running ?? selectedRow?.status === "running";
   const selectedSession = selectedLive?.sessionId ?? selectedRow?.session_id ?? null;
@@ -1071,7 +1155,8 @@ export default function App() {
     if (!selected) return;
     setLive((prev) => prev[selected] ? { ...prev, [selected]: { ...prev[selected], queuePaused: true } } : prev);
     const operations: Promise<unknown>[] = [];
-    if (selectedRunning) operations.push(cancelTask(selected));
+    if (selectedRunning) operations.push(selectedLive?.workflowPlanning
+      ? cancelWorkflowPlan(selected) : cancelTask(selected));
     for (const run of activeGraphs) operations.push(cancelGraphRun(run.id));
     for (const run of collaborations.filter((run) => run.status === "running" &&
       (run.source_task_id === selected || (!!run.conversation_id && run.conversation_id === selectedRow?.conversation_id)))) {
@@ -1083,7 +1168,9 @@ export default function App() {
       refreshHistory(); bumpGraphs();
     });
   };
-  const activityLabel = selectedLive?.todos?.find((todo) => todo.status === "in_progress")?.content ??
+  const activityLabel = selectedLive?.workflowPhase === "launching" && selectedLive.running ? "正在安排执行…" :
+    selectedLive?.workflowPlanning && selectedLive.running ? "正在理解任务…" :
+    selectedLive?.todos?.find((todo) => todo.status === "in_progress")?.content ??
     `${selectedHarness} 正在处理任务`;
   // 轮次产出：任务结束后拉取改动文件与生成工件
   const [turnArtifacts, setTurnArtifacts] = useState<{
@@ -1093,6 +1180,7 @@ export default function App() {
   const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const artifactsTaskRef = useRef<string | null>(null);
+  const artifactsRequests = useRef(new Map<string, Promise<Awaited<ReturnType<typeof getTurnArtifacts>>>>());
   const artifactsGeneration = useRef(0);
   const artifactsSelection = useRef(selected);
   artifactsSelection.current = selected;
@@ -1104,7 +1192,18 @@ export default function App() {
     // 运行中的轮询不插入加载行，避免对话底部每四秒跳动。
     setArtifactsLoading(!background);
     try {
-      const data = await getTurnArtifacts(taskId);
+      // A final/manual scan waits for the running scan, then reads a fresh
+      // snapshot. Reusing the old response could miss the frozen final result.
+      const pending = artifactsRequests.current.get(taskId);
+      if (pending) await pending.catch(() => {});
+      if (!current()) return;
+      const request = getTurnArtifacts(taskId);
+      artifactsRequests.current.set(taskId, request);
+      let data: Awaited<ReturnType<typeof getTurnArtifacts>>;
+      try { data = await request; }
+      finally {
+        if (artifactsRequests.current.get(taskId) === request) artifactsRequests.current.delete(taskId);
+      }
       if (!current()) return;
       setTurnArtifacts({ taskId, data });
       setArtifactsError(null);
@@ -1136,12 +1235,15 @@ export default function App() {
     }
     // 运行中：定时刷新本轮产出——文件的删除/修改一发生就能看到（不必等任务结束）
     if (selectedRunning) {
-      void fetchTurnArtifacts(selected, true);
-      const timer = setInterval(() => {
+      let disposed = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const poll = async () => {
         artifactsTaskRef.current = null;
-        void fetchTurnArtifacts(selected, true);
-      }, 4000);
-      return () => clearInterval(timer);
+        await fetchTurnArtifacts(selected, true);
+        if (!disposed) timer = setTimeout(poll, document.hidden ? 15_000 : 4000);
+      };
+      void poll();
+      return () => { disposed = true; clearTimeout(timer); };
     }
     // 结束后再次收集最终快照，取消前的成果同样保留。
     if (!["done", "failed", "cancelled"].includes(selectedStatus ?? "")) {
@@ -1176,30 +1278,54 @@ export default function App() {
     };
   }, [diffTaskId, selectedRunning]);
 
-  const handleViewFileDiff = useCallback(
-    (file: { diff: string }) => {
-      if (!selected) return;
-      setDiff({ taskId: selected, text: file.diff });
-    },
-    [selected],
-  );
+  const previewArtifactsRef = useRef(turnArtifacts);
+  previewArtifactsRef.current = turnArtifacts;
+  const showFile = useCallback((path: string, tab: "content" | "diff" = "content") => {
+    const task = selectedRowRef.current;
+    if (!task) return;
+    const artifacts = previewArtifactsRef.current;
+    const change = artifacts?.taskId === task.id
+      ? artifacts.data.files.find((file) => file.path === path) : undefined;
+    setFileSelection({ task, path, tab, change });
+  }, []);
+  const handleViewFileDiff = useCallback((file: { path: string }) => showFile(file.path, "diff"), [showFile]);
+  const openWorkflowFile = useCallback(async (taskId: string, path: string) => {
+    try {
+      const rows = await listTasks(Number.MAX_SAFE_INTEGER);
+      const task = rows.find((row) => row.id === taskId);
+      if (!task) throw new Error("成果对应的执行记录不存在");
+      await viewTask(taskId);
+      setFileSelection({ task, path, tab: "content" });
+    } catch (error) { setActionError(String(error)); }
+  }, [viewTask]);
+  const closeFile = useCallback(() => setFileSelection(null), []);
+  const chooseFile = async () => {
+    if (!selectedRow) return;
+    showFile("");
+  };
 
   const handleUndoFile = useCallback(
-    (file: { path: string }) => {
-      if (!selected) return;
-      undoTaskFile(selected, file.path)
-        .then(refreshTurnArtifacts)
-        .catch((e) => setActionError(String(e)));
+    async (file: { path: string }) => {
+      if (!selected) throw new Error("请先选择任务");
+      const backup = await undoTaskFile(selected, file.path);
+      await refreshTurnArtifacts();
+      return backup;
     },
     [selected, refreshTurnArtifacts],
   );
 
   const handleOpenArtifact = useCallback((path: string, reveal: boolean) => {
-    openArtifact(path, reveal).catch((e) => setActionError(String(e)));
-  }, []);
+    if (!reveal) { showFile(path); return; }
+    openArtifact(path, true).catch((e) => setActionError(String(e)));
+  }, [showFile]);
 
   const artifactsFooter = selected ? (
     <TurnArtifactsPanel
+      key={selected}
+      taskId={selected}
+      harness={selectedRow?.harness}
+      model={selectedRow?.execution_config?.resolved.model ?? selectedRow?.model}
+      running={selectedRunning}
       data={turnArtifacts?.taskId === selected ? turnArtifacts.data : null}
       loading={artifactsLoading}
       onViewDiff={handleViewFileDiff}
@@ -1259,14 +1385,15 @@ export default function App() {
       if (e.key !== "Escape") return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
-      if (diff || settingsOpen || approval) return; // 弹层/审批有自己的 Esc 语义
+      if (diff || settingsOpen || approval || fileSelection) return; // 阅读区关闭不会终止任务
       if (!selectedRunning || !selected) return;
       e.preventDefault();
-      cancelTask(selected).catch((e) => setActionError(String(e)));
+      (liveRef.current[selected]?.workflowPlanning
+        ? cancelWorkflowPlan(selected) : cancelTask(selected)).catch((e) => setActionError(String(e)));
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectedRunning, selected, diff, settingsOpen, approval]);
+  }, [selectedRunning, selected, diff, settingsOpen, approval, fileSelection]);
 
 
   const canShowDiff = !!selectedRow;
@@ -1385,6 +1512,7 @@ export default function App() {
   selectedRowRef.current = selectedRow;
 
   return (
+    <FilePreviewContext.Provider value={showFile}>
     <div className="app-viewport">
       <TitleBar onToggleSidebar={toggleSidebar} />
       <div className="desktop-body">
@@ -1442,6 +1570,7 @@ export default function App() {
             {selected && <button className={`icon-button ${detailsOpen ? "is-active" : ""}`}
               title="执行详情" aria-label="执行详情" aria-expanded={detailsOpen}
               onClick={() => setDetailsOpen((value) => !value)}><ListChecks size={18} /></button>}
+            {selected && <button className="icon-button" title="查看工作区文件" aria-label="查看工作区文件" onClick={chooseFile}><FileSearch size={17} /></button>}
             {selected && canShowDiff && <button className="icon-button" title="查看 Diff" aria-label="查看 Diff" onClick={showDiff}><FileDiff size={17} /></button>}
             <button className="icon-button" title="新聊天" aria-label="新聊天" onClick={() => newChat()}><SquarePen size={17} /></button>
           </div>
@@ -1454,7 +1583,6 @@ export default function App() {
             className="new-chat-heading"
           >
             <h1>开始新的任务</h1>
-            <p className="new-chat-description">描述目标，选择运行器，在同一段对话中推进工作。</p>
             {cwd && <span className="new-chat-project">{projects.find((p) => directoryKey(p.dir) === directoryKey(cwd))?.name ?? projectName(cwd)}</span>}
             <div className="new-chat-starters" aria-label="任务起点">
               {[
@@ -1783,11 +1911,17 @@ export default function App() {
                     key={approval.id}
                     taskId={approval.taskId}
                     plan={approval.args.__plan as CollaborationPlan}
+                    issues={approval.args.__issues as string[] | undefined}
                     onConfirm={async (nodes) => {
                       const taskId = approval.taskId;
                       reconfiguringTasks.current.add(taskId);
                       try {
                         const result = await startApprovedPlan(taskId, approval.id, nodes);
+                        const sourceQueue = liveRef.current[taskId];
+                        setLive((prev) => prev[taskId] ? ({
+                          ...prev, [taskId]: { ...prev[taskId], running: false, status: "done", queuePaused: false,
+                            ...(result.task_id ? { queued: [], queuedConfigs: [] } : {}) },
+                        }) : prev);
                         clearApproval(taskId, approval.id);
                         refreshHistory();
                         bumpGraphs();
@@ -1817,6 +1951,9 @@ export default function App() {
                               running: (worker?.status ?? "running") === "running",
                               status: worker?.status ?? "running",
                               exitCode: worker?.exit_code ?? null,
+                              queued: sourceQueue?.queued,
+                              queuedConfigs: sourceQueue?.queuedConfigs,
+                              queuePaused: false,
                             },
                           }));
                           setHarness(node.harness);
@@ -1833,7 +1970,9 @@ export default function App() {
                     }}
                     onError={setActionError}
                     onCancel={() =>
-                      invokePiCommand(approval.taskId, "reject", approval.id)
+                      (approval.args.__workflow
+                        ? cancelWorkflowPlan(approval.taskId, approval.id)
+                        : invokePiCommand(approval.taskId, "reject", approval.id))
                         .then(() => clearApproval(approval.taskId, approval.id))
                         .catch((e) => setActionError(String(e)))
                     }
@@ -1952,7 +2091,8 @@ export default function App() {
               blocked={!!approval || !!selectedLive?.compacting}
               activity={activityLabel}
               loading={!!selected && loadingEvents.has(selected)} footer={<>
-                {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} onViewTask={viewTask} onRuns={updateGraphActivity} />}
+                {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} onViewTask={viewTask}
+                  onOpenFile={openWorkflowFile} onRuns={updateGraphActivity} />}
                 {!(detailsOpen && detailsTab === "files") && artifactsFooter}
                 <div className="timeline-inspect-actions">
                   {turnArtifacts?.taskId === selected && !!(turnArtifacts.data?.files.length || turnArtifacts.data?.artifacts.length) &&
@@ -2131,7 +2271,7 @@ export default function App() {
             text={diff.text}
             running={selectedRunning}
             harness={selectedRow.harness}
-            model={selectedRow.model}
+            model={selectedRow.execution_config?.resolved.model ?? selectedRow.model}
             mode={selectedRow.mode}
             onClose={closeDiff}
           />
@@ -2140,9 +2280,16 @@ export default function App() {
         </AnimatePresence>
         </Suspense>
       </main>
+      {fileSelection && fileSelection.task.id === selected && <Suspense fallback={<div className="file-preview-loading" role="status">正在加载文件查看器…</div>}>
+        <FileWorkspace key={fileSelection.task.id}
+          selection={fileSelection}
+          files={turnArtifacts?.taskId === selected ? turnArtifacts.data.files : []}
+          onSelect={showFile} onClose={closeFile} />
+      </Suspense>}
       </div>
       </div>
     </div>
+    </FilePreviewContext.Provider>
   );
 }
 

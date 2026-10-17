@@ -364,7 +364,7 @@ export const Composer = memo(function Composer({
     responseMode === "approval" ? "请先处理上方请求；补充消息会排队" :
     switching ? `当前由 ${activeHarness} 执行，这条要求将在结束后交给 ${routedHarness}` :
     running ? "补充消息会排队，本轮结束后继续" :
-    `发送给 ${routedHarness} · Enter 发送，Shift + Enter 换行`);
+    `由 ${routedHarness} 接手，按需协作 · Enter 发送`);
 
   // 动态发现真实模型列表（codex 读 desktop 状态文件、opencode 调 CLI）；
   // 失败或为空则回退静态目录
@@ -416,6 +416,7 @@ export const Composer = memo(function Composer({
   }, [requestedHarness, catalogVersion]);
 
   return (
+    <>
     <div className="composer-card">
       {attachments.length > 0 && (
         <div className="composer-attachments" role="list" aria-label="附件">
@@ -703,7 +704,7 @@ export const Composer = memo(function Composer({
         </div>
 
         {/* codex/opencode/deck：模型选择（zcode CLI 未暴露模型旗标，走账号默认） */}
-         <ExecutionPicker harness={harness} value={{ model, effort }} allowInherit={false} taskId={executionScope}
+         <ExecutionPicker harness={harness} value={{ model, effort }} allowInherit={false} hideUnavailableEffort taskId={executionScope}
            modelOptions={harness === "deck" ? deckOptions.map((o) => ({ value: o.value, label: `${o.group} · ${o.label}` }))
              : harness === "zcode"
                ? (modelOptionsBy.zcode ?? []).map((entry) => {
@@ -765,11 +766,12 @@ export const Composer = memo(function Composer({
              <ArrowUp size={17} />
         </button>
       </div>
+    </div>
       <div className="composer-behavior" aria-live="polite">
         <CornerDownLeft size={12} aria-hidden="true" /><span>{sendHint}</span>
         {sending && <span>正在发送…</span>}
       </div>
 
-    </div>
+    </>
   );
 });

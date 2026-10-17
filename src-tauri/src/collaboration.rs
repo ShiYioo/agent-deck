@@ -332,6 +332,7 @@ async fn stage(
         Some(run.phase.clone()),
         None,
         None,
+        None,
     )
     .await?;
     run.current_task_id = Some(task.task_id.clone());

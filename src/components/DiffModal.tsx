@@ -5,6 +5,7 @@ import { useDialogFocus } from "../hooks/useDialogFocus";
 
 import { IconClose } from "./icons";
 import { HarnessIcon } from "./HarnessIcon";
+import { FileLines } from "./FileLines";
 
 /** 从 diff 文本统计规模：+/- 行数与涉及文件数 */
 function diffStats(text: string) {
@@ -19,16 +20,13 @@ function diffStats(text: string) {
   return { added, removed, files };
 }
 
-/** 轻量 diff 渲染：按 +/-/@@ 行着色，不引入 Monaco 重依赖。
- *  头部标注改动归属（哪个 harness 的哪个模型改的）；
- *  running 时每 POLL_MS 触发一次 onRefresh（实时跟随 harness 改动）。 */
+/** Virtualized workspace patch. Task metadata is context, not proof of authorship. */
 export function DiffModal({
   text,
   onClose,
   running = false,
   harness,
   model,
-  mode,
 }: {
   text: string;
   onClose: () => void;
@@ -38,9 +36,7 @@ export function DiffModal({
   model?: string | null;
   mode?: string | null;
 }) {
-  // deck 运行时的模型选择存在 mode 字段（glm/gpt）
-  const modelLabel =
-    model ?? (harness === "deck" && mode ? mode.toUpperCase() : null);
+  const modelLabel = model ?? "模型未报告";
   const present = useIsPresent();
   const dialogRef = useDialogFocus(present);
   // Esc 关闭（标准弹层键盘预期）
@@ -53,7 +49,6 @@ export function DiffModal({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose, present]);
 
-  const lines = useMemo(() => text.split("\n"), [text]);
   const stats = useMemo(() => diffStats(text), [text]);
 
   // 实时跟随由后端 watcher 推 diff-update 事件（App 统一监听）
@@ -82,7 +77,7 @@ export function DiffModal({
                     · {modelLabel}
                   </span>
                 )}
-                <span className="text-stone-300">改动</span>
+                <span className="text-stone-400">任务上下文</span>
               </span>
             )}
             {running && (
@@ -104,20 +99,8 @@ export function DiffModal({
             <IconClose size={15} />
           </button>
         </div>
-        <pre className="min-h-0 flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed">
-          {lines.map((line, i) => {
-            let cls = "text-stone-700";
-            if (line.startsWith("+") && !line.startsWith("+++")) cls = "bg-diff-added";
-            else if (line.startsWith("-") && !line.startsWith("---")) cls = "bg-diff-removed";
-            else if (line.startsWith("@@")) cls = "text-blue-600";
-            else if (line.startsWith("diff ") || line.startsWith("index ")) cls = "text-stone-400";
-            return (
-              <div key={i} className={`px-2 ${cls}`}>
-                {line || " "}
-              </div>
-            );
-          })}
-        </pre>
+        <p className="file-preview-notice">当前工作区相对 Git 基线的改动。运行器与模型为任务执行信息，逐行作者尚未确认。</p>
+        <FileLines text={text} diff label="工作区改动" />
       </MotionLayer>
     </MotionLayer>
   );

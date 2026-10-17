@@ -1,8 +1,10 @@
 import { memo, useState } from "react";
 import { Copy, Check, AlertCircle } from "lucide-react";
 import { AssistantText } from "./AssistantText";
+import { FilePathLink } from "../filePreview";
 import { Disclosure } from "./Disclosure";
 import { ToolIcon } from "./ToolIcon";
+import { HarnessIcon } from "./HarnessIcon";
 import {
   IconSparkle,
   IconTerminal,
@@ -37,7 +39,7 @@ export const EventLine = memo(function EventLine({
     case "assistant":
       return (
         <div className="assistant-entry">
-          {row.sourceHarness && <div className="message-source">{row.sourceHarness}</div>}
+          {row.sourceHarness && <div className="message-source"><HarnessIcon harness={row.sourceHarness} size={16} /><span>{row.sourceHarness === "deck" ? "AgentDeck" : row.sourceHarness === "opencode" ? "OpenCode" : row.sourceHarness === "zcode" ? "ZCode" : row.sourceHarness === "codex" ? "Codex" : row.sourceHarness}</span></div>}
           <div className="message-assistant">
           <AssistantText text={row.text} />
           <MessageActions text={row.text} />
@@ -162,7 +164,7 @@ function targetLabel(row: { target?: string }) {
   if (!row.target) return null;
   return (
     <span className="min-w-0 truncate font-mono text-[11px] text-stone-400" title={row.target}>
-      {row.target}
+      <FilePathLink path={row.target} />
     </span>
   );
 }

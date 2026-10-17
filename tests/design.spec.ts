@@ -25,6 +25,11 @@ test("reference-sized workspace keeps messages and composer on one content colum
   const content = (await page.locator(".log-content").boundingBox())!;
   expect(composer.width).toBe(736);
   expect(Math.abs(composer.x - content.x)).toBeLessThan(1);
+  await expect(page.locator(".thread-item.is-active")).toHaveCSS("background-color", "rgb(236, 236, 236)");
+  await expect(page.locator(".thread-item.is-active")).toHaveCSS("box-shadow", "none");
+  await expect(page.locator(".composer-card")).toHaveCSS("box-shadow", "none");
+  await expect(page.locator(".composer-card .composer-behavior")).toHaveCount(0);
+  await expect(page.locator(".workspace-header")).toHaveCSS("height", "54px");
   await expect(page.locator(".task-controls")).toBeHidden();
   await expect(page.getByRole("button", { name: "执行详情", exact: true })).toHaveAttribute("aria-expanded", "false");
   await page.getByRole("button", { name: "复制回复", exact: true }).click();
@@ -116,6 +121,10 @@ test("model editor stays usable on narrow screens without nested panels or clipp
     expect(rect.x).toBeGreaterThanOrEqual(0);
     expect(rect.x + rect.width).toBeLessThanOrEqual(360);
   }
+  // Form controls retain the shared rectangular shape; app tokens must not
+  // override Tailwind's radius scale and turn short inputs into pills.
+  await expect(page.getByRole("textbox", { name: "新模型名称", exact: true })).toHaveCSS("border-radius", "8px");
+  await expect(page.getByRole("button", { name: "添加", exact: true })).toHaveCSS("border-radius", "8px");
   await page.screenshot({ path: "test-results/codex-model-editor-mobile.png" });
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);

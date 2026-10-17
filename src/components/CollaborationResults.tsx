@@ -46,15 +46,16 @@ function headline(run: GraphRun, nodes: GraphRun["nodes"]) {
   // run.status 是 done 也可能有节点失败，绝不能因此谎报「都完成了」
   const failed = nodes.filter((node) => ["failed", "blocked", "interrupted", "needs_attention"].includes(node.status)).length;
   const writes = nodes.some((node) => !node.spec.read_only);
+  const artifacts = nodes.some((node) => node.spec.contract?.workspace === "artifacts");
   if (nodes.some((node) => node.spec.supervision)) {
     if (run.status === "running") return `并行指挥与协作 · ${finished}/${total} 条任务链已完成`;
-    if (run.status === "done") return `${total} 条任务链已完成${writes && !run.integrated ? " · 等待采纳改动" : ""}`;
+    if (run.status === "done") return `${total} 条任务链已完成${writes && !run.integrated && !artifacts ? " · 等待采纳改动" : ""}`;
     return `${finished}/${total} 条任务链已完成 · ${STATUS_LABEL[run.status] ?? run.status}`;
   }
   if (run.status === "running") {
     return failed
-      ? `正在并行工作 · ${finished}/${total} 已完成，${failed} 个出问题`
-      : `正在并行工作 · ${finished}/${total} 个模型已完成`;
+      ? `工作流进行中 · ${finished}/${total} 阶段完成，${failed} 个需要处理`
+      : `工作流进行中 · ${finished}/${total} 阶段完成`;
   }
   if (run.status === "done") {
     if (failed) return `${finished}/${total} 个模型完成了，${failed} 个没成`;
@@ -66,9 +67,10 @@ function headline(run: GraphRun, nodes: GraphRun["nodes"]) {
   return `${total} 个模型 · ${STATUS_LABEL[run.status] ?? run.status}`;
 }
 
-export default function CollaborationResults({ taskId, refreshKey = 0, onViewTask, onRuns }: {
+export default function CollaborationResults({ taskId, refreshKey = 0, onViewTask, onOpenFile, onRuns }: {
   taskId: string; refreshKey?: number; onViewTask?: (taskId: string) => void;
   onRuns?: (taskId: string, runs: GraphRun[]) => void;
+  onOpenFile?: (taskId: string, path: string) => void;
 }) {
   const [runs, setRuns] = useState<GraphRun[]>([]);
   const [busy, setBusy] = useState(false);
@@ -120,6 +122,7 @@ export default function CollaborationResults({ taskId, refreshKey = 0, onViewTas
     {runs.map((run) => {
       const nodes = nodesOf(run);
       const writes = nodes.some((node) => !node.spec.read_only);
+      const artifacts = nodes.some((node) => node.spec.contract?.workspace === "artifacts");
       return <div className="graph-run" key={run.id}>
         {error && <div className="context-error" role="alert">{error}</div>}
         <div className="graph-run-heading">
@@ -127,7 +130,7 @@ export default function CollaborationResults({ taskId, refreshKey = 0, onViewTas
           <span title={run.base_commit}>{headline(run, nodes)}</span>
           {run.status === "running" && <button className="icon-button" title="停止这次协作" aria-label="停止任务图" disabled={busy}
             onClick={() => void action(async () => { await cancelGraphRun(run.id); await reload(); })}><Square size={14} /></button>}
-          {run.status === "done" && !run.integrated && writes && <button className="context-command" disabled={busy}
+          {run.status === "done" && !run.integrated && writes && !artifacts && <button className="context-command" disabled={busy}
             onClick={() => {
               if (!window.confirm("把各模型的改动合并到当前项目目录？请先确认源目录没有未提交的改动。")) return;
               void action(async () => { await integrateGraphRun(run.id, true); await reload(); });
@@ -154,7 +157,8 @@ export default function CollaborationResults({ taskId, refreshKey = 0, onViewTas
             }}>
               <summary>
                 <span className="node-task">{taskLine(node.spec.prompt)}</span>
-                <span className="node-source">{node.spec.harness}</span>
+                 <span className="node-source">{node.spec.harness}{activeExecution(node)?.model
+                   ? ` · ${activeExecution(node)?.model?.split("/").pop()}` : ""}</span>
                 <span className="node-status">{STATUS_LABEL[node.status] ?? node.status}</span>
               </summary>
               <div className="node-detail">
@@ -164,10 +168,14 @@ export default function CollaborationResults({ taskId, refreshKey = 0, onViewTas
                     onClick={() => void action(async () => { await cancelGraphNode(run.id, node.spec.id); await reload(); })}>
                     <Square size={12} />停止此任务链
                   </button>}
-                {node.spec.supervision && <div className="node-stage-history">
+                 {!!node.history?.length && <div className="node-stage-history">
                   {(node.history ?? []).map((stage) => <details key={stage.task_id}>
                     <summary>{stage.harness} · {phaseLabels[stage.phase] ?? stage.phase} · 第 {stage.round} 轮</summary>
                     <pre>{stage.report}</pre>
+                     <div className="execution-current">
+                       <span>绑定模型：{stage.evidence?.execution?.resolved.model || "运行器默认"}</span>
+                       <span>运行器报告：{stage.evidence?.observed_model || "未报告实际模型"}</span>
+                     </div>
                     {onViewTask && <button className="context-command" onClick={() => onViewTask(stage.task_id)}>查看阶段记录</button>}
                   </details>)}
                   {node.task_id && onViewTask && <button className="context-command" onClick={() => onViewTask(node.task_id!)}>查看当前阶段</button>}
@@ -180,12 +188,21 @@ export default function CollaborationResults({ taskId, refreshKey = 0, onViewTas
                 {node.task_id && <div className="execution-current">
                   <span title={activeExecution(node)?.model ?? ""}>{activeExecution(node)?.model || "默认模型"}</span>
                   <span>{effortLabel(activeExecution(node)?.effort || "默认")}</span>
+                   <span>运行器报告：{node.evidence?.observed_model || "未报告实际模型"}</span>
                 </div>}
+                <div className="context-actions">
+                 {node.task_id && onViewTask && <button className="context-command"
+                   onClick={() => onViewTask(node.task_id!)}>查看执行记录</button>}
+                 {node.task_id && node.spec.contract?.outputs.map((path) =>
+                   <button key={path} className="context-command" disabled={node.status !== "done" || run.status === "discarded"}
+                     onClick={() => onOpenFile?.(node.task_id!, path)}>打开成果 · {path}</button>)}
+                </div>
                 {node.error && <div className="context-error">{node.error}</div>}
                 {node.report
                   ? <pre>{node.report}</pre>
                   : <div className="node-empty">{node.status === "pending" ? "还没有开始" : "没有文本产出"}</div>}
-                {node.patch_hash && <div className="node-artifact" title={node.patch_hash}>改动记录 {node.patch_hash.slice(0, 12)}</div>}
+                 {node.patch_hash && <div className="node-artifact" title={node.patch_hash}>
+                   {artifacts ? "成果版本" : "改动记录"} {node.patch_hash.slice(0, 12)}</div>}
               </div>
             </details>
           </li>)}
