@@ -72,7 +72,7 @@ test("streaming snapshots update one message, failed partial replies retain both
   await expect(page.locator(".message-assistant")).toHaveText("部分回复");
   await expect(page.getByRole("alert")).toContainText("测试令牌已过期");
   await expect(page.getByRole("button", { name: "检查模型配置", exact: true })).toBeVisible();
-  await expect(page.getByText("运行失败", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-status")).toHaveAttribute("data-phase", "failed");
   await page.screenshot({ path: "test-results/runtime-failure-desktop.png" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "收起侧栏", exact: true }).click();
@@ -234,8 +234,9 @@ test("an agent-proposed collaboration plan starts the shared graph run only afte
   const input = page.getByRole("textbox", { name: "消息", exact: true });
   await input.fill("协作结束后再检查结果");
   await input.press("Enter");
-  await expect(input).toHaveValue("协作结束后再检查结果");
-  await expect(page.getByRole("button", { name: "等待协作结束", exact: true })).toBeDisabled();
+  await expect(input).toHaveValue("");
+  await expect(page.getByText("协作结束后再检查结果", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeEnabled();
 });
 
 test("cancelling an agent-proposed plan releases the agent without starting a run", async ({ page }) => {

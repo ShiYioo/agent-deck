@@ -8,6 +8,7 @@ export type TaskUpdate = {
   status?: LiveTask["status"];
   exitCode?: number | null;
   todos?: LiveTask["todos"];
+  queuePaused?: boolean;
 };
 
 /** History and IPC overlap while a running task is restored. Keep each event once. */
@@ -51,10 +52,14 @@ export function applyTaskUpdates(task: LiveTask, updates: TaskUpdate[]): LiveTas
       const streaming = event.type === "assistant_message" || event.type === "thinking";
       const index = streaming && event.streamId
         ? events.findIndex(({ event: previous }) =>
-            previous.type === event.type && previous.streaming && previous.streamId === event.streamId
+            previous.type === event.type && previous.streamId === event.streamId
             && previous.sourceTaskId === event.sourceTaskId)
         : -1;
-      if (index >= 0) events[index] = { ...item, key: events[index].key };
+      if (index >= 0) {
+        const previous = events[index].event;
+        if ("streaming" in previous && previous.streaming === false && "streaming" in event && event.streaming === true) continue;
+        events[index] = { ...item, key: events[index].key };
+      }
       else events.push(item);
       if (event.type === "session_id") next.sessionId = event.id;
       // 上下文压缩提示：状态行携带 compacting 标志
@@ -64,6 +69,7 @@ export function applyTaskUpdates(task: LiveTask, updates: TaskUpdate[]): LiveTas
     if (update.status !== undefined) next.status = update.status;
     if (update.exitCode !== undefined) next.exitCode = update.exitCode;
     if (update.todos !== undefined) next.todos = update.todos;
+    if (update.queuePaused !== undefined) next.queuePaused = update.queuePaused;
   }
   return next;
 }

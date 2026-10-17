@@ -62,6 +62,7 @@ test("pending node overrides keep a conflicted draft and fit a narrow viewport",
   await choose(page, "task-1 模型", "gpt-test");
   await choose(page, "task-1 思考强度", "低");
   await page.getByRole("button", { name: "启动并行协作", exact: true }).click();
+  await page.getByRole("button", { name: "关闭任务详情", exact: true }).click();
   await page.locator(".graph-node-result").first().locator("summary").click();
   const override = page.locator(".graph-node-result").first();
   await expect(override.getByRole("button", { name: "task-1 模型", exact: true })).toBeEnabled();

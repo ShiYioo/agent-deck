@@ -271,7 +271,8 @@ export async function mockDesktop(page: Page, failSend = true) {
         }
         if (cmd === "inspect_conversation_recovery") {
           const blocked = !!w.__testRecoveryBlocked;
-          return { safe: !blocked, active_processes: blocked ? ["zcode"] : [], workspace_changed: false,
+          const legacy = !!w.__testRecoveryLegacy;
+          return { safe: !blocked && !legacy, can_confirm: !blocked, active_processes: blocked ? ["zcode"] : [], workspace_changed: false,
             workspace_path: projects[0].dir, summary: blocked ? "仍有受管执行进程运行：zcode" : "已确认旧执行进程结束，工作区没有未提交改动" };
         }
         if (cmd === "search_conversation_context") {

@@ -25,10 +25,14 @@ tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-t
 axum = "0.8"
 uuid = { version = "1", features = ["v4"] }
 which = "7"
+sysinfo = "0.33"
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.dev]
 incremental = true

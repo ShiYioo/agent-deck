@@ -13,6 +13,7 @@ import { HarnessIcon } from "./HarnessIcon";
 import { Dropdown } from "./Dropdown";
 import { ExecutionPicker } from "./ExecutionPicker";
 import { MODE_CATALOG } from "../sessions";
+import { DraftStore } from "../sessionPersistence";
 
 /** Shared composer; draft state survives chat switches and failed dispatches. */
 export const Composer = memo(function Composer({
@@ -91,7 +92,7 @@ export const Composer = memo(function Composer({
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const drafts = useRef(new Map<string, string>());
+  const drafts = useRef(new DraftStore());
   // ↑↓ 历史召回（ZCode app-input-history 同款）：首次 ↑ 快照当前草稿（含附件），
   // ↓ 回到尽头完整还原；手动输入随时退出历史态。
   const [pasteError, setPasteError] = useState(false);
@@ -338,7 +339,7 @@ export const Composer = memo(function Composer({
   };
 
   const send = async () => {
-    if (!text.trim() || sending || blockedReason || (switching && !answering)) return;
+    if (!text.trim() || sending) return;
     const key = draftKey;
     const submitted = text;
     setSending(true);
@@ -357,11 +358,11 @@ export const Composer = memo(function Composer({
   const routedHarness = /^@(deck|zcode|codex|opencode)(?::[^\s]+)?(?:\s|$)/i.exec(text)?.[1].toLowerCase() ?? harness;
   const switching = !!running && routedHarness !== (activeHarness ?? harness);
   const answering = responseMode === "answer";
-  const sendLabel = blockedReason ? "等待协作结束" : answering ? "发送回答" : switching ? "等待当前任务结束后接力" : running ? "加入队列" : "发送";
-  const sendHint = blockedReason ?? (answering ? "这条消息会直接回答当前问题" :
+  const sendLabel = answering ? "发送回答" : switching ? "排队接力" : running || blockedReason ? "加入队列" : "发送";
+  const sendHint = answering ? "这条消息会直接回答当前问题" : blockedReason ?? (
     responseMode === "form" ? "请在问题卡中作答；补充消息会排队" :
     responseMode === "approval" ? "请先处理上方请求；补充消息会排队" :
-    switching ? `当前由 ${activeHarness} 执行，结束或停止后可交给 ${routedHarness}` :
+    switching ? `当前由 ${activeHarness} 执行，这条要求将在结束后交给 ${routedHarness}` :
     running ? "补充消息会排队，本轮结束后继续" :
     `发送给 ${routedHarness} · Enter 发送，Shift + Enter 换行`);
 
@@ -751,14 +752,17 @@ export const Composer = memo(function Composer({
           </span>
         )}
 
+        {running && <button type="button" className="stop-button" onClick={onStop} title="停止当前执行" aria-label="停止">
+          <Square size={15} />
+        </button>}
         <button
-           onClick={() => running && !text.trim() ? onStop() : void send()}
-            disabled={sending || !!blockedReason || (!!text.trim() && switching && !answering) || (!running && !text.trim())}
+           onClick={() => void send()}
+            disabled={sending || !text.trim()}
            className="send-button"
-            title={running && !text.trim() ? "停止" : sendLabel}
-            aria-label={running && !text.trim() ? "停止" : sendLabel}
+            title={sendLabel}
+            aria-label={sendLabel}
          >
-            {running && !text.trim() ? <Square size={12} fill="currentColor" /> : <ArrowUp size={17} />}
+             <ArrowUp size={17} />
         </button>
       </div>
       <div className="composer-behavior" aria-live="polite">

@@ -20,16 +20,14 @@ test("shared state saves a version and preserves edits after a concurrent update
   await expect(page.getByRole("textbox", { name: "共享目标", exact: true })).toHaveValue("新的本地目标");
 });
 
-test("interrupted recovery requires explicit confirmation and removes the block", async ({ page }) => {
+test("verified interrupted recovery clears automatically with details closed", async ({ page }) => {
   await mockDesktop(page, false);
   await page.addInitScript(() => {
     (window as unknown as Record<string, unknown>).__testRecoveryTasks = ["a"];
   });
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
-  await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await expect(page.getByRole("button", { name: "确认恢复", exact: true })).toHaveCount(0, { timeout: 30_000 });
-  expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).__testRecoveryConfirmed))
+  await expect.poll(() => page.evaluate(() => (window as unknown as Record<string, unknown>).__testRecoveryConfirmed))
     .toEqual({ taskId: "a", confirmed: true });
 });
 
@@ -43,8 +41,11 @@ test("recovery conflicts stay visible without blocking task details", async ({ p
   await page.goto("/");
   await page.getByRole("button", { name: "调整工作台布局", exact: true }).click();
   await page.getByRole("button", { name: "执行详情", exact: true }).click();
-  await expect(page.locator(".context-recovery-status")).toContainText("自动恢复已暂停");
-  await expect(page.getByRole("button", { name: "确认恢复", exact: true })).toBeDisabled();
+  await expect(page.locator(".context-recovery-status")).toContainText("仍有受管执行进程运行");
+  await expect(page.getByRole("button", { name: "确认恢复", exact: true })).toHaveCount(0);
+  await page.evaluate(() => { (window as unknown as Record<string, unknown>).__testRecoveryBlocked = false; });
+  await expect.poll(() => page.evaluate(() => (window as unknown as Record<string, unknown>).__testRecoveryConfirmed),
+    { timeout: 10_000 }).toEqual({ taskId: "a", confirmed: true });
   await expect(page.locator(".workspace-title")).toHaveText("调整工作台布局");
 });
 
@@ -131,8 +132,9 @@ test("guided cooperation carries current restrictions and bounds phase duration"
   await input.fill("阶段之间尝试发送");
   await input.press("Enter");
   await expect(page.locator(".conversation-status")).toContainText("协作进行中");
-  await expect(page.getByRole("button", { name: "等待协作结束", exact: true })).toBeDisabled();
-  await expect(input).toHaveValue("阶段之间尝试发送");
+  await expect(input).toHaveValue("");
+  await expect(page.getByText("阶段之间尝试发送", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "停止协作", exact: true }).click();
   await expect(page.getByRole("button", { name: "停止协作", exact: true })).toHaveCount(0);
 });

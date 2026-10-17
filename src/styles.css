@@ -52,6 +52,9 @@
    ============================================================ */
 
 :root {
+  --ui-body: 14px;
+  --ui-caption: 12px;
+  --ui-meta: 11px;
   /* Neutral surfaces */
   --bg: #ffffff;
   --bg-subtle: #fafafa;
@@ -801,4 +804,39 @@ button:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px soli
   .status-queue { display: none; }
   .composer-behavior { padding-left: 12px; padding-right: 12px; font-size: 10px; }
   .new-chat-description { font-size: 13px; }
+}
+
+/* Stable reading surface and an independently scrolling inspector. */
+.task-view { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
+.task-view > .conversation-status { grid-column: 1 / -1; grid-row: 1; }
+.task-view > .conversation-prompts { grid-column: 1; grid-row: 2; min-width: 0; max-height: 38vh; overflow-y: auto; }
+.task-view > .conversation-timeline { grid-column: 1; grid-row: 3; min-height: 0; min-width: 0; }
+.task-view > .task-controls { grid-column: 2; grid-row: 2 / 4; width: clamp(310px, 32vw, 420px); min-width: 0; max-height: none; padding: 0 16px 16px; background: var(--bg-subtle); border-left: 1px solid var(--border); border-bottom: 0; overflow: auto; overscroll-behavior: contain; }
+.task-controls [hidden] { display: none; }
+.inspector-heading { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; min-height: 44px; background: var(--bg-subtle); font-size: var(--ui-body); }
+.inspector-tabs { display: flex; gap: 4px; padding: 4px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.inspector-tabs button { flex: 1; padding: 6px; border-radius: 6px; white-space: nowrap; font-size: var(--ui-caption); color: var(--text-2); }
+.inspector-tabs button[aria-pressed="true"] { color: var(--text-1); background: var(--surface); box-shadow: 0 0 0 1px var(--border); }
+.inspector-empty { font-size: var(--ui-caption); color: var(--text-2); line-height: 1.7; padding: 12px 0; }
+.inspector-node { padding: 12px 0; font-size: var(--ui-caption); }
+.inspector-node h3 { font-size: var(--ui-body); font-weight: 500; }
+.inspector-node pre { margin-top: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.inspector-node p { color: var(--text-2); margin: 6px 0; }
+.task-controls .task-metadata { flex-wrap: wrap; }
+.task-controls .task-metadata > .truncate { flex-basis: 70%; }
+.context-recovery-status { display: grid; gap: 6px; width: 100%; line-height: 1.7; overflow-wrap: anywhere; }
+.context-recovery-status strong { font-weight: 500; }
+.context-recovery-status small { color: var(--text-3); }
+.recovery-summary { display: flex; align-items: center; gap: 12px; padding: 10px 20px; font-size: var(--ui-caption); color: var(--text-2); background: var(--bg-subtle); }
+.recovery-summary > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.recovery-summary > button { flex-shrink: 0; }
+.timeline-inspect-actions { display: flex; flex-wrap: wrap; gap: 12px; font-size: var(--ui-caption); color: var(--text-2); }
+.timeline-inspect-actions:empty { display: none; }
+.timeline-inspect-actions > button { padding: 8px 0; text-decoration: underline; text-underline-offset: 3px; }
+.stop-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border-strong); color: var(--text-1); background: var(--surface); margin-left: auto; }
+.stop-button:hover { background: var(--bg-subtle); }
+.stop-button + .send-button { margin-left: 0; }
+.composer-dock > .action-error { white-space: pre-wrap; max-height: 100px; overflow: auto; }
+@media (max-width: 1100px) {
+  .task-view > .task-controls { grid-area: auto; position: absolute; top: 40px; right: 0; bottom: 0; z-index: 15; width: min(420px, calc(100% - 12px)); box-shadow: -8px 0 24px rgba(0,0,0,.08); }
 }

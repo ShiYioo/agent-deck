@@ -11,7 +11,7 @@ const PAGE_SIZE = 500;
 
 /** One scroll surface for conversation, collaboration results and changed files. */
 export const ConversationTimeline = memo(function ConversationTimeline({
-  events, running, blocked, loading, activity, footer,
+  events, running, blocked, loading, activity, footer, positionKey,
 }: {
   events: { event: AgentEvent; key: number }[];
   running: boolean;
@@ -19,9 +19,10 @@ export const ConversationTimeline = memo(function ConversationTimeline({
   loading: boolean;
   activity: string;
   footer?: ReactNode;
+  positionKey?: string;
 }) {
   const [limit, setLimit] = useState(PAGE_SIZE);
-  const { viewportRef, contentRef, follow, hasOverflow, onScroll, scrollToBottom } = useAutoScroll(events.length);
+  const { viewportRef, contentRef, follow, hasOverflow, onScroll, scrollToBottom } = useAutoScroll(events.length, positionKey);
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const detachedAt = useRef<number | null>(null);
   if (follow) detachedAt.current = null;
@@ -30,8 +31,9 @@ export const ConversationTimeline = memo(function ConversationTimeline({
   const hidden = Math.max(0, events.length - limit);
   // Reduce before slicing so tool pairs and turn boundaries survive paging.
   const rows = useMemo(() => buildConversation(events), [events]);
+  const activeFromKey = running ? [...rows].reverse().find((row) => row.kind === "user")?.key ?? rows[0]?.key : undefined;
   const display = useMemo(() => foldToolRows(rows.filter((row) =>
-    !hidden || row.key >= events[hidden].key)), [rows, hidden, events]);
+    !hidden || row.key >= events[hidden].key), activeFromKey), [rows, hidden, events, activeFromKey]);
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !anchor.current) return;
@@ -71,8 +73,8 @@ export const ConversationTimeline = memo(function ConversationTimeline({
                 title={<><ToolIcon tool="tool" /><span>工具操作 ×{group.rows.length}：{summary}</span>
                   {group.deletes > 0 && <span className="text-red-600">删除 {group.deletes}</span>}
                   {group.failed && <span className="text-red-600">含失败</span>}</>}>
-                {group.thoughts.map((row) => <EventLine key={row.key} row={row} />)}
-                {group.rows.map((row) => <EventLine key={row.key} row={row} />)}
+                {[...group.thoughts, ...group.rows].sort((a, b) => a.key - b.key)
+                  .map((row) => <EventLine key={row.key} row={row} />)}
               </Disclosure>;
             })}
           </Suspense>

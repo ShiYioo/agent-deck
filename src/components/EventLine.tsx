@@ -103,12 +103,13 @@ export const EventLine = memo(function EventLine({
         </div>
       );
     case "complete": {
+      if (!row.durationMs && !row.tokens && row.ok) return null;
       const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
       return (
         <div className="activity-event flex items-center gap-1.5">
            {row.ok ? <IconCheckCircle size={14} className="shrink-0" /> : <IconXCircle size={14} className="shrink-0" />}
-          任务{row.ok ? "完成" : "结束"}
-          {row.durationMs ? ` · 工作 ${Math.round(row.durationMs / 1000)} 秒` : ""}
+           {row.ok ? "本轮统计" : "本轮结束"}
+           {row.durationMs ? ` · 用时 ${Math.round(row.durationMs / 1000)} 秒` : ""}
           {row.tokens && (
             <span className="text-stone-400" title={`输入 ${row.tokens.input} · 输出 ${row.tokens.output}${row.tokens.reasoning ? ` · 推理 ${row.tokens.reasoning}` : ""}${row.tokens.cached ? ` · 缓存命中 ${row.tokens.cached}` : ""} tokens`}>
               · tokens ↑{fmtK(row.tokens.input)} ↓{fmtK(row.tokens.output)}

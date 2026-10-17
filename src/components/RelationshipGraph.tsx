@@ -19,7 +19,7 @@ export function RelationshipGraph({ nodes, onSelect }: {
   return <div className="relationship-graph" role="group" aria-label="指挥与协作关系图">
     {nodes.map((node) => {
       const supervision = node.spec.supervision;
-      const commanderActive = node.status === "running" && node.phase !== "executing";
+      const commanderActive = !!supervision && node.status === "running" && ["planning", "reviewing"].includes(node.phase ?? "");
       return <div className="relationship-lane" key={node.spec.id} data-status={node.status}>
         <div className="relationship-caption">
           <button type="button" disabled={!onSelect} onClick={() => onSelect?.(node.spec.id)}

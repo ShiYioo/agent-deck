@@ -27,6 +27,8 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), String> {
              goal TEXT NOT NULL, notes TEXT NOT NULL, updated_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS recovery_blocks (
               task_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, created_at INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS task_processes (
+               task_id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS context_policies (
               conversation_id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS graph_runs (
@@ -113,6 +115,7 @@ pub(crate) fn remove_task_metadata(conn: &Connection, task_id: &str) -> Result<(
     for sql in [
         "DELETE FROM context_deliveries WHERE task_id = ?1",
         "DELETE FROM recovery_blocks WHERE task_id = ?1",
+        "DELETE FROM task_processes WHERE task_id = ?1",
         "DELETE FROM graph_runs WHERE json_extract(data,'$.source_task_id')=?1 OR EXISTS
              (SELECT 1 FROM json_each(data,'$.nodes') AS node WHERE json_extract(node.value,'$.task_id')=?1
               OR EXISTS (SELECT 1 FROM json_each(node.value,'$.history') AS stage

@@ -98,7 +98,10 @@ test("折叠后的工具摘要也点名文件、并标出删除", async ({ page 
   );
   await emitTool(page, "delete_file", { path: "src/legacy.ts" }, { content: [{ text: "已删除" }] });
 
-  // 两行以上会折叠成「工具操作 ×N」——摘要必须点名文件，删除必须显式标出
+  // 活跃轮保持工具行稳定，完成后才折叠为历史摘要。
+  await expect(page.locator(".activity-event").filter({ hasText: "工具操作 ×2" })).toHaveCount(0);
+  await page.evaluate(() => (window as unknown as { __emit: (event: string, payload: unknown) => void })
+    .__emit("task-exit", { taskId: "new-task", code: 0 }));
   const segment = page.locator(".activity-event").filter({ hasText: "工具操作 ×2" });
   await expect(segment).toHaveCount(1);
   await expect(segment).toContainText("src/foo.ts");

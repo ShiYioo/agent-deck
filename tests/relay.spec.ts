@@ -84,14 +84,14 @@ test("read-only mode survives both harness selection and mention routing", async
   await expect(page.getByRole("button", { name: "权限模式", exact: true })).toContainText("只读规划");
 });
 
-test("a running conversation refuses another harness and preserves its unsent request", async ({ page }) => {
+test("a running conversation queues another harness without launching it early", async ({ page }) => {
   await openConversation(page);
   await send(page, "开始实施");
   await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
   await send(page, "@codex 接手实施");
-  await expect(page.getByRole("button", { name: "等待当前任务结束后接力", exact: true })).toBeDisabled();
+  await expect(page.getByText("接手实施", { exact: true })).toBeVisible();
   expect((await requests(page)).length).toBe(1);
-  await expect(page.getByRole("textbox", { name: "消息", exact: true })).toHaveValue("@codex 接手实施");
+  await expect(page.getByRole("textbox", { name: "消息", exact: true })).toHaveValue("");
 });
 
 test("deleting a shared conversation removes all harness turns but leaves other conversations", async ({ page }) => {

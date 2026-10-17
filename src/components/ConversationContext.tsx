@@ -7,8 +7,9 @@ import {
 import { Disclosure } from "./Disclosure";
 import CollaborationBoard from "./CollaborationBoard";
 
-export default function ConversationContext({ taskId, onRecovered }: {
+export default function ConversationContext({ taskId, onRecovered, onRecoveryChange }: {
   taskId: string; onRecovered: () => void;
+  onRecoveryChange?: (taskId: string, blocked: boolean, summary: string) => void;
 }) {
   const [info, setInfo] = useState<ConversationInfo | null>(null);
   const [goal, setGoal] = useState("");
@@ -19,7 +20,10 @@ export default function ConversationContext({ taskId, onRecovered }: {
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [recoveryCheck, setRecoveryCheck] = useState<RecoveryCheck | null>(null);
-  const autoRecovery = useRef<string | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [recoveryTick, setRecoveryTick] = useState(0);
+  const recoveredCallback = useRef(onRecovered);
+  recoveredCallback.current = onRecovered;
   const epoch = useRef(0);
   const queryEpoch = useRef(0);
   const dirty = !!info && (goal !== info.state.goal || notes !== info.state.notes);
@@ -31,45 +35,60 @@ export default function ConversationContext({ taskId, onRecovered }: {
     setQuery("");
     ++queryEpoch.current;
     setConfirmed(false);
+    setRecoveryCheck(null);
     setBusy("load");
     setError(null);
     getConversationInfo(taskId).then((value) => {
       if (current !== epoch.current) return;
       setInfo(value);
-       setRecoveryCheck(null);
       setGoal(value.state.goal);
       setNotes(value.state.notes);
-      // 应用重启后旧执行者已不在当前进程中：先自动核对并释放恢复锁。
-      // 只有后端仍拒绝时才保留手动确认入口，避免用户每次都被复选框拦住。
-      if (value.recovery_task_ids.length && autoRecovery.current !== taskId) {
-        autoRecovery.current = taskId;
-        return Promise.all(value.recovery_task_ids.map((id) => inspectConversationRecovery(id)))
-          .then((checks) => {
-            const blocked = checks.find((check) => !check.safe);
-            if (blocked) {
-              setRecoveryCheck(blocked);
-              throw new Error(blocked.summary);
-            }
-            return Promise.all(value.recovery_task_ids.map((id) => confirmConversationRecovery(id, true)));
-          })
-          .then(() => getConversationInfo(taskId))
-          .then((next) => {
-            if (current !== epoch.current) return;
-            setInfo(next);
-            setConfirmed(false);
-            onRecovered();
-          })
-          .catch((reason) => {
-            autoRecovery.current = null;
-            if (current === epoch.current && reason instanceof Error && reason.message) setError(reason.message);
-          });
-      }
-      return undefined;
     }).catch((reason) => {
       if (current === epoch.current) setError(String(reason));
     }).finally(() => { if (current === epoch.current) setBusy(null); });
     return () => { ++epoch.current; };
   }, [taskId]);
+
+  const recoveryIds = info?.recovery_task_ids.join("\n") ?? "";
+  useEffect(() => {
+    if (info) onRecoveryChange?.(taskId, !!recoveryIds, recoveryCheck?.summary ?? "正在核对旧执行者和工作区，已有成果会保留");
+  }, [taskId, !!info, recoveryIds, recoveryCheck, onRecoveryChange]);
+  useEffect(() => {
+    if (!recoveryIds) { setInspecting(false); return; }
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setInspecting(true);
+    const inspect = async () => {
+      try {
+        const ids = recoveryIds.split("\n");
+        const checks = await Promise.all(ids.map(inspectConversationRecovery));
+        if (disposed) return;
+        const blocked = checks.find((check) => !check.safe);
+        setRecoveryCheck(blocked ?? checks[0]);
+        setError(null);
+        if (!blocked) {
+          // Backend rechecks ownership before releasing the lock; never replay the interrupted task.
+          for (const id of ids) {
+            if (disposed) return;
+            await confirmConversationRecovery(id, true);
+          }
+          const next = await getConversationInfo(taskId);
+          if (disposed) return;
+          setInfo(next);
+          recoveredCallback.current();
+          return;
+        }
+      } catch (reason) {
+        if (disposed) return;
+        setError(String(reason));
+      } finally {
+        if (!disposed) setInspecting(false);
+      }
+      if (!disposed) timer = setTimeout(() => setRecoveryTick((tick) => tick + 1), 5000);
+    };
+    void inspect();
+    return () => { disposed = true; if (timer) clearTimeout(timer); };
+  }, [taskId, recoveryIds, recoveryTick]);
 
   const run = async (name: string, action: (current: number) => Promise<void>) => {
     if (busy) return;
@@ -104,20 +123,24 @@ export default function ConversationContext({ taskId, onRecovered }: {
       {/* 自动核对失败时才显示手动确认，避免异常中断后永久卡死输入区。 */}
       {!!info.recovery_task_ids.length && <div className="context-recovery">
         {recoveryCheck && <div className="context-recovery-status" role="status">
-          <strong>自动恢复已暂停</strong><span>{recoveryCheck.summary}</span>
+          <strong>{recoveryCheck.safe ? "恢复检查通过" : "正在保护上次的任务成果"}</strong><span>{recoveryCheck.summary}</span>
           <small>工作区：{recoveryCheck.workspace_path}</small>
         </div>}
-        {!recoveryCheck && busy === "load" && <div className="context-recovery-status" role="status">正在核对遗留进程和工作区…</div>}
+        {!recoveryCheck && <div className="context-recovery-status" role="status">正在核对遗留进程和工作区…</div>}
+        <button className="context-command" disabled={inspecting || !!busy} onClick={() => setRecoveryTick((tick) => tick + 1)}>
+          <RefreshCw size={14} />{inspecting ? "核对中" : "重新检查"}
+        </button>
+        {recoveryCheck?.can_confirm && !recoveryCheck.safe && <>
         <label><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-          已确认旧执行者结束，并核对工作区改动</label>
-        <button className="context-command" disabled={!confirmed || !!busy} onClick={() => void run("recovery", async (current) => {
+          已确认旧执行者结束，保留现有改动继续</label>
+        <button className="context-command" disabled={!confirmed || !!busy || inspecting} onClick={() => void run("recovery", async (current) => {
           for (const id of info.recovery_task_ids) await confirmConversationRecovery(id, confirmed);
           const value = await getConversationInfo(taskId);
           if (current !== epoch.current) return;
           setInfo(value);
           setConfirmed(false);
           onRecovered();
-        })}><Check size={14} />确认恢复</button>
+        })}><Check size={14} />确认恢复</button></>}
       </div>}
       {/* 配置类信息统一收进一个默认收起的折叠项；动作类（上面的恢复确认）不进来 */}
       <Disclosure title="上下文与协作设置" className="context-disclosure">

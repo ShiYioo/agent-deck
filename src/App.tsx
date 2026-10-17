@@ -10,6 +10,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import {
   cancelCollaboration,
+  cancelGraphRun,
   cancelTask,
   deleteSession,
   discardTaskWorktree,
@@ -43,6 +44,8 @@ import {
 import type { Collaboration, ExecutionConfig, PhaseExecution, GraphRun } from "./api";
 import { ConversationTimeline } from "./components/ConversationTimeline";
 import { ConversationStatus, type ConversationPhase } from "./components/ConversationStatus";
+import { conversationState } from "./conversationState";
+import { CollaborationInspector } from "./components/CollaborationInspector";
 import { ContextUsageBadge } from "./components/ContextUsageBadge";
 import { detectExecutorMention } from "./executorMention";
 import { ExecutionPicker, effortLabel, readableModel } from "./components/ExecutionPicker";
@@ -54,6 +57,7 @@ import { RelationshipGraph } from "./components/RelationshipGraph";
 import type { AgentEvent, ApprovalRequest, LiveTask, ProjectRow, TaskRow } from "./types";
 import { normalizeAgentEvents } from "./types";
 import { applyTaskUpdates, restoreTask, type LogItem, type TaskUpdate } from "./taskState";
+import { forgetSession, loadQueue, saveQueue } from "./sessionPersistence";
 import { groupSessions, normalizeMode, sessionKey, transferMode } from "./sessions";
 import { Sidebar, projectName, directoryKey } from "./components/Sidebar";
 import { HarnessIcon } from "./components/HarnessIcon";
@@ -105,6 +109,8 @@ export default function App() {
   const deletedTasks = useRef(new Set<string>());
   const deletingTasks = useRef(new Set<string>());
   const reconfiguringTasks = useRef(new Set<string>());
+  const drainingQueues = useRef(new Set<string>());
+  const cooperationBusy = useRef(false);
   const listenersReady = useRef<Promise<unknown>>(Promise.resolve());
   const setLive = useCallback((update: (prev: Record<string, LiveTask>) => Record<string, LiveTask>) => {
     const next = update(liveRef.current);
@@ -114,6 +120,10 @@ export default function App() {
         next[id] = applyTaskUpdates(next[id], pending);
         pendingUpdates.current.delete(id);
       }
+    }
+    for (const [id, task] of Object.entries(next)) {
+      const previous = liveRef.current[id];
+      if (task.queued !== previous?.queued || task.queuedConfigs !== previous?.queuedConfigs) saveQueue(id, task);
     }
     liveRef.current = next;
     setLiveState(next);
@@ -200,6 +210,12 @@ export default function App() {
   // 让协作成果卡立刻取到新数据（同 RuntimeStatus 的 refreshKey 约定）。
   const [graphRefresh, setGraphRefresh] = useState(0);
   const [graphActivity, setGraphActivity] = useState<{ taskId: string; runs: GraphRun[] } | null>(null);
+  const [detailsTab, setDetailsTab] = useState<"settings" | "files" | "collaboration">("settings");
+  const [recoveryStatus, setRecoveryStatus] = useState<{ taskId: string; blocked: boolean; summary: string } | null>(null);
+  const updateRecoveryStatus = useCallback((taskId: string, blocked: boolean, summary: string) => {
+    setRecoveryStatus((previous) => previous?.taskId === taskId && previous.blocked === blocked && previous.summary === summary
+      ? previous : { taskId, blocked, summary });
+  }, []);
   const updateGraphActivity = useCallback((taskId: string, runs: GraphRun[]) => setGraphActivity({ taskId, runs }), []);
   // 队列「编辑」：撤回完整输入意图到 composer（带版本号驱动注入）
   const [queuedWithdraw, setQueuedWithdraw] = useState<{ text: string; version: number } | null>(null);
@@ -233,6 +249,17 @@ export default function App() {
   const [sidebarView, setSidebarView] = useState<"projects" | "recent">("projects");
   const [searchRequest, setSearchRequest] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  useEffect(() => {
+    if (!detailsOpen) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        setDetailsOpen(false);
+        document.querySelector<HTMLButtonElement>('[aria-label="执行详情"]')?.focus();
+      }
+    };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [detailsOpen]);
   const settingsLauncher = useRef<HTMLElement | null>(null);
   const projectLauncher = useRef<HTMLElement | null>(null);
   const openSettings = useCallback(() => {
@@ -288,8 +315,11 @@ export default function App() {
     void setSetting("composer_mode", mapped).catch(() => {});
   }, [harness, mode, permission, executionScope]);
   const stopSelected = useCallback(() => {
-    if (selected) cancelTask(selected).catch((e) => setActionError(String(e)));
-  }, [selected]);
+    if (selected) {
+      setLive((prev) => prev[selected] ? { ...prev, [selected]: { ...prev[selected], queuePaused: true } } : prev);
+      cancelTask(selected).catch((e) => setActionError(String(e)));
+    }
+  }, [selected, setLive]);
 
   const newChat = useCallback((project?: ProjectRow) => {
     setSelected(null);
@@ -366,8 +396,9 @@ export default function App() {
   const dispatchTask = useCallback(async (
     params: Parameters<typeof startTask>[0],
     previous?: LiveTask,
-    queued?: string[],
-    queuedConfigs?: ExecutionConfig[],
+    queued: string[] | undefined = previous?.queued,
+    queuedConfigs: LiveTask["queuedConfigs"] = previous?.queuedConfigs,
+    queuePaused = previous?.queuePaused,
   ) => {
     await listenersReady.current;
     const taskId = await startTask(params);
@@ -402,11 +433,13 @@ export default function App() {
                 : ""),
               hidden: params.relay === true,
               ts: Date.now(),
+              sourceTaskId: taskId,
+              sourceHarness: params.harness,
             },
             key: nextKey(),
           },
         ],
-        running: true, status: "running", exitCode: null, queued, queuedConfigs,
+        running: true, status: "running", exitCode: null, queued, queuedConfigs, queuePaused,
       },
     }));
     setSelected(taskId);
@@ -422,23 +455,31 @@ export default function App() {
 
   const flushQueued = useCallback(
     (task: LiveTask, text: string, sourceId: string) => {
-      if (deletedTasks.current.has(sourceId) || deletingTasks.current.has(sourceId)) return;
+      if (deletedTasks.current.has(sourceId) || deletingTasks.current.has(sourceId) || drainingQueues.current.has(sourceId)) return;
+      drainingQueues.current.add(sourceId);
+      const config = task.queuedConfigs?.[0];
+      const target = config?.harness ?? task.harness;
       dispatchTask({
-        harness: task.harness,
+        harness: target,
         cwd: task.cwd,
         prompt: text,
-        mode: task.mode,
+        mode: config?.mode ?? task.mode,
         model: task.queuedConfigs?.[0] ? task.queuedConfigs[0].model : task.model ?? null,
         effort: task.queuedConfigs?.[0] ? task.queuedConfigs[0].effort : task.effort ?? null,
-        permission: task.permission ?? "auto",
+        permission: config?.permission ?? task.permission ?? "auto",
+        attachments: config?.attachments ?? [],
         projectId: task.projectId,
-        conversationId: task.conversationId,
-        resumeSessionId: task.sessionId ?? null,
-      }, task, task.queued?.slice(1), task.queuedConfigs?.slice(1))
+        conversationId: task.conversationId ?? sourceId,
+        resumeSessionId: target === task.harness ? task.sessionId ?? null : null,
+      }, task, task.queued?.slice(1), task.queuedConfigs?.slice(1), false)
         .then(() => setLive((prev) => prev[sourceId] ? ({
           ...prev, [sourceId]: { ...prev[sourceId], queued: [], queuedConfigs: [] },
         }) : prev))
-        .catch((e) => setActionError(String(e)));
+        .catch((e) => {
+          setLive((prev) => prev[sourceId] ? { ...prev, [sourceId]: { ...prev[sourceId], queuePaused: true } } : prev);
+          setActionError(`排队消息仍已保留：${String(e)}`);
+        })
+        .finally(() => drainingQueues.current.delete(sourceId));
     },
     [dispatchTask, setLive],
   );
@@ -498,9 +539,10 @@ export default function App() {
       listen<{ taskId: string; code: number | null; status?: TaskRow["status"] }>("task-exit", (e) => {
         const { taskId, code } = e.payload;
         if (deletedTasks.current.has(taskId)) return;
+        const status = e.payload.status ?? (code === 0 ? "done" : code === null ? "cancelled" : "failed");
         enqueueUpdate({
           taskId, running: false, exitCode: code,
-          status: e.payload.status ?? (code === 0 ? "done" : code === null ? "cancelled" : "failed"),
+          status, queuePaused: status !== "done" ? true : undefined,
         });
         flushUpdates();
         const current = liveRef.current[taskId];
@@ -513,7 +555,7 @@ export default function App() {
             `${task.harness}：${task.prompt.slice(0, 40)}`,
           );
           // 队列续发：成功且有会话 → 取队首消息作为续接派发（抄 VK 队列消息）
-          if (code === 0 && !reconfiguringTasks.current.has(taskId) && task.queued && task.queued.length > 0 && task.sessionId) {
+          if (status === "done" && code === 0 && !task.queuePaused && !reconfiguringTasks.current.has(taskId) && task.queued && task.queued.length > 0) {
             const [next] = task.queued;
             flushQueued(task, next, taskId);
           }
@@ -742,25 +784,35 @@ export default function App() {
       const routeModel = atTarget ? atModel ?? targetConfig.model : model.trim() || targetConfig.model;
       const routeEffort = atModel && atModel !== targetConfig.model ? "" : atTarget ? targetConfig.effort : effort || targetConfig.effort;
 
-      // 同执行者运行中排队；其他执行者必须等待当前会话结束。
+      // Preserve the complete intent; harness switches queue just like same-runner followups.
       if (
         selected &&
-        runningTask?.running &&
-        useHarness === runningTask.harness
+        (runningTask?.running || cooperationBusy.current)
       ) {
+        const owner: LiveTask | undefined = runningTask ?? (row ? {
+          harness: row.harness, cwd: row.cwd, prompt: row.prompt, mode: row.mode, model: row.model,
+          permission, projectId: row.project_id, conversationId: row.conversation_id ?? row.id,
+          sessionId: row.session_id ?? undefined, events: (historyEvents[selected] ?? []).map((event) => ({ event, key: nextKey() })),
+          running: false, status: row.status, exitCode: row.exit_code,
+        } : undefined);
+        if (!owner) return false;
         setLive((prev) => ({
           ...prev,
           [selected]: {
-            ...prev[selected],
-            queued: [...(prev[selected].queued ?? []), text],
-            queuedConfigs: [...(prev[selected].queuedConfigs ?? []), {
+            ...owner, ...prev[selected],
+            queued: [...(prev[selected]?.queued ?? []), text],
+            queuedConfigs: [...(prev[selected]?.queuedConfigs ?? []), {
+              harness: useHarness,
+              mode: transferMode(harness, mode, useHarness, permission),
+              permission, attachments: [...attachments],
               // 排队轮保持会话当前的执行配置：routeModel 可能被异步偏好加载清空，
               // 回退到运行中任务的 model（用户点 @deck:fixture:model 后的派发值）
-              model: routeModel || runningTask.model || "",
-              effort: routeEffort || runningTask.effort || "",
+              model: routeModel || (useHarness === owner.harness ? owner.model : "") || "",
+              effort: routeEffort || (useHarness === owner.harness ? owner.effort : "") || "",
             }],
           },
         }));
+        setAttachments([]);
         return true;
       }
       if (runningTask?.running ?? row?.status === "running") {
@@ -829,6 +881,11 @@ export default function App() {
             )?.id ??
             null,
         }, previous);
+        if (selected && previous?.queued?.length) {
+          setLive((prev) => prev[selected] ? {
+            ...prev, [selected]: { ...prev[selected], queued: [], queuedConfigs: [] },
+          } : prev);
+        }
         setAttachments([]);
         setTimeout(() => setActionNotice(null), 3500);
         return true;
@@ -878,7 +935,8 @@ export default function App() {
       setHistory(rows.filter((row) => !deletedTasks.current.has(row.id)));
       const row = rows.find((item) => item.id === taskId);
       const buffered = pendingUpdates.current.get(taskId) ?? [];
-      if (row && (row.status === "running" || buffered.length > 0)) {
+      const savedQueue = loadQueue(taskId);
+      if (row && (row.status === "running" || buffered.length > 0 || savedQueue.queued?.length)) {
         const restored = restoreTask({
           harness: row.harness, cwd: row.cwd, prompt: row.prompt,
           mode: row.mode, model: row.model,
@@ -889,6 +947,7 @@ export default function App() {
           sessionId: row.session_id ?? undefined,
           events: [], running: row.status === "running", status: row.status,
           exitCode: row.exit_code,
+          ...savedQueue,
         }, events.map((event) => ({
           event: { ...event, sourceTaskId: event.sourceTaskId ?? taskId }, key: nextKey(),
         })), buffered);
@@ -989,10 +1048,41 @@ export default function App() {
   const guidedActive = collaborations.some((run) => run.status === "running" &&
     (run.source_task_id === selected || (!!run.conversation_id && run.conversation_id === selectedRow?.conversation_id)));
   const collaborating = activeGraphs.length > 0 || guidedActive;
-  const conversationPhase: ConversationPhase = selected && loadingEvents.has(selected) ? "restoring" :
-    pendingApproval && selectedRunning ? "waiting" :
-    selectedLive?.compacting ? "compacting" : selectedRunning ? "running" : collaborating ? "collaborating" :
-    selectedStatus === "failed" ? "failed" : selectedStatus === "cancelled" ? "cancelled" : "done";
+  cooperationBusy.current = collaborating;
+  const wasCollaborating = useRef({ taskId: selected, active: false });
+  useEffect(() => {
+    const ended = wasCollaborating.current.taskId === selected && wasCollaborating.current.active && !collaborating;
+    wasCollaborating.current = { taskId: selected, active: collaborating };
+    if (ended && selected && !selectedLive?.running && selectedLive?.queued?.length && !selectedLive.queuePaused) {
+      const failed = (graphActivity?.taskId === selected && graphActivity.runs.some((run) => ["failed", "cancelled"].includes(run.status)))
+        || collaborations.some((run) => (run.source_task_id === selected || (!!run.conversation_id && run.conversation_id === selectedRow?.conversation_id))
+          && ["failed", "cancelled"].includes(run.status));
+      if (failed) setLive((prev) => prev[selected] ? { ...prev, [selected]: { ...prev[selected], queuePaused: true } } : prev);
+      else flushQueued(selectedLive, selectedLive.queued[0], selected);
+    }
+  }, [collaborating, selected, selectedLive, flushQueued, graphActivity, collaborations, selectedRow?.conversation_id, setLive]);
+  const controls = conversationState({
+    restoring: !!selected && loadingEvents.has(selected), running: selectedRunning,
+    collaborating, waiting: !!pendingApproval, compacting: !!selectedLive?.compacting,
+    status: selectedStatus, recovery: recoveryStatus?.taskId === selected && recoveryStatus.blocked,
+  });
+  const conversationPhase: ConversationPhase = controls.phase;
+  const stopConversation = () => {
+    if (!selected) return;
+    setLive((prev) => prev[selected] ? { ...prev, [selected]: { ...prev[selected], queuePaused: true } } : prev);
+    const operations: Promise<unknown>[] = [];
+    if (selectedRunning) operations.push(cancelTask(selected));
+    for (const run of activeGraphs) operations.push(cancelGraphRun(run.id));
+    for (const run of collaborations.filter((run) => run.status === "running" &&
+      (run.source_task_id === selected || (!!run.conversation_id && run.conversation_id === selectedRow?.conversation_id)))) {
+      operations.push(cancelCollaboration(run.id));
+    }
+    void Promise.allSettled(operations).then((results) => {
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (errors.length) setActionError(errors.map((error) => String(error.reason)).join("\n"));
+      refreshHistory(); bumpGraphs();
+    });
+  };
   const activityLabel = selectedLive?.todos?.find((todo) => todo.status === "in_progress")?.content ??
     `${selectedHarness} 正在处理任务`;
   // 轮次产出：任务结束后拉取改动文件与生成工件
@@ -1001,18 +1091,30 @@ export default function App() {
     data: Awaited<ReturnType<typeof getTurnArtifacts>>;
   } | null>(null);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const artifactsTaskRef = useRef<string | null>(null);
-  const fetchTurnArtifacts = useCallback(async (taskId: string) => {
+  const artifactsGeneration = useRef(0);
+  const artifactsSelection = useRef(selected);
+  artifactsSelection.current = selected;
+  const fetchTurnArtifacts = useCallback(async (taskId: string, background = false) => {
     if (artifactsTaskRef.current === taskId) return;
     artifactsTaskRef.current = taskId;
-    setArtifactsLoading(true);
+    const generation = ++artifactsGeneration.current;
+    const current = () => generation === artifactsGeneration.current && artifactsSelection.current === taskId;
+    // 运行中的轮询不插入加载行，避免对话底部每四秒跳动。
+    setArtifactsLoading(!background);
     try {
       const data = await getTurnArtifacts(taskId);
+      if (!current()) return;
       setTurnArtifacts({ taskId, data });
-    } catch {
-      setTurnArtifacts(null);
+      setArtifactsError(null);
+    } catch (error) {
+      if (!current()) return;
+      // 短暂刷新失败时保留已展示的成果，下一轮轮询会重试。
+      setTurnArtifacts((previous) => previous?.taskId === taskId ? previous : null);
+      setArtifactsError(String(error));
     } finally {
-      setArtifactsLoading(false);
+      if (current()) setArtifactsLoading(false);
     }
   }, []);
   const refreshTurnArtifacts = useCallback(() => {
@@ -1023,28 +1125,34 @@ export default function App() {
   }, [selected, fetchTurnArtifacts]);
 
   useEffect(() => {
+    artifactsTaskRef.current = null;
+    setArtifactsError(null);
     if (!selected) {
+      ++artifactsGeneration.current;
+      setArtifactsLoading(false);
       setTurnArtifacts(null);
       artifactsTaskRef.current = null;
       return;
     }
     // 运行中：定时刷新本轮产出——文件的删除/修改一发生就能看到（不必等任务结束）
     if (selectedRunning) {
-      void fetchTurnArtifacts(selected);
+      void fetchTurnArtifacts(selected, true);
       const timer = setInterval(() => {
         artifactsTaskRef.current = null;
-        void fetchTurnArtifacts(selected);
+        void fetchTurnArtifacts(selected, true);
       }, 4000);
       return () => clearInterval(timer);
     }
-    // 结束：非成功/失败态清掉面板
-    if (!["done", "failed"].includes(selectedStatus ?? "")) {
+    // 结束后再次收集最终快照，取消前的成果同样保留。
+    if (!["done", "failed", "cancelled"].includes(selectedStatus ?? "")) {
+      ++artifactsGeneration.current;
+      setArtifactsLoading(false);
       setTurnArtifacts(null);
       artifactsTaskRef.current = null;
       return;
     }
-    if (turnArtifacts?.taskId !== selected) fetchTurnArtifacts(selected);
-  }, [selected, selectedRunning, selectedStatus, turnArtifacts, fetchTurnArtifacts]);
+    void fetchTurnArtifacts(selected);
+  }, [selected, selectedRunning, selectedStatus, fetchTurnArtifacts]);
 
   const hasAuthError = selectedEvents.some(
     ({ event: e }) => e.type === "error" && e.kind === "auth",
@@ -1121,6 +1229,7 @@ export default function App() {
       const removed = new Set(ids);
       for (const taskId of ids) {
         deletedTasks.current.add(taskId);
+        forgetSession(taskId);
         deletingTasks.current.delete(taskId);
         clearApproval(taskId);
         sessionIds.current.delete(taskId);
@@ -1363,12 +1472,35 @@ export default function App() {
             className="task-view flex min-h-0 flex-1 flex-col"
           >
             <ConversationStatus phase={conversationPhase} harness={selectedHarness}
-              detail={conversationPhase === "running" ? activityLabel :
+              detail={conversationPhase === "recovery" ? recoveryStatus?.summary : conversationPhase === "running" ? activityLabel :
                 conversationPhase === "waiting" ? "请处理下方请求，任务随后继续" :
                 collaborating ? "进展、关系图与成果见对话下方" : undefined}
               queued={selectedLive?.queued?.length ?? 0} detailsOpen={detailsOpen}
               onDetails={() => setDetailsOpen((value) => !value)} />
-            <div className="task-controls" hidden={!detailsOpen && selectedStatus !== "failed" && !collaborations.some((item) => item.source_task_id === selected && item.status === "running")}>
+            <aside className="task-controls" aria-label="任务详情" hidden={!detailsOpen}>
+            <div className="inspector-heading">
+              <strong>任务详情</strong>
+              <button className="icon-button" aria-label="关闭任务详情" onClick={() => setDetailsOpen(false)}><X size={16} /></button>
+            </div>
+            <nav className="inspector-tabs" aria-label="详情分类">
+              {([["settings", "任务与设置"], ["files", "文件变更"], ["collaboration", "指挥与协作"]] as const).map(([tab, label]) =>
+                <button key={tab} aria-pressed={detailsTab === tab} onClick={() => setDetailsTab(tab)}>{label}</button>)}
+            </nav>
+            {detailsOpen && detailsTab === "files" && <div>
+              {artifactsError && <div className="context-error" role="alert">文件列表暂时无法更新：{artifactsError}
+                <button className="context-command" onClick={refreshTurnArtifacts}>重试</button></div>}
+              {artifactsFooter}
+              {!artifactsLoading && !artifactsError && turnArtifacts?.taskId === selected
+                && !turnArtifacts.data.files.length && !turnArtifacts.data.artifacts.length
+                && <p className="inspector-empty">本轮暂未发现文件变更或产出。</p>}
+            </div>}
+            <div hidden={detailsTab !== "collaboration"}>
+              <CollaborationInspector runs={detailsOpen && detailsTab === "collaboration" && graphActivity?.taskId === selected ? graphActivity.runs : []}
+                guided={detailsOpen && detailsTab === "collaboration" ? collaborations.filter((run) =>
+                  run.source_task_id === selected || (!!run.conversation_id && run.conversation_id === selectedRow?.conversation_id)) : []}
+                onViewTask={viewTask} onChanged={bumpGraphs} />
+            </div>
+            <div hidden={detailsTab !== "settings"}>
             <div className="task-metadata">
               <button
                 onClick={() => setSelected(null)}
@@ -1442,18 +1574,6 @@ export default function App() {
                      className="task-action"
                    >
                      <RotateCcw size={13} />重试
-                  </button>
-                )}
-                {hasAuthError && !selectedRunning && (
-                  <button
-                    onClick={() =>
-                       (selectedHarness === "deck" ? Promise.resolve(setSettingsOpen(true)) : runLogin(selectedHarness))
-                         .catch((e) => setActionError(String(e)))
-                    }
-                    className="flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1 font-medium text-amber-700 transition-colors hover:bg-amber-100"
-                  >
-                    <IconKey size={13} />
-                     {selectedHarness === "deck" ? "检查模型配置" : "唤起登录"}
                   </button>
                 )}
                 {hasModelError && !selectedRunning && (
@@ -1606,7 +1726,7 @@ export default function App() {
                 中断任务可能是 failed 也可能是 cancelled，恢复锁不挑状态。 */}
             {selectedRow && (
               <Suspense fallback={<div role="status">加载上下文…</div>}>
-                <ConversationContext taskId={selectedRow.id} onRecovered={() => { refreshHistory(); bumpGraphs(); }} />
+                <ConversationContext taskId={selectedRow.id} onRecovered={() => { refreshHistory(); bumpGraphs(); }} onRecoveryChange={updateRecoveryStatus} />
               </Suspense>
             )}
             {collaborations.filter((item) => item.source_task_id === selected
@@ -1636,6 +1756,20 @@ export default function App() {
             ))}
             </div>
 
+            </aside>
+            <div className="conversation-prompts">
+            {hasAuthError && !selectedRunning && <div className="recovery-summary">
+              <span>运行失败，请检查模型配置或登录状态。已生成的回复会保留。</span>
+              <button className="context-command" onClick={() =>
+                (selectedHarness === "deck" ? Promise.resolve(setSettingsOpen(true)) : runLogin(selectedHarness))
+                  .catch((e) => setActionError(String(e)))}>
+                <IconKey size={13} />{selectedHarness === "deck" ? "检查模型配置" : "唤起登录"}
+              </button>
+            </div>}
+            {recoveryStatus?.taskId === selected && recoveryStatus.blocked && <div className="recovery-summary" role="status">
+              <span>{recoveryStatus.summary}</span>
+              <button className="context-command" onClick={() => { setDetailsTab("settings"); setDetailsOpen(true); }}>查看恢复详情</button>
+            </div>}
             {/* 审批卡片：工具授权；ask_user_question 渲染为选项式提问（抄 ZCode AskUserQuestion） */}
             {approval && selectedRunning && (
               <div className="approval-surface anim-pop mx-6 mt-2 rounded-xl border border-amber-300 bg-amber-50/70 p-3">
@@ -1812,13 +1946,20 @@ export default function App() {
               </div>
             )}
 
+            </div>
             {/* 消息、协作成果和文件共用滚动区；等待回应或压缩时隐藏重复的执行指示。 */}
-            <ConversationTimeline key={conversationKey} events={selectedEvents} running={selectedRunning}
+             <ConversationTimeline key={conversationKey} positionKey={conversationKey} events={selectedEvents} running={selectedRunning}
               blocked={!!approval || !!selectedLive?.compacting}
               activity={activityLabel}
               loading={!!selected && loadingEvents.has(selected)} footer={<>
                 {selected && <CollaborationResults taskId={selected} refreshKey={graphRefresh} onViewTask={viewTask} onRuns={updateGraphActivity} />}
-                {artifactsFooter}
+                {!(detailsOpen && detailsTab === "files") && artifactsFooter}
+                <div className="timeline-inspect-actions">
+                  {turnArtifacts?.taskId === selected && !!(turnArtifacts.data?.files.length || turnArtifacts.data?.artifacts.length) &&
+                    <button onClick={() => { setDetailsTab("files"); setDetailsOpen(true); }}>查看文件详情</button>}
+                  {graphActivity?.taskId === selected && graphActivity.runs.length > 0 &&
+                    <button onClick={() => { setDetailsTab("collaboration"); setDetailsOpen(true); }}>打开指挥与协作面板</button>}
+                </div>
               </>} />
           </MotionLayer>
         )}
@@ -1857,18 +1998,29 @@ export default function App() {
           )}
           {selected && selectedLive?.queued && selectedLive.queued.length > 0 && (
             <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 pb-1.5 text-xs">
-              <span className="text-stone-400">待发送消息（{selectedLive.queued.length}）· 结束后自动续发：</span>
+              <span className="text-stone-400">待发送消息（{selectedLive.queued.length}）· {selectedLive.queuePaused || !selectedRunning && !collaborating ? "已暂停，等待继续" : "结束后自动续发"}：</span>
+              {!selectedRunning && !collaborating && <button className="context-command"
+                onClick={() => flushQueued(selectedLive, selectedLive.queued![0], selected)}>继续队列</button>}
               {selectedLive.queued.map((q, i) => (
                 <div
                   key={i}
                   className="flex items-center gap-1 rounded-full border border-stone-200 px-2 py-0.5 text-stone-500"
                 >
-                  <span className="max-w-48 truncate">{q}</span>
+                  <span className="text-stone-400">{selectedLive.queuedConfigs?.[i]?.harness ?? selectedLive.harness} · </span>
+                  <span className="max-w-48 truncate" title={q}>{q}</span>
                   {!q.trim().startsWith("/") && (
                     <button
                       onClick={() => {
                         // 编辑 = 撤回完整输入意图到 composer（ZCode 队列语义），非原地改
                         setQueuedWithdraw({ text: q, version: (queuedWithdraw?.version ?? 0) + 1 });
+                        const config = selectedLive.queuedConfigs?.[i];
+                        const target = config?.harness ?? selectedLive.harness;
+                        setHarness(target);
+                        setModel(config?.model ?? selectedLive.model ?? "");
+                        setEffort(config?.effort ?? selectedLive.effort ?? "");
+                        setMode(config?.mode ?? selectedLive.mode ?? "default");
+                        setPermission(config?.permission ?? selectedLive.permission ?? "auto");
+                        setAttachments(config?.attachments ?? []);
                         setLive((prev) => {
                           const t = prev[selected];
                           if (!t) return prev;
@@ -1889,13 +2041,13 @@ export default function App() {
                       <PenLine size={12} />
                     </button>
                   )}
-                  <ExecutionPicker harness={selectedLive.harness} taskId={executionScope}
+                  <ExecutionPicker harness={selectedLive.queuedConfigs?.[i]?.harness ?? selectedLive.harness} taskId={executionScope}
                     value={selectedLive.queuedConfigs?.[i] ?? { model: selectedLive.model ?? "", effort: selectedLive.effort ?? "" }}
                     label={`排队 ${i + 1} `} allowInherit={false} onChange={(config) => setLive((prev) => {
                       const task = prev[selected];
                       if (!task?.queued?.[i]) return prev;
                       const configs = task.queued.map((_, index) => task.queuedConfigs?.[index] ?? { model: task.model ?? "", effort: task.effort ?? "" });
-                      configs[i] = config;
+                      configs[i] = { ...configs[i], ...config };
                       return { ...prev, [selected]: { ...task, queuedConfigs: configs } };
                     })} />
                   <button
@@ -1924,8 +2076,8 @@ export default function App() {
             </div>
           )}
           <Composer
-            attachments={attachments} onAttach={(paths) => setAttachments((prev) => [...prev, ...paths])} onRemoveAttachment={(p) => setAttachments((prev) => prev.filter((x) => x !== p))} draftKey={conversationKey}
-            onStop={stopSelected}
+            attachments={attachments} onAttach={(paths) => setAttachments((prev) => [...prev, ...paths])} onRemoveAttachment={(p) => setAttachments((prev) => prev.filter((x) => x !== p))} draftKey={selected ? conversationKey : `new:${directoryKey(cwd)}`}
+            onStop={stopConversation}
             cwd={cwd}
             onCwdChange={setCwd}
             projects={projects}
@@ -1950,9 +2102,9 @@ export default function App() {
               void setSetting("composer_permission", v).catch(() => {});
             }}
             onSend={handleSend}
-            running={selectedRunning}
+            running={controls.canStop}
             activeHarness={selectedHarness}
-            blockedReason={!selectedRunning && collaborating ? "协作正在使用工作区；请等待结束，或在成果区停止协作" : undefined}
+            blockedReason={!selectedRunning && collaborating ? "补充要求会保存到队列，协作结束后继续" : undefined}
             responseMode={approval && "__question" in approval.args ? "answer" :
               approval && "__form" in approval.args ? "form" :
               approval ? "approval" : undefined}

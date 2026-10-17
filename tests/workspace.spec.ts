@@ -75,7 +75,9 @@ test("new events do not pull the reader down and expanding tools follows at the 
   });
   await expect(page.locator(".message-assistant")).toHaveCount(70);
   await expect.poll(() => page.locator(".log-scroll").evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(3);
-  await page.locator(".log-scroll").evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")); });
+  await page.locator(".log-scroll").hover();
+  await page.mouse.wheel(0, -10000);
+  await expect.poll(() => page.locator(".log-scroll").evaluate((el) => el.scrollTop)).toBeLessThan(3);
   await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
   await page.evaluate(() => (window as unknown as { __emit: (event: string, payload: unknown) => void }).__emit("task-event", {
     taskId: "new-task", event: { type: "assistant_message", text: "latest-message" },

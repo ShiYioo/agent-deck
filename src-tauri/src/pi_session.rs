@@ -126,6 +126,7 @@ pub async fn run_pi_task(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("启动 deck-agent 失败：{e}"))?;
+    crate::recovery::track(&store, &task_id, child.inner().id());
 
     let mut stdin = child.inner().stdin.take().ok_or("no stdin")?;
     let stdout = child.inner().stdout.take().ok_or("no stdout")?;

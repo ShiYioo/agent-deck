@@ -106,7 +106,7 @@ export function TurnArtifactsPanel({
   onUndo: (f: TurnFileChange) => void;
   onOpen: (path: string, reveal: boolean) => void;
 }) {
-  if (loading) {
+  if (loading && !data) {
     return (
       <div className="turn-artifacts flex items-center gap-2 text-xs text-stone-400">
         <LoaderCircle size={13} className="animate-spin" />

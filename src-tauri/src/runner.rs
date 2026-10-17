@@ -193,15 +193,29 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                     if let AgentEvent::SessionId { id } = &event {
                         let _ = store.set_session_id(task_id, id);
                     }
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        let _ = store.append_event(task_id, &json);
+                    if let Ok(mut value) = serde_json::to_value(&event) {
+                        if matches!(event, AgentEvent::ToolUse { .. } | AgentEvent::ToolResult { .. }) {
+                            if let Some(id) = tool_call_id(trimmed) {
+                                value["callId"] = serde_json::Value::String(id);
+                            }
+                        }
+                        let _ = store.append_event(task_id, &value.to_string());
+                        let _ = app.emit("task-event", serde_json::json!({ "taskId": task_id, "event": value }));
                     }
-                    emit_task_event(app, task_id, &event);
                 }
             }
         }
     }
     failed
+}
+
+fn tool_call_id(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    [
+        "/properties/part/callID", "/part/callID", "/part/callId",
+        "/item/id", "/toolCallId", "/callID", "/call_id",
+        "/payload/toolCallId", "/properties/toolCallId", "/data/toolCallId", "/id",
+    ].into_iter().find_map(|path| value.pointer(path).and_then(|id| id.as_str()).map(str::to_string))
 }
 
 /// 主循环：并行读 stdout/stderr，结束后回写退出码并通知前端。
@@ -322,6 +336,17 @@ fn terminal_status(code: Option<i32>, cancelled: bool, failed: bool) -> &'static
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_tool_call_identity_survives_each_adapter_envelope() {
+        for (raw, expected) in [
+            (r#"{"type":"message.part.updated","properties":{"part":{"callID":"oc-1"}}}"#, "oc-1"),
+            (r#"{"type":"item.completed","item":{"id":"cx-2"}}"#, "cx-2"),
+            (r#"{"kind":"tool_result","id":"zc-3"}"#, "zc-3"),
+        ] {
+            assert_eq!(super::tool_call_id(raw).as_deref(), Some(expected));
+        }
+        assert_eq!(super::tool_call_id(r#"{"kind":"tool_use","tool":{"name":"read"}}"#), None);
+    }
     use super::*;
 
     #[tokio::test]

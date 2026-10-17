@@ -98,6 +98,7 @@ export type ConversationInfo = {
 };
 export type RecoveryCheck = {
   safe: boolean;
+  can_confirm: boolean;
   active_processes: string[];
   workspace_changed: boolean;
   workspace_path: string;

@@ -1,11 +1,12 @@
 import { Check, Circle, LoaderCircle, Pause, AlertCircle, ChevronDown } from "lucide-react";
 import { HarnessIcon } from "./HarnessIcon";
 
-export type ConversationPhase = "restoring" | "waiting" | "compacting" | "running" | "collaborating" | "done" | "failed" | "cancelled";
+export type ConversationPhase = "restoring" | "recovery" | "waiting" | "compacting" | "running" | "collaborating" | "done" | "failed" | "cancelled";
 const labels: Record<ConversationPhase, string> = {
   restoring: "恢复对话", waiting: "需要你的回应", compacting: "整理上下文",
   running: "正在执行", done: "本轮已完成", failed: "执行遇到问题", cancelled: "已停止",
   collaborating: "协作进行中",
+  recovery: "正在核对恢复环境",
 };
 export function ConversationStatus({ phase, harness, detail, queued, detailsOpen, onDetails }: {
   phase: ConversationPhase; harness: string; detail?: string; queued: number;

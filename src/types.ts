@@ -4,8 +4,8 @@ export type AgentEvent = (
   | { type: "user_message"; text: string; hidden?: boolean }
   | { type: "assistant_message"; text: string; streamId?: string; streaming?: boolean }
   | { type: "thinking"; text: string; streamId?: string; streaming?: boolean; durationMs?: number }
-  | { type: "tool_use"; tool: string; detail: string; args?: Record<string, unknown> }
-  | { type: "tool_result"; tool: string; ok: boolean; detail: string; added?: number; removed?: number }
+  | { type: "tool_use"; tool: string; callId?: string; detail: string; args?: Record<string, unknown> }
+  | { type: "tool_result"; tool: string; callId?: string; ok: boolean; detail: string; added?: number; removed?: number }
   | { type: "status"; text: string; retryKey?: string | null; compacting?: boolean }
   | {
       type: "complete";
@@ -112,6 +112,7 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
     return {
       type: "tool_use",
       tool,
+      callId: typeof ev.toolCallId === "string" ? ev.toolCallId : undefined,
       detail,
       args: args && typeof args === "object" ? (args as Record<string, unknown>) : undefined,
     };
@@ -133,6 +134,7 @@ export function piEventToAgentEvent(ev: PiEvent): AgentEvent | null {
     return {
       type: "tool_result",
       tool: String(ev.toolName ?? "tool"),
+      callId: typeof ev.toolCallId === "string" ? ev.toolCallId : undefined,
       ok: !ev.isError && !out?.isError,
       detail: body.slice(0, 20_000),
       added: counts.added,
@@ -250,7 +252,10 @@ export type LiveTask = {
   sessionId?: string;
   /** 运行中排队的后续消息（任务结束自动续发） */
   queued?: string[];
-  queuedConfigs?: import("./api").ExecutionConfig[];
+  queuedConfigs?: (import("./api").ExecutionConfig & {
+    harness?: string; mode?: string | null; permission?: string | null; attachments?: string[];
+  })[];
+  queuePaused?: boolean;
   /** deck 运行时的 todo 清单（todo_write 工具维护） */
   todos?: { content: string; status: string }[];
   /** 上下文用量（ZCode 式徽标）：used = 当前占用 token，window = 上下文窗口（空=未知），

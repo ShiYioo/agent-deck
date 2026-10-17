@@ -15,6 +15,7 @@ export type ConversationRow =
       kind: "tool";
       key: number;
       tool: string;
+      callId?: string;
       status: ToolStatus;
       /** 工具入参投影（命令/问题文本/路径等） */
       detail?: string;
@@ -98,7 +99,9 @@ function retryAttempt(text: string): number | null {
 export function buildConversation(items: { event: AgentEvent; key: number }[]): ConversationRow[] {
   const rows: ConversationRow[] = [];
   // 进行中的工具调用：tool → 行下标（tool_result 就地收口；无 id 的流按工具名配对）
-  const openByTool = new Map<string, number>();
+  const openByTool = new Map<string, number[]>();
+  const byCall = new Map<string, number>();
+  const scope = (event: AgentEvent, name: string) => JSON.stringify([event.sourceTaskId ?? "", name]);
   let prevTs: number | null = null;
   let turnStart: number | null = null;
 
@@ -106,6 +109,7 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
     const ev = event as AgentEvent & { ts?: number; durationMs?: number };
     switch (ev.type) {
       case "user_message":
+        openByTool.clear();
         if (!ev.hidden && ev.ts) turnStart = ev.ts;
         rows.push({ kind: "user", key, text: ev.text, hidden: !!ev.hidden, sourceHarness: ev.sourceHarness });
         break;
@@ -124,28 +128,45 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
         const isQuestion = !!ev.args?.questions;
         const args = ev.args;
         const isCommand = !isQuestion && (isCommandTool(ev.tool) || typeof args?.command === "string");
+        const identity = ev.callId ? scope(ev, ev.callId) : undefined;
+        const existing = identity ? byCall.get(identity) : undefined;
+        if (existing !== undefined && rows[existing]?.kind === "tool") {
+          const previous = rows[existing] as ToolRow;
+          previous.args = args ?? previous.args;
+          previous.detail = ev.detail || previous.detail;
+          previous.target = fileTarget(previous.args);
+          previous.isQuestion = !!previous.args?.questions;
+          previous.isCommand = !previous.isQuestion && (isCommandTool(ev.tool) || typeof previous.args?.command === "string");
+          break;
+        }
         const row: ToolRow = {
           kind: "tool", key, tool: ev.tool, status: "running",
+          callId: ev.callId,
           detail: ev.detail || undefined, args, isCommand, isQuestion,
           target: isCommand ? undefined : fileTarget(args),
         };
         rows.push(row);
-        openByTool.set(ev.tool, rows.length - 1);
+        if (identity) byCall.set(identity, rows.length - 1);
+        else {
+          const name = scope(ev, ev.tool);
+          openByTool.set(name, [...(openByTool.get(name) ?? []), rows.length - 1]);
+        }
         break;
       }
       case "tool_result": {
-        const openIndex = openByTool.get(ev.tool);
+        const identity = ev.callId ? scope(ev, ev.callId) : undefined;
+        const openIndex = identity ? byCall.get(identity) : openByTool.get(scope(ev, ev.tool))?.shift();
         if (openIndex !== undefined && rows[openIndex]?.kind === "tool") {
           const row = rows[openIndex] as ToolRow;
           row.status = ev.ok ? "completed" : "failed";
           row.output = ev.detail;
           row.added = ev.added;
           row.removed = ev.removed;
-          openByTool.delete(ev.tool);
         } else {
           // 无前置 tool_use（CLI 平铺/回放缺事件）：合成完整行
           rows.push({
             kind: "tool", key, tool: ev.tool,
+             callId: ev.callId,
             status: ev.ok ? "completed" : "failed",
             output: ev.detail,
             added: ev.added,
@@ -153,6 +174,7 @@ export function buildConversation(items: { event: AgentEvent; key: number }[]): 
             isCommand: isCommandTool(ev.tool),
             isQuestion: false,
           });
+          if (identity) byCall.set(identity, rows.length - 1);
         }
         break;
       }
@@ -257,7 +279,7 @@ function rowTargets(row: ToolRow): string | null {
   return null;
 }
 
-export function foldToolRows(rows: ConversationRow[]): DisplayRow[] {
+export function foldToolRows(rows: ConversationRow[], activeFromKey?: number): DisplayRow[] {
   const out: DisplayRow[] = [];
   let seg: ConversationRow[] = [];
   const flush = (keepTrailingThought: boolean) => {
@@ -286,7 +308,7 @@ export function foldToolRows(rows: ConversationRow[]): DisplayRow[] {
     }
     if (tools.length >= TOOL_RUN_MIN) {
       out.push({
-        kind: "segment", rows: tools, thoughts: tail,
+        kind: "segment", rows: tools, thoughts: seg.filter((row) => row.kind === "thought"),
         uses: [...uses.entries()].map(([tool, n]) => {
           const targets = files.get(tool);
           // 摘要里点名文件（最多 2 个）——"改了/删了哪些文件"不该只有个数字
@@ -302,6 +324,12 @@ export function foldToolRows(rows: ConversationRow[]): DisplayRow[] {
     seg = [];
   };
   for (const row of rows) {
+    // Keep the active turn in place. Regroup only after it settles, never after each tool completion.
+    if (activeFromKey !== undefined && row.key >= activeFromKey) {
+      flush(false);
+      out.push({ kind: "single", row });
+      continue;
+    }
     if (foldable(row)) {
       seg.push(row);
     } else {

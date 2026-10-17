@@ -12,6 +12,7 @@ mod orchestration;
 mod pi_session;
 mod plan_launch;
 mod runner;
+mod recovery;
 mod store;
 mod worktree;
 
@@ -871,6 +872,7 @@ pub(crate) async fn start_task_impl(
             },
         );
 
+    recovery::track(&store, &task_id, child_pid(&registry, &task_id));
     let reg = registry.0.clone();
     let store2 = store.clone_handle();
     let task_id2 = task_id.clone();
@@ -942,66 +944,40 @@ fn update_conversation_state(
 }
 
 #[tauri::command]
-fn confirm_conversation_recovery(
+async fn confirm_conversation_recovery(
     store: State<'_, Store>,
+    registry: State<'_, TaskRegistry>,
     task_id: String,
     confirmed: bool,
 ) -> Result<(), String> {
     if !confirmed {
         return Err("请先确认旧执行者已结束并核对工作区".into());
     }
-    store.confirm_recovery(&task_id)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-struct RecoveryCheck {
-    safe: bool,
-    active_processes: Vec<String>,
-    workspace_changed: bool,
-    workspace_path: String,
-    summary: String,
+    let store = store.clone_handle();
+    let registry = registry.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let check = recovery::inspect(&store, &registry, &task_id)?;
+        if !check.can_confirm {
+            return Err(check.summary);
+        }
+        store.confirm_recovery(&task_id)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn inspect_conversation_recovery(
+async fn inspect_conversation_recovery(
     store: State<'_, Store>,
     registry: State<'_, TaskRegistry>,
     task_id: String,
-) -> Result<RecoveryCheck, String> {
-    let task = store.get_task(&task_id)?.ok_or("任务不存在")?;
-    let active_processes = registry
-        .0
-        .lock()
-        .map_err(|_| "task registry poisoned")?
-        .get(&task_id)
-        .map(|running| vec![running.label.clone()])
-        .unwrap_or_default();
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=all"])
-        .current_dir(&task.cwd)
-        .output();
-    let workspace_changed = output
-        .as_ref()
-        .map(|value| value.status.success() && !value.stdout.is_empty())
-        .unwrap_or(false);
-    let safe = active_processes.is_empty() && !workspace_changed && output.is_ok();
-    let summary = if !active_processes.is_empty() {
-        format!("仍有受管执行进程运行：{}", active_processes.join("、"))
-    } else if workspace_changed {
-        "工作区存在未提交改动，已暂停自动恢复以避免覆盖成果".into()
-    } else if output.is_err() {
-        "无法读取工作区状态，请手动核对后恢复".into()
-    } else {
-        "已确认旧执行进程结束，工作区没有未提交改动".into()
-    };
-    Ok(RecoveryCheck {
-        safe,
-        active_processes,
-        workspace_changed,
-        workspace_path: task.cwd,
-        summary,
-    })
+) -> Result<recovery::RecoveryCheck, String> {
+    let store = store.clone_handle();
+    let registry = registry.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || recovery::inspect(&store, &registry, &task_id))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn child_pid(registry: &TaskRegistry, task_id: &str) -> Option<u32> {
+    registry.0.lock().ok()?.get_mut(task_id)?.child.as_mut()?.inner().id()
 }
 
 #[tauri::command]
